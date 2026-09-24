@@ -9,6 +9,16 @@ describe('CryptoUtils', () => {
       expect(result).toHaveLength(length);
     });
 
+    it('should return an empty string for zero length', () => {
+      expect(CryptoUtils.generateRandomString(0)).toBe('');
+    });
+
+    it.each([-1, 1.5, Number.MAX_SAFE_INTEGER + 1])('should reject invalid length %s', (length) => {
+      expect(() => CryptoUtils.generateRandomString(length)).toThrow(
+        'length must be a non-negative safe integer',
+      );
+    });
+
     it('should generate different strings on subsequent calls', () => {
       const str1 = CryptoUtils.generateRandomString(32);
       const str2 = CryptoUtils.generateRandomString(32);

@@ -13,6 +13,10 @@ export const CryptoUtils = {
    * @returns A secure random string.
    */
   generateRandomString(length: number): string {
+    if (!Number.isSafeInteger(length) || length < 0) {
+      throw new TypeError('length must be a non-negative safe integer');
+    }
+
     const charset = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
     let result = '';
     const randomValues = new Uint32Array(length);
