@@ -254,7 +254,14 @@ function validateAsset(asset: unknown): asset is Asset {
 export const ValidationUtils = {
   isValidEmail(email: string): boolean {
     const emailRegex = /^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/;
-    return emailRegex.test(email);
+    if (!emailRegex.test(email)) return false;
+
+    const [localPart, domain] = email.split('@');
+    if (localPart.startsWith('.') || localPart.endsWith('.') || localPart.includes('..')) {
+      return false;
+    }
+
+    return !domain.startsWith('.') && !domain.endsWith('.') && !domain.includes('..');
   },
 
   isValidPhoneNumber(phone: string): boolean {
