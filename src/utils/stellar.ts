@@ -118,6 +118,11 @@ export const StellarUtils = {
       throw new Error('amount must be a positive finite decimal string');
     }
 
+    const fractionalPart = amount.split('.')[1];
+    if (fractionalPart !== undefined && fractionalPart.length > 7) {
+      throw new Error('amount must have at most 7 decimal places');
+    }
+
     if (!isValidPaymentAccountAddress(source)) {
       throw new Error('source must be a valid Stellar public or muxed public key');
     }
