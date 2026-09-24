@@ -54,6 +54,22 @@ describe('CryptoUtils', () => {
       expect(decoded.iat).toBeDefined();
     });
 
+    it.each(['', '   ', '\t\n'])('should reject blank signing secret %j', async (blankSecret) => {
+      await expect(CryptoUtils.generateJwt(payload, blankSecret)).rejects.toThrow(
+        'secret must not be empty',
+      );
+    });
+
+    it.each(['', '   ', '\t\n'])(
+      'should reject blank verification secret %j',
+      async (blankSecret) => {
+        const token = await CryptoUtils.generateJwt(payload, secret);
+        await expect(CryptoUtils.verifyJwt(token, blankSecret)).rejects.toThrow(
+          'secret must not be empty',
+        );
+      },
+    );
+
     it('should work with expiration time', async () => {
       const token = await CryptoUtils.generateJwt(payload, secret, { expiresIn: '1h' });
       const decoded = await CryptoUtils.verifyJwt(token, secret);
