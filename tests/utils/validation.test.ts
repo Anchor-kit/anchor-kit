@@ -54,6 +54,25 @@ describe('Asset Validation (#254)', () => {
     expect(() => anchor.validate()).not.toThrow();
   });
 
+  it.each([' USDC', 'USDC ', '\tUSDC', 'USDC\n'])(
+    'should reject whitespace-padded asset code %j',
+    (code) => {
+      const config: AnchorKitConfig = {
+        ...baseConfig,
+        assets: { assets: [{ code, issuer: baseConfig.assets.assets[0].issuer }] },
+      };
+      expect(() => new AnchorConfig(config).validate()).toThrow(/Invalid asset at index 0/);
+    },
+  );
+
+  it.each(['usdc', 'USDC', 'UsdC'])('should accept unpadded mixed-case asset code %s', (code) => {
+    const config: AnchorKitConfig = {
+      ...baseConfig,
+      assets: { assets: [{ code, issuer: baseConfig.assets.assets[0].issuer }] },
+    };
+    expect(() => new AnchorConfig(config).validate()).not.toThrow();
+  });
+
   it('should reject asset with empty code string', () => {
     const config: AnchorKitConfig = {
       ...baseConfig,
