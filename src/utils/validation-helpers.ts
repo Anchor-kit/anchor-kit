@@ -283,9 +283,8 @@ export const ValidationUtils = {
 
   isValidStellarAddress(address: string): boolean {
     if (!address || typeof address !== 'string') return false;
-    // The shape regex alone lets 56-character values with an invalid StrKey
-    // checksum through, so verify the checksum via the Stellar SDK as well.
-    return StrKey.isValidEd25519PublicKey(address);
+    // Account addresses may be classic Ed25519 keys or muxed account addresses.
+    return StrKey.isValidEd25519PublicKey(address) || StrKey.isValidMed25519PublicKey(address);
   },
 
   isValidDatabaseUrl(urlString: string): boolean {

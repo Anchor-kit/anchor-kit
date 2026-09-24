@@ -1,6 +1,7 @@
 import { AnchorConfig } from '@/core/config';
 import type { AnchorKitConfig } from '@/types/config';
 import { ValidationUtils } from '@/utils/validation';
+import { encodeMuxedAccount, encodeMuxedAccountToAddress } from '@stellar/stellar-sdk';
 import { describe, expect, it } from 'vitest';
 
 describe('Asset Validation (#254)', () => {
@@ -368,6 +369,17 @@ describe('Stellar Address Checksum Validation (#386)', () => {
   it('should return false for a regex-shaped key with a bad checksum', () => {
     expect(BAD_CHECKSUM_KEY).toMatch(/^G[A-Z2-7]{55}$/);
     expect(ValidationUtils.isValidStellarAddress(BAD_CHECKSUM_KEY)).toBe(false);
+  });
+
+  it('should accept a valid muxed account address', () => {
+    const muxed = encodeMuxedAccountToAddress(encodeMuxedAccount(VALID_PUBLIC_KEY, '42'), true);
+    expect(ValidationUtils.isValidStellarAddress(muxed)).toBe(true);
+  });
+
+  it('should reject a checksum-invalid muxed account address', () => {
+    const muxed = encodeMuxedAccountToAddress(encodeMuxedAccount(VALID_PUBLIC_KEY, '42'), true);
+    const replacement = muxed.endsWith('A') ? 'B' : 'A';
+    expect(ValidationUtils.isValidStellarAddress(muxed.slice(0, -1) + replacement)).toBe(false);
   });
 
   it('should return false for empty or non-string input', () => {
