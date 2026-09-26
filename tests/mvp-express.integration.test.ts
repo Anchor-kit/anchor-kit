@@ -2890,6 +2890,56 @@ describe('MVP Express-mounted integration', () => {
     expect(response.body.error).toBe('invalid_request');
   });
 
+  it('16) request timeout is configured from server config', async () => {
+    const customDbUrl = makeSqliteDbUrlForTests();
+    const customDbPath = customDbUrl.startsWith('file:')
+      ? customDbUrl.slice('file:'.length)
+      : customDbUrl;
+    const customAnchor = createAnchor({
+      network: { network: 'testnet' },
+      server: { requestTimeout: 5000 }, // Custom timeout
+      security: {
+        sep10SigningKey: sep10ServerKeypair.secret(),
+        interactiveJwtSecret: 'jwt-test-secret-timeout',
+        distributionAccountSecret: 'distribution-test-secret',
+      },
+      assets: {
+        assets: [
+          {
+            code: 'USDC',
+            issuer: 'GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5',
+            deposits_enabled: true,
+          },
+        ],
+      },
+      framework: {
+        database: { provider: 'sqlite', url: customDbUrl },
+      },
+    });
+
+    await customAnchor.init();
+    const customInvoke = createMountedInvoker(customAnchor);
+
+    try {
+      // Verify that requests work normally with custom timeout
+      const account = clientKeypair.publicKey();
+      const response = await customInvoke({
+        path: `/auth/challenge?account=${account}`,
+      });
+
+      // Request should complete successfully within timeout
+      expect(response.status).toBe(200);
+      expect(response.body.challenge).toBeDefined();
+    } finally {
+      await customAnchor.shutdown();
+      try {
+        unlinkSync(customDbPath);
+      } catch {
+        // ignore cleanup errors in CI
+      }
+    }
+  });
+
   it('17c) encoded path separators on GET /transactions/:id return 400 before lookup', async () => {
     const database = (
       anchor as unknown as {

@@ -25,6 +25,7 @@ export class AnchorExpressRouter {
     const sep10ServerKeypair = Keypair.fromSecret(config.get('security').sep10SigningKey);
     const networkPassphrase = config.get('network').networkPassphrase ?? '';
     const maxBodyBytes = config.get('framework').http?.maxBodyBytes ?? 1024 * 1024;
+    const requestTimeout = config.get('server').requestTimeout ?? 30000;
     const rateLimitConfig = config.get('framework').rateLimit;
     const windowMs = rateLimitConfig?.windowMs ?? 60000;
     const rateRules: Record<
@@ -44,6 +45,7 @@ export class AnchorExpressRouter {
       sep10ServerKeypair,
       networkPassphrase,
       maxBodyBytes,
+      requestTimeout,
       rateLimiter: new InMemoryRateLimiter(),
       rateRules,
     };
