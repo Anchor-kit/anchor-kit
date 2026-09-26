@@ -215,6 +215,20 @@ function validateOperationalNumbers(operational: AnchorKitConfig['operational'])
   return true;
 }
 
+function validateOperationalBooleans(operational: AnchorKitConfig['operational']): boolean {
+  const webhooksEnabled = operational?.webhooksEnabled;
+  if (webhooksEnabled !== undefined && typeof webhooksEnabled !== 'boolean') {
+    throw new Error('operational.webhooksEnabled must be a boolean');
+  }
+
+  const corsEnabled = operational?.corsEnabled;
+  if (corsEnabled !== undefined && typeof corsEnabled !== 'boolean') {
+    throw new Error('operational.corsEnabled must be a boolean');
+  }
+
+  return true;
+}
+
 function validateFrameworkConfig(
   framework: AnchorKitConfig['framework'],
   server: AnchorKitConfig['server'],
@@ -226,6 +240,7 @@ function validateFrameworkConfig(
   validateFrameworkRateLimit(framework);
   validateFrameworkUrls(metadata, server, operational);
   validateOperationalNumbers(operational);
+  validateOperationalBooleans(operational);
   return true;
 }
 
