@@ -187,9 +187,14 @@ function sha256(input: string | Buffer | Uint8Array): string {
 
 function readBearerToken(req: IncomingMessage): string | null {
   const authHeader = req.headers.authorization;
-  if (typeof authHeader !== 'string' || authHeader.length === 0) return null;
+  const normalizedHeader = Array.isArray(authHeader)
+    ? authHeader.length === 1
+      ? authHeader[0]
+      : null
+    : authHeader;
+  if (typeof normalizedHeader !== 'string' || normalizedHeader.length === 0) return null;
 
-  const match = authHeader.match(/^(\S+)\s+(\S+)$/);
+  const match = normalizedHeader.match(/^(\S+)\s+(\S+)$/);
   if (!match) return null;
 
   const [, scheme, token] = match;
@@ -332,6 +337,10 @@ async function handleInfo(context: ExpressRouterContext, res: ServerResponse): P
     responseBody.interactive_domain = fullConfig.server.interactiveDomain;
   }
 
+  if (fullConfig.assets.defaultCurrency) {
+    responseBody.default_currency = fullConfig.assets.defaultCurrency;
+  }
+
   if (fullConfig.operational?.supportEmail) {
     responseBody.support_email = fullConfig.operational.supportEmail;
   }
@@ -375,7 +384,7 @@ async function handleAuthChallenge(
   const expirationSeconds = context.config.get('security').challengeExpirationSeconds ?? 300;
   const expiresAtUnix = now + expirationSeconds;
 
-  const challengeTx = new TransactionBuilder(
+  const challengeBuilder = new TransactionBuilder(
     new Account(context.sep10ServerKeypair.publicKey(), '0'),
     {
       fee: '100',
@@ -389,8 +398,20 @@ async function handleAuthChallenge(
         source: account,
       }),
     )
-    .setTimebounds(now, expiresAtUnix)
-    .build();
+    .setTimebounds(now, expiresAtUnix);
+
+  const securityConfig = context.config.get('security');
+  if (securityConfig.enableClientAttribution) {
+    challengeBuilder.addOperation(
+      Operation.manageData({
+        name: 'client_domain',
+        value: securityConfig.clientDomain!,
+        source: securityConfig.clientDomainSigningKey!,
+      }),
+    );
+  }
+
+  const challengeTx = challengeBuilder.build();
 
   challengeTx.sign(context.sep10ServerKeypair);
   const challengeXdr = challengeTx.toXDR();

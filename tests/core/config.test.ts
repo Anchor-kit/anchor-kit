@@ -1,7 +1,8 @@
 import { AnchorConfig } from '@/core/config.ts';
 import { ConfigError } from '@/core/errors.ts';
+import { createAnchor } from '@/core/factory.ts';
 import type { AnchorKitConfig } from '@/types/config.ts';
-import { Networks } from '@stellar/stellar-sdk';
+import { Keypair, Networks } from '@stellar/stellar-sdk';
 import { describe, expect, it } from 'vitest';
 
 describe('AnchorConfig', () => {
@@ -71,6 +72,91 @@ describe('AnchorConfig', () => {
 
       expect(config.get('operational')?.transactionRetentionDays).toBe(30);
       expect(() => config.validate()).not.toThrow();
+    });
+  });
+
+  describe('SEP-10 client attribution prerequisites', () => {
+    const clientDomainSigningKey = Keypair.random().publicKey();
+
+    it('keeps attribution disabled without client-domain configuration', () => {
+      const config = new AnchorConfig(validBaseConfig);
+      expect(() => config.validate()).not.toThrow();
+    });
+
+    it('requires a client domain when attribution is enabled', () => {
+      const invalidConfig = {
+        ...validBaseConfig,
+        security: { ...validBaseConfig.security, enableClientAttribution: true },
+      };
+      const config = new AnchorConfig(invalidConfig);
+      expect(() => config.validate()).toThrow(/security\.clientDomain is required/);
+      expect(() => createAnchor(invalidConfig)).toThrow(/security\.clientDomain is required/);
+    });
+
+    it('requires a client-domain signing key when attribution is enabled', () => {
+      const config = new AnchorConfig({
+        ...validBaseConfig,
+        server: { ...validBaseConfig.server, corsOrigins: ['https://wallet.example.com'] },
+        security: {
+          ...validBaseConfig.security,
+          enableClientAttribution: true,
+          clientDomain: 'wallet.example.com',
+        },
+      });
+      expect(() => config.validate()).toThrow(/security\.clientDomainSigningKey is required/);
+    });
+
+    it('accepts a valid domain, signing key, and matching HTTPS origin', () => {
+      const config = new AnchorConfig({
+        ...validBaseConfig,
+        server: { ...validBaseConfig.server, corsOrigins: ['https://wallet.example.com'] },
+        security: {
+          ...validBaseConfig.security,
+          enableClientAttribution: true,
+          clientDomain: 'wallet.example.com',
+          clientDomainSigningKey,
+        },
+      });
+      expect(() => config.validate()).not.toThrow();
+    });
+
+    it.each([
+      [
+        'malformed domain',
+        { clientDomain: 'https://wallet.example.com' },
+        /security\.clientDomain/,
+      ],
+      [
+        'malformed signing key',
+        { clientDomainSigningKey: 'not-a-stellar-key' },
+        /security\.clientDomainSigningKey/,
+      ],
+      [
+        'missing matching origin',
+        { clientDomain: 'wallet.example.com', clientDomainSigningKey },
+        /server\.corsOrigins/,
+      ],
+      [
+        'malformed origin policy',
+        { clientDomain: 'wallet.example.com', clientDomainSigningKey },
+        /server\.corsOrigins/,
+      ],
+    ])('rejects %s prerequisite values', (_label, securityOverrides, error) => {
+      const corsOrigins = _label === 'malformed origin policy'
+        ? ('https://wallet.example.com' as unknown as string[])
+        : ['https://other.example.com'];
+      const config = new AnchorConfig({
+        ...validBaseConfig,
+        server: { ...validBaseConfig.server, corsOrigins },
+        security: {
+          ...validBaseConfig.security,
+          enableClientAttribution: true,
+          clientDomain: 'wallet.example.com',
+          clientDomainSigningKey,
+          ...securityOverrides,
+        },
+      });
+      expect(() => config.validate()).toThrow(error);
     });
   });
 

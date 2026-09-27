@@ -124,10 +124,22 @@ export interface SecurityConfig {
 
   /**
    * Enable client attribution for SEP-10
-   * Requires client domain verification
+    * Requires clientDomain, clientDomainSigningKey, and a matching HTTPS origin in server.corsOrigins
    * @optional - defaults to false
    */
   enableClientAttribution?: boolean;
+
+  /**
+   * Client's DNS hostname used for SEP-10 client attribution (without a scheme).
+   * @optional - required when enableClientAttribution is true
+   */
+  clientDomain?: string;
+
+  /**
+   * Stellar public key from the client's SEP-1 SIGNING_KEY entry.
+   * @optional - required when enableClientAttribution is true
+   */
+  clientDomainSigningKey?: string;
 
   /**
    * Webhook secret for payment rail providers
