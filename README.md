@@ -2,7 +2,7 @@
 
 ![CI](https://github.com/0xNgoo/anchor-kit/actions/workflows/ci.yml/badge.svg)
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
-![Version](https://img.shields.io/badge/version-0.1.0-orange.svg)
+![Version](https://img.shields.io/badge/version-0.0.4--beta-orange.svg)
 
 **Anchor-Kit** is a developer-friendly, type-safe SDK for building Stellar Anchors. It abstracts the complexity of Stellar Ecosystem Proposals (SEPs)—specifically SEP-6, SEP-24, and SEP-31—allowing you to focus on your business logic while ensuring compliance and security.
 
@@ -185,8 +185,11 @@ curl -s \
   -X POST http://localhost:3000/anchor/transactions/deposit/interactive \
   -H "authorization: Bearer ${TOKEN}" \
   -H 'content-type: application/json' \
+  -H 'Idempotency-Key: your-unique-key-here' \
   -d '{"asset_code":"USDC","amount":"25"}'
 ```
+
+Use the same `Idempotency-Key` value when retrying requests to safely prevent duplicate deposits.
 
 Look up a transaction by id:
 
@@ -222,6 +225,7 @@ curl -s \
 - [Architecture Overview](./ARCHITECTURE.md)
 - [Contributing Guide](./CONTRIBUTING.md)
 - [Roadmap](./ROADMAP.md)
+- [Releasing & Publishing](./docs/releasing.md)
 
 The root package also exports public TypeScript transaction helpers, including `Transaction`, `TransactionKind`, and `TransactionStatus`.
 

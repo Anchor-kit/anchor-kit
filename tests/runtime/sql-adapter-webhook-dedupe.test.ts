@@ -94,4 +94,42 @@ describe('SqlDatabaseAdapter – webhook event deduplication (sqlite)', () => {
     expect(resultA.record.eventId).toBe(eventIdA);
     expect(resultB.record.eventId).toBe(eventIdB);
   });
+
+  it('after marking processed, fetching the same event_id returns status=processed, non-null processedAt, and null errorMessage', async () => {
+    const eventId = `evt-${randomUUID()}`;
+    const payload = { type: 'deposit.completed', amount: '50' };
+
+    // Insert the event
+    const { record: inserted } = await db.insertOrGetWebhookEvent({
+      id: randomUUID(),
+      eventId,
+      provider: 'test-provider',
+      payload,
+    });
+    expect(inserted.status).toBe('pending');
+    expect(inserted.processedAt).toBeNull();
+
+    // Mark it as processed (no errorMessage)
+    await db.updateWebhookEventStatus({
+      id: inserted.id,
+      status: 'processed',
+    });
+
+    // Re-fetch via the canonical insert-or-get path using the same eventId
+    const { record: fetched, inserted: wasInserted } = await db.insertOrGetWebhookEvent({
+      id: randomUUID(),
+      eventId,
+      provider: 'test-provider',
+      payload,
+    });
+
+    // Should return the existing record, not insert a new one
+    expect(wasInserted).toBe(false);
+    expect(fetched.id).toBe(inserted.id);
+
+    // Status fields must reflect the processed update
+    expect(fetched.status).toBe('processed');
+    expect(fetched.processedAt).not.toBeNull();
+    expect(fetched.errorMessage).toBeNull();
+  });
 });

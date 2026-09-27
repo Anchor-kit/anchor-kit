@@ -104,6 +104,38 @@ describe('InMemoryQueueAdapter', () => {
     await queue.stop();
   });
 
+  it('continues processing later jobs after a worker throws', async () => {
+    const queue = new InMemoryQueueAdapter({ concurrency: 1 });
+    const processedJobs: number[] = [];
+    const firstJobStarted = deferred();
+    const firstJobRelease = deferred();
+    const secondJobFinished = deferred();
+
+    const worker = async (job: QueueJob): Promise<void> => {
+      const id = job.payload.jobId as number;
+      if (id === 0) {
+        firstJobStarted.resolve();
+        await firstJobRelease.promise;
+        throw new Error('boom');
+      }
+
+      processedJobs.push(id);
+      secondJobFinished.resolve();
+    };
+
+    await queue.start(worker);
+    await queue.enqueue({ type: 'process_watcher_task', payload: { jobId: 0 } });
+    await queue.enqueue({ type: 'process_watcher_task', payload: { jobId: 1 } });
+
+    await firstJobStarted.promise;
+    firstJobRelease.resolve();
+
+    await secondJobFinished.promise;
+    await queue.stop();
+
+    expect(processedJobs).toEqual([1]);
+  });
+
   it('should allow concurrent execution up to the limit', async () => {
     const concurrency = 3;
     const queue = new InMemoryQueueAdapter({ concurrency });

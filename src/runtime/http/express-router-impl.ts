@@ -33,6 +33,19 @@ interface AuthenticatedRequestData {
   account: string;
 }
 
+type RawBodyValue = string | Buffer | Uint8Array;
+type IncomingRequestWithRawBody = IncomingMessage & { rawBody?: RawBodyValue; body?: unknown };
+
+function firstNonEmptyString(value: unknown): string | undefined {
+  const values = Array.isArray(value) ? value : [value];
+  for (const candidate of values) {
+    if (typeof candidate === 'string' && candidate.trim().length > 0) {
+      return candidate.trim();
+    }
+  }
+  return undefined;
+}
+
 function sendJson(res: ServerResponse, status: number, body: Record<string, unknown>): void {
   if (!res.headersSent) {
     res.statusCode = status;
@@ -41,24 +54,38 @@ function sendJson(res: ServerResponse, status: number, body: Record<string, unkn
   res.end(JSON.stringify(body));
 }
 
+function sendJsonUnauthorized(res: ServerResponse, body: Record<string, unknown>): void {
+  if (!res.headersSent) {
+    res.statusCode = 401;
+    res.setHeader('content-type', 'application/json');
+    res.setHeader('WWW-Authenticate', 'Bearer');
+  }
+  res.end(JSON.stringify(body));
+}
+
 function parseUrl(req: IncomingMessage): URL {
   return new URL(req.url ?? '/', 'http://localhost');
 }
 
-function getBodyByteLength(value: string): number {
-  return Buffer.byteLength(value, 'utf8');
+function getBodyByteLength(value: RawBodyValue): number {
+  return typeof value === 'string' ? Buffer.byteLength(value, 'utf8') : value.byteLength;
 }
 
-async function readRawBody(req: IncomingMessage, maxBodyBytes: number): Promise<string> {
-  const reqWithRaw = req as IncomingMessage & { rawBody?: string };
-  if (typeof reqWithRaw.rawBody === 'string') {
-    if (getBodyByteLength(reqWithRaw.rawBody) > maxBodyBytes) {
+function toUtf8String(value: RawBodyValue): string {
+  return typeof value === 'string' ? value : Buffer.from(value).toString('utf8');
+}
+
+async function readRawBody(req: IncomingMessage, maxBodyBytes: number): Promise<RawBodyValue> {
+  const reqWithRaw = req as IncomingRequestWithRawBody;
+  if (reqWithRaw.rawBody !== undefined) {
+    const rawBody = reqWithRaw.rawBody;
+    if (getBodyByteLength(rawBody) > maxBodyBytes) {
       throw new PayloadTooLargeError(`Request body too large. Max ${maxBodyBytes} bytes`);
     }
-    return reqWithRaw.rawBody;
+    return rawBody;
   }
 
-  const bodyFromFramework = (req as IncomingMessage & { body?: unknown }).body;
+  const bodyFromFramework = (req as IncomingRequestWithRawBody).body;
   if (bodyFromFramework !== undefined) {
     const serialized =
       typeof bodyFromFramework === 'string' ? bodyFromFramework : JSON.stringify(bodyFromFramework);
@@ -70,24 +97,31 @@ async function readRawBody(req: IncomingMessage, maxBodyBytes: number): Promise<
 
   const chunks: Uint8Array[] = [];
   let totalBytes = 0;
-  for await (const chunk of req) {
+  const iterator = req.iterator({ destroyOnReturn: false });
+  while (true) {
+    const { done, value: chunk } = await iterator.next();
+    if (done) break;
+
     const chunkBuffer = typeof chunk === 'string' ? Buffer.from(chunk) : chunk;
     totalBytes += chunkBuffer.byteLength;
     if (totalBytes > maxBodyBytes) {
+      req.pause();
+      await iterator.return?.();
       throw new PayloadTooLargeError(`Request body too large. Max ${maxBodyBytes} bytes`);
     }
     chunks.push(chunkBuffer);
   }
 
-  return Buffer.concat(chunks).toString('utf8');
+  return Buffer.concat(chunks);
 }
 
-function jsonParseObject(rawBody: string): Record<string, unknown> {
-  if (!rawBody) return {};
+function jsonParseObject(rawBody: RawBodyValue): Record<string, unknown> {
+  const utf8Text = toUtf8String(rawBody);
+  if (!utf8Text) return {};
 
   let parsed: unknown;
   try {
-    parsed = JSON.parse(rawBody);
+    parsed = JSON.parse(utf8Text);
   } catch {
     throw new ValidationError('Request body must be valid JSON');
   }
@@ -103,8 +137,8 @@ async function parsePostJsonBody(
   req: IncomingMessage,
   res: ServerResponse,
   maxBodyBytes: number,
-): Promise<{ rawBody: string; body: Record<string, unknown> } | null> {
-  let rawBody: string;
+): Promise<{ rawBody: RawBodyValue; body: Record<string, unknown> } | null> {
+  let rawBody: RawBodyValue;
   try {
     rawBody = await readRawBody(req, maxBodyBytes);
   } catch (error) {
@@ -132,16 +166,19 @@ async function parsePostJsonBody(
   }
 }
 
-function sha256(input: string): string {
+function sha256(input: string | Buffer | Uint8Array): string {
   return createHash('sha256').update(input).digest('hex');
 }
 
 function readBearerToken(req: IncomingMessage): string | null {
   const authHeader = req.headers.authorization;
-  if (!authHeader) return null;
+  if (typeof authHeader !== 'string' || authHeader.length === 0) return null;
 
-  const [scheme, token] = authHeader.split(' ');
-  if (scheme?.toLowerCase() !== 'bearer' || !token) {
+  const match = authHeader.match(/^(\S+)\s+(\S+)$/);
+  if (!match) return null;
+
+  const [, scheme, token] = match;
+  if (scheme.toLowerCase() !== 'bearer' || token.length === 0) {
     return null;
   }
 
@@ -151,6 +188,17 @@ function readBearerToken(req: IncomingMessage): string | null {
 function toNumber(value: unknown): number {
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : NaN;
+}
+
+function isPlainDecimalString(value: unknown): value is string {
+  return typeof value === 'string' && /^\d+(?:\.\d+)?$/.test(value);
+}
+
+function buildInteractiveUrl(interactiveDomain: string, transactionId: string): string {
+  const normalizedDomain = interactiveDomain.endsWith('/')
+    ? interactiveDomain.slice(0, -1)
+    : interactiveDomain;
+  return `${normalizedDomain}/deposit/${encodeURIComponent(transactionId)}`;
 }
 
 function endpointPath(req: IncomingMessage): string {
@@ -219,7 +267,12 @@ function authenticate(
     const account = typeof decoded.sub === 'string' ? decoded.sub : null;
     const scope = typeof decoded.scope === 'string' ? decoded.scope : null;
     const typ = typeof decoded.typ === 'string' ? decoded.typ : null;
-    if (!account || scope !== 'anchor_api' || typ !== 'access_token') {
+    if (
+      !account ||
+      !StrKey.isValidEd25519PublicKey(account) ||
+      scope !== 'anchor_api' ||
+      typ !== 'access_token'
+    ) {
       return null;
     }
 
@@ -273,6 +326,10 @@ async function handleInfo(context: ExpressRouterContext, res: ServerResponse): P
 
   if (fullConfig.operational?.supportEmail) {
     responseBody.support_email = fullConfig.operational.supportEmail;
+  }
+
+  if (fullConfig.operational?.website) {
+    responseBody.website = fullConfig.operational.website;
   }
 
   sendJson(res, 200, responseBody);
@@ -342,6 +399,7 @@ async function handleAuthChallenge(
     challenge: challengeXdr,
     network_passphrase: context.networkPassphrase,
     expires_at: expiresAt,
+    expires_in: expirationSeconds,
   });
 }
 
@@ -455,6 +513,7 @@ async function handleAuthToken(
   res.setHeader('Cache-Control', 'no-store');
   sendJson(res, 200, {
     token,
+    account,
     expires_in: tokenLifetime,
     expires_at: expiresAt,
     token_type: 'Bearer',
@@ -472,7 +531,10 @@ async function handleDepositInteractive(
 
   const auth = authenticate(context, req);
   if (!auth) {
-    sendJson(res, 401, { error: 'unauthorized', message: 'Missing or invalid bearer token' });
+    sendJsonUnauthorized(res, {
+      error: 'unauthorized',
+      message: 'Missing or invalid bearer token',
+    });
     return;
   }
 
@@ -494,7 +556,7 @@ async function handleDepositInteractive(
     typeof parsedBody.body.asset_code === 'string' ? parsedBody.body.asset_code : '';
   const amountRaw = parsedBody.body.amount;
   const amount =
-    typeof amountRaw === 'string' || typeof amountRaw === 'number' ? `${amountRaw}` : '';
+    typeof amountRaw === 'number' || typeof amountRaw === 'string' ? `${amountRaw}` : '';
 
   if (!assetCode || !amount) {
     sendJson(res, 400, {
@@ -510,7 +572,13 @@ async function handleDepositInteractive(
     return;
   }
 
-  const numericAmount = toNumber(amount);
+  const numericAmount =
+    typeof amountRaw === 'number'
+      ? toNumber(amountRaw)
+      : isPlainDecimalString(amountRaw)
+        ? toNumber(amountRaw)
+        : NaN;
+
   if (!Number.isFinite(numericAmount) || numericAmount <= 0) {
     sendJson(res, 400, {
       error: 'invalid_amount',
@@ -571,7 +639,7 @@ async function handleDepositInteractive(
         asset_code: created.assetCode,
         asset_issuer: selectedAsset.issuer,
         account: created.account,
-        interactive_url: `${serverConfig.interactiveDomain}/deposit/${created.id}`,
+        interactive_url: buildInteractiveUrl(serverConfig.interactiveDomain, created.id),
         created_at: created.createdAt,
       };
 
@@ -619,7 +687,7 @@ async function handleDepositInteractive(
     asset_code: created.assetCode,
     asset_issuer: selectedAsset.issuer,
     account: created.account,
-    interactive_url: `${serverConfig.interactiveDomain}/deposit/${created.id}`,
+    interactive_url: buildInteractiveUrl(serverConfig.interactiveDomain, created.id),
     created_at: created.createdAt,
   });
 }
@@ -632,7 +700,10 @@ async function handleTransaction(
 ): Promise<void> {
   const auth = authenticate(context, req);
   if (!auth) {
-    sendJson(res, 401, { error: 'unauthorized', message: 'Missing or invalid bearer token' });
+    sendJsonUnauthorized(res, {
+      error: 'unauthorized',
+      message: 'Missing or invalid bearer token',
+    });
     return;
   }
 
@@ -668,8 +739,14 @@ async function handleTransaction(
   };
 
   if (serverConfig.interactiveDomain) {
-    responseData.interactive_url = `${serverConfig.interactiveDomain}/deposit/${transaction.id}`;
-    responseData.more_info_url = `${serverConfig.interactiveDomain}/deposit/${transaction.id}`;
+    responseData.interactive_url = buildInteractiveUrl(
+      serverConfig.interactiveDomain,
+      transaction.id,
+    );
+    responseData.more_info_url = buildInteractiveUrl(
+      serverConfig.interactiveDomain,
+      transaction.id,
+    );
   }
 
   sendJson(res, 200, responseData);
@@ -692,17 +769,15 @@ async function handleWebhook(
   const { rawBody, body: payload } = parsedBody;
   const eventIdField = payload.id;
   const eventId =
-    typeof eventIdField === 'string' && eventIdField.length > 0 ? eventIdField : randomUUID();
+    typeof eventIdField === 'string' && eventIdField.trim().length > 0
+      ? eventIdField
+      : randomUUID();
   const providerHeader = req.headers['x-webhook-provider'];
   const providerBody = payload.provider;
   const provider =
-    typeof providerHeader === 'string' && providerHeader.length > 0
-      ? providerHeader
-      : typeof providerBody === 'string' && providerBody.length > 0
-        ? providerBody
-        : 'generic';
+    firstNonEmptyString(providerHeader) ?? firstNonEmptyString(providerBody) ?? 'generic';
   const signatureHeader = req.headers['x-anchor-signature'];
-  const signature = typeof signatureHeader === 'string' ? signatureHeader : undefined;
+  const signature = firstNonEmptyString(signatureHeader);
 
   try {
     const result = await context.webhookProcessor.process({
@@ -762,9 +837,29 @@ export async function handleExpressRouterRequest(
     return;
   }
 
-  const transactionMatch = /^\/transactions\/([^/]+)$/.exec(path);
+  const transactionMatch = /^\/transactions\/([^/]*)$/.exec(path);
   if (method === 'GET' && transactionMatch) {
-    await handleTransaction(context, req, res, decodeURIComponent(transactionMatch[1]));
+    const transactionIdRaw = transactionMatch[1];
+    let transactionId: string;
+    try {
+      transactionId = decodeURIComponent(transactionIdRaw);
+    } catch {
+      sendJson(res, 400, {
+        error: 'invalid_request',
+        message: 'Transaction id contains malformed percent-encoding',
+      });
+      return;
+    }
+
+    if (transactionId.trim().length === 0) {
+      sendJson(res, 400, {
+        error: 'invalid_request',
+        message: 'Transaction id must not be empty',
+      });
+      return;
+    }
+
+    await handleTransaction(context, req, res, transactionId);
     return;
   }
 

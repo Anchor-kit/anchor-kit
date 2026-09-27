@@ -22,6 +22,7 @@ interface PostgresClient {
 }
 
 const SQLITE_FILE_PREFIX = 'file:';
+const SQLITE_URL_PREFIX = 'sqlite:';
 
 function nowIso(): string {
   return new Date().toISOString();
@@ -30,6 +31,9 @@ function nowIso(): string {
 function toSqlitePath(url: string): string {
   if (url.startsWith(SQLITE_FILE_PREFIX)) {
     return url.slice(SQLITE_FILE_PREFIX.length);
+  }
+  if (url.startsWith(SQLITE_URL_PREFIX)) {
+    return url.slice(SQLITE_URL_PREFIX.length);
   }
   return url;
 }

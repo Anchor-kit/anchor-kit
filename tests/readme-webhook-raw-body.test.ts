@@ -13,4 +13,15 @@ describe('README webhook raw body guidance', () => {
     expect(readme).toContain('exact request body bytes');
     expect(readme).toContain('anchor.getExpressRouter()');
   });
+
+  it('documents raw body capture in the MVP Express guide', () => {
+    const guidePath = new URL('../docs/mvp-express.md', import.meta.url);
+    const guide = readFileSync(guidePath, 'utf8');
+
+    expect(guide).toContain('express.json');
+    expect(guide).toContain('verify');
+    expect(guide).toContain('rawBody');
+    expect(guide).toContain('exact raw request body bytes');
+    expect(guide).toContain('anchor.getExpressRouter()');
+  });
 });

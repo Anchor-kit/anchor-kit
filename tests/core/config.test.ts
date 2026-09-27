@@ -286,5 +286,76 @@ describe('AnchorConfig', () => {
       expect(() => config.validate()).toThrow(ConfigError);
       expect(() => config.validate()).toThrow(/authTokenLifetimeSeconds must be > 0/);
     });
+
+    describe('operational supportEmail validation', () => {
+      it('should accept valid operational supportEmail', () => {
+        const config = new AnchorConfig({
+          ...validBaseConfig,
+          operational: { supportEmail: 'support@example.com' },
+        });
+        expect(() => config.validate()).not.toThrow();
+      });
+
+      it('should accept omitted operational supportEmail', () => {
+        const config = new AnchorConfig({
+          ...validBaseConfig,
+          operational: { name: 'Test Anchor' },
+        });
+        expect(() => config.validate()).not.toThrow();
+      });
+
+      it('should reject malformed operational supportEmail', () => {
+        const config = new AnchorConfig({
+          ...validBaseConfig,
+          operational: { supportEmail: 'invalid-email-address' },
+        });
+        expect(() => config.validate()).toThrow(ConfigError);
+        expect(() => config.validate()).toThrow(
+          /Invalid email format for operational.supportEmail/,
+        );
+      });
+    });
+
+    describe('KYC age bounds validation', () => {
+      it.each([
+        { kyc: { minAge: 18 }, name: 'minimum age only' },
+        { kyc: { maxAge: 120 }, name: 'maximum age only' },
+        { kyc: { minAge: 18, maxAge: 120 }, name: 'ordered age range' },
+        { kyc: { minAge: 0, maxAge: 0 }, name: 'zero age bounds' },
+      ])('should accept valid KYC $name', ({ kyc }) => {
+        const config = new AnchorConfig({
+          ...validBaseConfig,
+          kyc,
+        });
+
+        expect(() => config.validate()).not.toThrow();
+      });
+
+      it.each([
+        { kyc: { minAge: -1 }, message: /kyc\.minAge must be a finite non-negative integer/ },
+        { kyc: { maxAge: -1 }, message: /kyc\.maxAge must be a finite non-negative integer/ },
+        { kyc: { minAge: 18.5 }, message: /kyc\.minAge must be a finite non-negative integer/ },
+        {
+          kyc: { maxAge: Number.NaN },
+          message: /kyc\.maxAge must be a finite non-negative integer/,
+        },
+        {
+          kyc: { minAge: Number.POSITIVE_INFINITY },
+          message: /kyc\.minAge must be a finite non-negative integer/,
+        },
+        {
+          kyc: { minAge: 65, maxAge: 18 },
+          message: /kyc\.minAge must be less than or equal to kyc\.maxAge/,
+        },
+      ])('should reject invalid KYC age bounds %#', ({ kyc, message }) => {
+        const config = new AnchorConfig({
+          ...validBaseConfig,
+          kyc,
+        });
+
+        expect(() => config.validate()).toThrow(ConfigError);
+        expect(() => config.validate()).toThrow(message);
+      });
+    });
   });
 });

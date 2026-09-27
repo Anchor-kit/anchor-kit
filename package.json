@@ -64,11 +64,6 @@
     "prettier": "^3.8.1",
     "supertest": "^7.2.2",
     "typescript-eslint": "^8.55.0",
-    "@types/bcryptjs": "^3.0.0",
-    "@types/express": "^5.0.6",
-    "@types/jsonwebtoken": "^9.0.10",
-    "@types/supertest": "^7.2.0",
-    "supertest": "^7.2.2",
     "vitest": "^4.0.18"
   },
   "peerDependencies": {
