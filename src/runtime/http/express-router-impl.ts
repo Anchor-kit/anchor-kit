@@ -26,6 +26,7 @@ export interface ExpressRouterContext {
   sep10ServerKeypair: Keypair;
   networkPassphrase: string;
   maxBodyBytes: number;
+  corsOrigins: string[] | undefined;
   rateLimiter: InMemoryRateLimiter;
   rateRules: Record<'auth_challenge' | 'auth_token' | 'webhook' | 'deposit', RateLimitRule>;
 }
@@ -53,6 +54,20 @@ function sendJson(res: ServerResponse, status: number, body: Record<string, unkn
     res.setHeader('content-type', 'application/json');
   }
   res.end(JSON.stringify(body));
+}
+
+function setCorsHeaders(
+  res: ServerResponse,
+  origin: string | undefined,
+  corsOrigins: string[] | undefined,
+): void {
+  if (!res.headersSent) {
+    if (origin && corsOrigins && corsOrigins.includes(origin)) {
+      res.setHeader('Access-Control-Allow-Origin', origin);
+      res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+      res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+    }
+  }
 }
 
 function sendMethodNotAllowed(res: ServerResponse, allowedMethods: string[]): void {
@@ -889,7 +904,12 @@ export async function handleExpressRouterRequest(
 ): Promise<void> {
   const path = endpointPath(req);
   const method = (req.method ?? 'GET').toUpperCase();
+  const origin = firstNonEmptyString(req.headers.origin);
 
+  // Set CORS headers for all responses
+  setCorsHeaders(res, origin, context.corsOrigins);
+
+  // Skip timeout for health endpoint (should always respond quickly)
   if (method === 'GET' && path === '/health') {
     await handleHealth(res);
     return;
