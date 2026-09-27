@@ -2987,4 +2987,114 @@ describe('MVP Express-mounted integration', () => {
     expect(response.body.amount).toBe('10');
     expect(response.body).toHaveProperty('id');
   });
+
+  // ── Unsafe numeric deposit amounts ─────────────────────────────────────
+
+  it('16e) deposit with integer above MAX_SAFE_INTEGER is rejected as invalid_amount', async () => {
+    const response = await invoke({
+      method: 'POST',
+      path: '/transactions/deposit/interactive',
+      headers: {
+        'content-type': 'application/json',
+        authorization: `Bearer ${accessToken}`,
+        'x-forwarded-for': '10.0.0.165',
+      },
+      // 9007199254740993 (= MAX_SAFE_INTEGER + 2) is rounded during JSON parsing
+      rawBody: '{"asset_code":"USDC","amount":9007199254740993}',
+    });
+
+    expect(response.status).toBe(400);
+    expect(response.body.error).toBe('invalid_amount');
+    expect(response.body.message).toContain('decimal string');
+  });
+
+  it('16f) deposit with amount exactly at MAX_SAFE_INTEGER + 1 is rejected as invalid_amount', async () => {
+    const response = await invoke({
+      method: 'POST',
+      path: '/transactions/deposit/interactive',
+      headers: {
+        'content-type': 'application/json',
+        authorization: `Bearer ${accessToken}`,
+        'x-forwarded-for': '10.0.0.166',
+      },
+      rawBody: '{"asset_code":"USDC","amount":9007199254740992}',
+    });
+
+    expect(response.status).toBe(400);
+    expect(response.body.error).toBe('invalid_amount');
+    expect(response.body.message).toContain('decimal string');
+  });
+
+  it('16g) deposit with amount exactly at MAX_SAFE_INTEGER passes the precision check', async () => {
+    const response = await invoke({
+      method: 'POST',
+      path: '/transactions/deposit/interactive',
+      headers: {
+        'content-type': 'application/json',
+        authorization: `Bearer ${accessToken}`,
+        'x-forwarded-for': '10.0.0.167',
+      },
+      rawBody: '{"asset_code":"USDC","amount":9007199254740991}',
+    });
+
+    // Safe integer, so it reaches the configured max_amount check instead of
+    // being rejected by the unsafe-number guard.
+    expect(response.status).toBe(400);
+    expect(response.body.error).toBe('invalid_amount');
+    expect(response.body.message).toContain('maximum allowed');
+  });
+
+  it('16h) deposit with a numeric amount far beyond the safe range is rejected', async () => {
+    const response = await invoke({
+      method: 'POST',
+      path: '/transactions/deposit/interactive',
+      headers: {
+        'content-type': 'application/json',
+        authorization: `Bearer ${accessToken}`,
+        'x-forwarded-for': '10.0.0.168',
+      },
+      rawBody: '{"asset_code":"USDC","amount":1e300}',
+    });
+
+    expect(response.status).toBe(400);
+    expect(response.body.error).toBe('invalid_amount');
+    expect(response.body.message).toContain('decimal string');
+  });
+
+  it('16i) deposit with a normal numeric decimal amount keeps current behavior', async () => {
+    const response = await invoke({
+      method: 'POST',
+      path: '/transactions/deposit/interactive',
+      headers: {
+        'content-type': 'application/json',
+        authorization: `Bearer ${accessToken}`,
+        'x-forwarded-for': '10.0.0.169',
+      },
+      body: { asset_code: 'USDC', amount: 10.5 },
+    });
+
+    expect(response.status).toBe(201);
+    expect(response.body.kind).toBe('deposit');
+    expect(response.body.amount).toBe('10.5');
+    expect(response.body).toHaveProperty('id');
+  });
+
+  it('16j) deposit with a decimal string beyond the safe range keeps current behavior', async () => {
+    const response = await invoke({
+      method: 'POST',
+      path: '/transactions/deposit/interactive',
+      headers: {
+        'content-type': 'application/json',
+        authorization: `Bearer ${accessToken}`,
+        'x-forwarded-for': '10.0.0.170',
+      },
+      body: { asset_code: 'USDC', amount: '9007199254740993' },
+    });
+
+    // Decimal strings are the recommended representation, so they are only
+    // subject to the configured min/max checks.
+    expect(response.status).toBe(400);
+    expect(response.body.error).toBe('invalid_amount');
+    expect(response.body.message).toContain('maximum allowed');
+  });
 });
