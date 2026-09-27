@@ -19,6 +19,20 @@ import { extractClientIdentifier } from './client-identifier.ts';
 
 const SEP10_NONCE_OP = 'anchor_auth';
 
+/**
+ * Stable issuer for bearer access tokens minted by the anchor API.
+ * Tokens issued by a different service must not be accepted here, even when
+ * they are signed with the same shared secret.
+ */
+export const ACCESS_TOKEN_ISSUER = 'anchor-kit';
+
+/**
+ * Stable audience for bearer access tokens minted by the anchor API.
+ * Verification requires this exact audience so a valid token minted for an
+ * unintended service is rejected.
+ */
+export const ACCESS_TOKEN_AUDIENCE = 'anchor-api';
+
 export interface ExpressRouterContext {
   config: AnchorConfig;
   database: DatabaseAdapter;
@@ -271,11 +285,15 @@ function authenticate(
     const account = typeof decoded.sub === 'string' ? decoded.sub : null;
     const scope = typeof decoded.scope === 'string' ? decoded.scope : null;
     const typ = typeof decoded.typ === 'string' ? decoded.typ : null;
+    const issuer = typeof decoded.iss === 'string' ? decoded.iss : null;
+    const audience = typeof decoded.aud === 'string' ? decoded.aud : null;
     if (
       !account ||
       !StrKey.isValidEd25519PublicKey(account) ||
       scope !== 'anchor_api' ||
-      typ !== 'access_token'
+      typ !== 'access_token' ||
+      issuer !== ACCESS_TOKEN_ISSUER ||
+      audience !== ACCESS_TOKEN_AUDIENCE
     ) {
       return null;
     }
@@ -526,6 +544,8 @@ async function handleAuthToken(
   const token = jwt.sign(
     {
       sub: account,
+      iss: ACCESS_TOKEN_ISSUER,
+      aud: ACCESS_TOKEN_AUDIENCE,
       scope: 'anchor_api',
       typ: 'access_token',
     },
