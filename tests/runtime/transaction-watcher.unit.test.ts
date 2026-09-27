@@ -1,6 +1,7 @@
 import type { DatabaseAdapter, QueueAdapter } from '@/runtime/interfaces.ts';
+import type { InteractiveTransactionRecord } from '@/runtime/interfaces.ts';
 import { TransactionWatcher } from '@/runtime/watchers/transaction-watcher.ts';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi, type Mock } from 'vitest';
 
 describe('TransactionWatcher Unit Tests', () => {
   let mockDatabase: DatabaseAdapter;
@@ -14,7 +15,7 @@ describe('TransactionWatcher Unit Tests', () => {
       migrate: vi.fn().mockResolvedValue(undefined),
       insertAuthChallenge: vi.fn().mockResolvedValue(undefined),
       getAuthChallengeByChallenge: vi.fn().mockResolvedValue(null),
-      markAuthChallengeConsumed: vi.fn().mockResolvedValue(undefined),
+      markAuthChallengeConsumed: vi.fn().mockResolvedValue(true),
       insertInteractiveTransaction: vi.fn().mockResolvedValue({
         id: 'test-tx-id',
         account: 'test-account',
@@ -244,7 +245,32 @@ describe('TransactionWatcher Unit Tests', () => {
     await shortIntervalWatcher.stop();
 
     // Polling should continue after a failed tick, even if the exact cycle count varies.
-    expect(mockDatabase.listPendingTransactionsBefore.mock.calls.length).toBeGreaterThanOrEqual(3);
+    expect(
+      (mockDatabase.listPendingTransactionsBefore as Mock).mock.calls.length,
+    ).toBeGreaterThanOrEqual(3);
+  });
+
+  it('stop() resolves even when an active tick rejects and clears the timer', async () => {
+    const rejectTick = vi.fn();
+    mockDatabase.listPendingTransactionsBefore = vi.fn<
+      (cutoffIso: string) => Promise<InteractiveTransactionRecord[]>
+    >(
+      () =>
+        new Promise((_, reject) => {
+          rejectTick.mockImplementation(() => reject(new Error('db failure')));
+        }),
+    );
+
+    const startPromise = transactionWatcher.start();
+    await Promise.resolve();
+    const stopPromise = transactionWatcher.stop();
+    rejectTick();
+
+    await expect(startPromise).rejects.toThrow('db failure');
+    await expect(stopPromise).resolves.toBeUndefined();
+    expect(
+      (transactionWatcher as unknown as { timer: ReturnType<typeof setInterval> | null }).timer,
+    ).toBeNull();
   });
 
   it('enqueues a cleanup_records job with the configured retention days', async () => {

@@ -1,4 +1,4 @@
-import { ConfigError } from '@/core/errors.ts';
+import { ConfigError, MalformedPersistedDataError } from '@/core/errors.ts';
 import type {
   AuthChallengeRecord,
   DatabaseAdapter,
@@ -8,6 +8,7 @@ import type {
   WebhookEventRecord,
 } from '@/runtime/interfaces.ts';
 import type { FrameworkConfig } from '@/types/config.ts';
+import { isTransactionStatus, type TransactionStatus } from '@/types/transaction-status.ts';
 import { Database } from 'bun:sqlite';
 import { randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
@@ -18,7 +19,10 @@ type SqliteLike = Database;
 interface PostgresClient {
   connect(): Promise<void>;
   end(): Promise<void>;
-  query<T extends Record<string, unknown>>(sql: string, values?: unknown[]): Promise<{ rows: T[] }>;
+  query<T extends Record<string, unknown>>(
+    sql: string,
+    values?: unknown[],
+  ): Promise<{ rows: T[]; rowCount?: number }>;
 }
 
 const SQLITE_FILE_PREFIX = 'file:';
@@ -39,10 +43,24 @@ function toSqlitePath(url: string): string {
 }
 
 function parseJsonObject(value: string): Record<string, unknown> {
-  const parsed: unknown = JSON.parse(value);
-  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-    return {};
+  let parsed: unknown;
+
+  try {
+    parsed = JSON.parse(value);
+  } catch (error) {
+    throw new MalformedPersistedDataError(
+      `Malformed persisted JSON payload: ${error instanceof Error ? error.message : String(error)}`,
+      { value: value.slice(0, 200) },
+    );
   }
+
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new MalformedPersistedDataError(
+      'Persisted JSON payload must decode to a plain object; arrays and primitive values are not allowed.',
+      { value: value.slice(0, 200) },
+    );
+  }
+
   return parsed as Record<string, unknown>;
 }
 
@@ -51,6 +69,8 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
   private readonly url: string;
   private sqlite: SqliteLike | null = null;
   private postgres: PostgresClient | null = null;
+  private connectPromise: Promise<void> | null = null;
+  private disconnectPromise: Promise<void> | null = null;
 
   constructor(databaseConfig: FrameworkConfig['database']) {
     this.provider = databaseConfig.provider;
@@ -58,34 +78,84 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
   }
 
   public async connect(): Promise<void> {
-    if (this.provider === 'sqlite') {
-      this.sqlite = new Database(toSqlitePath(this.url));
+    if (this.sqlite || this.postgres) {
       return;
     }
 
-    if (this.provider === 'postgres') {
-      const moduleName = 'pg';
-      const pgModuleUnknown: unknown = await import(moduleName);
-      const pgModule = pgModuleUnknown as {
-        Client: new (config: { connectionString: string }) => PostgresClient;
-      };
-      this.postgres = new pgModule.Client({ connectionString: this.url });
-      await this.postgres.connect();
+    if (this.connectPromise) {
+      await this.connectPromise;
       return;
     }
 
-    throw new ConfigError(`Unsupported database provider: ${this.provider}`);
+    this.connectPromise = (async () => {
+      try {
+        if (this.provider === 'sqlite') {
+          this.sqlite = new Database(toSqlitePath(this.url));
+          return;
+        }
+
+        if (this.provider === 'postgres') {
+          const moduleName = 'pg';
+          const pgModuleUnknown: unknown = await import(moduleName);
+          const pgModule = pgModuleUnknown as {
+            Client: new (config: { connectionString: string }) => PostgresClient;
+          };
+          const client = new pgModule.Client({ connectionString: this.url });
+          this.postgres = client;
+          await this.postgres.connect();
+          return;
+        }
+
+        throw new ConfigError(`Unsupported database provider: ${this.provider}`);
+      } catch (error) {
+        this.sqlite = null;
+        this.postgres = null;
+        throw error;
+      }
+    })();
+
+    try {
+      await this.connectPromise;
+    } finally {
+      this.connectPromise = null;
+    }
   }
 
   public async disconnect(): Promise<void> {
-    if (this.sqlite) {
-      this.sqlite.close();
-      this.sqlite = null;
+    if (!this.sqlite && !this.postgres) {
+      return;
     }
 
-    if (this.postgres) {
-      await this.postgres.end();
+    if (this.disconnectPromise) {
+      await this.disconnectPromise;
+      return;
+    }
+
+    this.disconnectPromise = (async () => {
+      const sqlite = this.sqlite;
+      const postgres = this.postgres;
+      this.sqlite = null;
       this.postgres = null;
+
+      try {
+        if (sqlite) {
+          sqlite.close();
+        }
+
+        if (postgres) {
+          await postgres.end();
+        }
+      } catch (error) {
+        this.sqlite = sqlite;
+        this.postgres = postgres;
+        throw error;
+      }
+    })();
+
+    try {
+      await this.disconnectPromise;
+    } finally {
+      this.disconnectPromise = null;
     }
   }
 
@@ -267,19 +337,20 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
     };
   }
 
-  public async markAuthChallengeConsumed(id: string): Promise<void> {
+  public async markAuthChallengeConsumed(id: string): Promise<boolean> {
     const consumedAt = nowIso();
     if (this.sqlite) {
-      this.sqlite
-        .prepare('UPDATE auth_challenges SET consumed_at = ? WHERE id = ?')
+      const result = this.sqlite
+        .prepare('UPDATE auth_challenges SET consumed_at = ? WHERE id = ? AND consumed_at IS NULL')
         .run(consumedAt, id);
-      return;
+      return result.changes > 0;
     }
 
-    await this.requirePostgres().query(
-      'UPDATE auth_challenges SET consumed_at = $1 WHERE id = $2',
+    const response = await this.requirePostgres().query(
+      'UPDATE auth_challenges SET consumed_at = $1 WHERE id = $2 AND consumed_at IS NULL',
       [consumedAt, id],
     );
+    return (response.rowCount ?? 0) > 0;
   }
 
   public async insertInteractiveTransaction(input: {
@@ -288,7 +359,7 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
     kind: 'deposit';
     assetCode: string;
     amount: string;
-    status: string;
+    status: TransactionStatus;
   }): Promise<InteractiveTransactionRecord> {
     const createdAt = nowIso();
     const updatedAt = createdAt;
@@ -364,32 +435,33 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
     if (this.sqlite) {
       const rows = this.sqlite
         .prepare(
-          "SELECT * FROM interactive_transactions WHERE status = 'pending_user_transfer_start' AND created_at < ?",
+          "SELECT * FROM interactive_transactions WHERE status = 'pending_user_transfer_start' AND created_at < ? ORDER BY created_at ASC, id ASC",
         )
         .all(cutoffIso) as Record<string, unknown>[];
       return rows.map((row) => this.mapTransactionRow(row));
     }
 
     const response = await this.requirePostgres().query<Record<string, unknown>>(
-      "SELECT * FROM interactive_transactions WHERE status = 'pending_user_transfer_start' AND created_at < $1",
+      "SELECT * FROM interactive_transactions WHERE status = 'pending_user_transfer_start' AND created_at < $1 ORDER BY created_at ASC, id ASC",
       [cutoffIso],
     );
     return response.rows.map((row) => this.mapTransactionRow(row));
   }
 
-  public async updateTransactionStatus(id: string, status: string): Promise<void> {
+  public async updateTransactionStatus(id: string, status: TransactionStatus): Promise<boolean> {
     const updatedAt = nowIso();
     if (this.sqlite) {
-      this.sqlite
+      const result = this.sqlite
         .prepare('UPDATE interactive_transactions SET status = ?, updated_at = ? WHERE id = ?')
         .run(status, updatedAt, id);
-      return;
+      return result.changes > 0;
     }
 
-    await this.requirePostgres().query(
-      'UPDATE interactive_transactions SET status = $1, updated_at = $2 WHERE id = $3',
+    const response = await this.requirePostgres().query<{ id: string }>(
+      'UPDATE interactive_transactions SET status = $1, updated_at = $2 WHERE id = $3 RETURNING id',
       [status, updatedAt, id],
     );
+    return response.rows.length > 0;
   }
 
   public async getIdempotencyRecord(
@@ -504,51 +576,102 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
     payload: Record<string, unknown>;
   }): Promise<{ record: WebhookEventRecord; inserted: boolean }> {
     const createdAt = nowIso();
+    const eventId = input.eventId.trim();
+    const provider = input.provider.trim() || 'generic';
 
     if (this.sqlite) {
-      // SQLite: INSERT ... ON CONFLICT DO NOTHING, then SELECT
+      const existing = this.sqlite
+        .prepare('SELECT * FROM webhook_events WHERE event_id = ? LIMIT 1')
+        .get(eventId) as Record<string, unknown> | null;
+
+      if (existing) {
+        const record = this.mapWebhookRow(existing);
+
+        if (record.status === 'processed') {
+          return { record, inserted: false };
+        }
+
+        if (record.status === 'failed') {
+          this.sqlite
+            .prepare(
+              'UPDATE webhook_events SET provider = ?, payload = ?, status = ?, error_message = NULL, processed_at = NULL WHERE id = ?',
+            )
+            .run(provider, JSON.stringify(input.payload), 'pending', record.id);
+
+          const refreshed = this.sqlite
+            .prepare('SELECT * FROM webhook_events WHERE id = ? LIMIT 1')
+            .get(record.id) as Record<string, unknown> | null;
+
+          if (!refreshed) {
+            throw new ConfigError('Failed to retry failed webhook event');
+          }
+
+          return { record: this.mapWebhookRow(refreshed), inserted: true };
+        }
+
+        return { record, inserted: false };
+      }
+
       this.sqlite
         .prepare(
-          'INSERT INTO webhook_events (id, event_id, provider, payload, status, error_message, processed_at, created_at) VALUES (?, ?, ?, ?, ?, NULL, NULL, ?) ON CONFLICT(event_id) DO NOTHING',
+          'INSERT INTO webhook_events (id, event_id, provider, payload, status, error_message, processed_at, created_at) VALUES (?, ?, ?, ?, ?, NULL, NULL, ?)',
         )
-        .run(
-          input.id,
-          input.eventId,
-          input.provider,
-          JSON.stringify(input.payload),
-          'pending',
-          createdAt,
-        );
+        .run(input.id, eventId, provider, JSON.stringify(input.payload), 'pending', createdAt);
 
       const row = this.sqlite
-        .prepare('SELECT * FROM webhook_events WHERE event_id = ? LIMIT 1')
-        .get(input.eventId) as Record<string, unknown>;
+        .prepare('SELECT * FROM webhook_events WHERE id = ? LIMIT 1')
+        .get(input.id) as Record<string, unknown> | null;
 
       if (!row) {
         throw new ConfigError('Failed to insert or retrieve webhook event');
       }
 
-      // Check if this is the record we just inserted (id matches) or an existing one
-      const inserted = row.id === input.id;
-      return { record: this.mapWebhookRow(row), inserted };
+      return { record: this.mapWebhookRow(row), inserted: true };
     }
 
-    // PostgreSQL: INSERT ... ON CONFLICT DO NOTHING, then SELECT
+    const existingPg = await this.requirePostgres().query<Record<string, unknown>>(
+      'SELECT * FROM webhook_events WHERE event_id = $1 LIMIT 1',
+      [eventId],
+    );
+
+    const existingRow = existingPg.rows[0];
+    if (existingRow) {
+      const record = this.mapWebhookRow(existingRow);
+
+      if (record.status === 'processed') {
+        return { record, inserted: false };
+      }
+
+      if (record.status === 'failed') {
+        await this.requirePostgres().query(
+          'UPDATE webhook_events SET provider = $1, payload = $2::jsonb, status = $3, error_message = NULL, processed_at = NULL WHERE id = $4',
+          [provider, JSON.stringify(input.payload), 'pending', record.id],
+        );
+
+        const refreshedPg = await this.requirePostgres().query<Record<string, unknown>>(
+          'SELECT * FROM webhook_events WHERE id = $1 LIMIT 1',
+          [record.id],
+        );
+
+        const refreshedRow = refreshedPg.rows[0];
+        if (!refreshedRow) {
+          throw new ConfigError('Failed to retry failed webhook event');
+        }
+
+        return { record: this.mapWebhookRow(refreshedRow), inserted: true };
+      }
+
+      return { record, inserted: false };
+    }
+
     await this.requirePostgres().query(
-      'INSERT INTO webhook_events (id, event_id, provider, payload, status, error_message, processed_at, created_at) VALUES ($1, $2, $3, $4::jsonb, $5, NULL, NULL, $6) ON CONFLICT(event_id) DO NOTHING',
-      [
-        input.id,
-        input.eventId,
-        input.provider,
-        JSON.stringify(input.payload),
-        'pending',
-        createdAt,
-      ],
+      'INSERT INTO webhook_events (id, event_id, provider, payload, status, error_message, processed_at, created_at) VALUES ($1, $2, $3, $4::jsonb, $5, NULL, NULL, $6)',
+      [input.id, eventId, provider, JSON.stringify(input.payload), 'pending', createdAt],
     );
 
     const response = await this.requirePostgres().query<Record<string, unknown>>(
-      'SELECT * FROM webhook_events WHERE event_id = $1 LIMIT 1',
-      [input.eventId],
+      'SELECT * FROM webhook_events WHERE id = $1 LIMIT 1',
+      [input.id],
     );
 
     const row = response.rows[0];
@@ -556,9 +679,7 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
       throw new ConfigError('Failed to insert or retrieve webhook event');
     }
 
-    // Check if this is the record we just inserted (id matches) or an existing one
-    const inserted = row.id === input.id;
-    return { record: this.mapWebhookRow(row), inserted };
+    return { record: this.mapWebhookRow(row), inserted: true };
   }
 
   public async updateWebhookEventStatus(input: {
@@ -661,6 +782,8 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
   }
 
   public async cleanupOldRecords(cutoffIso: string): Promise<void> {
+    // Retention uses a strict cutoff: values exactly equal to the cutoff are retained,
+    // while only entries strictly older than the cutoff are removed.
     if (this.sqlite) {
       this.sqlite.prepare('DELETE FROM auth_challenges WHERE expires_at < ?').run(cutoffIso);
       this.sqlite.prepare('DELETE FROM idempotency_keys WHERE created_at < ?').run(cutoffIso);
@@ -694,13 +817,18 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
   }
 
   private mapTransactionRow(row: Record<string, unknown>): InteractiveTransactionRecord {
+    const status = String(row.status);
+    if (!isTransactionStatus(status)) {
+      throw new ConfigError(`Unsupported interactive transaction status: ${status}`);
+    }
+
     return {
       id: String(row.id),
       account: String(row.account),
       kind: 'deposit',
       assetCode: String(row.asset_code),
       amount: String(row.amount),
-      status: String(row.status),
+      status,
       createdAt: String(row.created_at),
       updatedAt: String(row.updated_at),
     };

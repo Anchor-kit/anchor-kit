@@ -205,7 +205,8 @@ export interface AssetsConfig {
   assets: Asset[];
 
   /**
-   * Default fiat currency code (ISO 4217)
+   * Default fiat currency code (ISO 4217).
+   * Only standard three-letter uppercase fiat codes are accepted; custom or non-fiat values are not allowed.
    * @optional
    */
   defaultCurrency?: string;
@@ -635,3 +636,19 @@ export interface AnchorKitConfig {
     ) => Promise<void> | void;
   };
 }
+
+/**
+ * Deep readonly utility type to reflect runtime deep-freeze behavior.
+ */
+export type DeepReadonly<T> = T extends (...args: never[]) => unknown
+  ? T
+  : T extends Array<infer U>
+    ? ReadonlyArray<DeepReadonly<U>>
+    : T extends object
+      ? { readonly [K in keyof T]: DeepReadonly<T[K]> }
+      : T;
+
+/**
+ * Snapshot type returned by `AnchorConfig.getConfig()` — deeply readonly.
+ */
+export type AnchorKitConfigSnapshot = DeepReadonly<AnchorKitConfig>;

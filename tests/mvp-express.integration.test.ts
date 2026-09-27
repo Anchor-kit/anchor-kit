@@ -1,5 +1,6 @@
 import { makeSqliteDbUrlForTests } from '@/core/factory.ts';
 import { createAnchor, type AnchorInstance } from '@/index.ts';
+import type { DatabaseAdapter } from '@/runtime/interfaces.ts';
 import { Account, Keypair, Operation, Transaction, TransactionBuilder } from '@stellar/stellar-sdk';
 import { createHmac } from 'node:crypto';
 import { unlinkSync } from 'node:fs';
@@ -202,13 +203,15 @@ describe('MVP Express-mounted integration', () => {
     expect(response.body).toEqual({ error: 'not_found', message: 'Endpoint not found' });
   });
 
-  it('1b) wrong HTTP method on supported path returns 404', async () => {
+  it('1b) wrong HTTP method on supported path returns 405 with Allow header', async () => {
     const response = await invoke({
       method: 'POST',
       path: '/health',
     });
 
-    expect(response.status).toBe(404);
+    expect(response.status).toBe(405);
+    expect(response.body.error).toBe('method_not_allowed');
+    expect(response.headers['allow']).toBe('GET');
   });
   it('2) /info returns configured assets and package version', async () => {
     const response = await invoke({ path: '/info' });
@@ -458,6 +461,17 @@ describe('MVP Express-mounted integration', () => {
     expect(response.body.message).toBe('Query param account is required');
   });
 
+  it('3a) /auth/challenge trims padded account identifiers', async () => {
+    const paddedAccount = `  ${clientKeypair.publicKey()}  `;
+    const response = await invoke({
+      path: `/auth/challenge?account=${encodeURIComponent(paddedAccount)}`,
+      headers: { 'x-forwarded-for': '10.0.0.9' },
+    });
+
+    expect(response.status).toBe(200);
+    expect(response.body.challenge).toBeTypeOf('string');
+  });
+
   it('3) challenge -> token happy path', async () => {
     const account = clientKeypair.publicKey();
     const challengeResponse = await invoke({
@@ -503,6 +517,37 @@ describe('MVP Express-mounted integration', () => {
     expect(Number.isNaN(expiresAtTime)).toBe(false);
     const expectedExpiry = Date.now() + 3600 * 1000;
     expect(Math.abs(expiresAtTime - expectedExpiry)).toBeLessThan(5000);
+  });
+
+  it('3d) successful token response includes Cache-Control no-store (#449)', async () => {
+    const account = clientKeypair.publicKey();
+    const challengeResponse = await invoke({
+      path: `/auth/challenge?account=${account}`,
+      headers: { 'x-forwarded-for': '10.0.0.1' },
+    });
+    expect(challengeResponse.status).toBe(200);
+
+    const challengeXdr = String(challengeResponse.body.challenge ?? '');
+    const networkPassphrase = String(challengeResponse.body.network_passphrase ?? '');
+    const challengeTx = new Transaction(challengeXdr, networkPassphrase);
+    challengeTx.sign(clientKeypair);
+    const signedChallengeXdr = challengeTx.toXDR();
+
+    const tokenResponse = await invoke({
+      method: 'POST',
+      path: '/auth/token',
+      headers: { 'content-type': 'application/json', 'x-forwarded-for': '10.0.0.1' },
+      body: { account, challenge: signedChallengeXdr },
+    });
+
+    expect(tokenResponse.status).toBe(200);
+    expect(tokenResponse.headers['cache-control']).toBe('no-store');
+    // Verify token JSON fields remain unchanged
+    expect(tokenResponse.body.token).toBeTypeOf('string');
+    expect(tokenResponse.body.token_type).toBe('Bearer');
+    expect(tokenResponse.body.account).toBe(account);
+    expect(tokenResponse.body.expires_in).toBeTypeOf('number');
+    expect(tokenResponse.body.expires_at).toBeTypeOf('string');
   });
 
   it('3a) rate limit response body includes retry_after_seconds matching header', async () => {
@@ -632,6 +677,9 @@ describe('MVP Express-mounted integration', () => {
     });
 
     expect(tokenResponse.status).toBe(200);
+    expect(tokenResponse.body.account).toBe(account);
+    expect(tokenResponse.body.token_type).toBe('Bearer');
+    expect(tokenResponse.body.expires_in).toBe(3600);
     expect(tokenResponse.body.token).toBeTypeOf('string');
   });
 
@@ -1474,7 +1522,7 @@ describe('MVP Express-mounted integration', () => {
   });
 
   it('7c) transaction lookup keeps reserved ID characters in one encoded URL segment', async () => {
-    const reservedId = 'segment/with?query=value#fragment';
+    const reservedId = 'segment?query=value#fragment';
     const account = clientKeypair.publicKey();
     const challengeResponse = await invoke({
       path: `/auth/challenge?account=${account}`,
@@ -1818,6 +1866,64 @@ describe('MVP Express-mounted integration', () => {
     expect(response.body.provider).toBe('generic'); // Should default to 'generic'
   });
 
+  it('8c) webhook route returns 429 after webhookMax is exceeded', async () => {
+    const headers = { 'content-type': 'application/json', 'x-forwarded-for': '10.0.0.200' };
+
+    for (let index = 0; index < 21; index += 1) {
+      const payload = {
+        id: `evt_rate_limit_${index}`,
+        type: 'deposit.completed',
+        transaction_id: transactionId,
+      };
+
+      const signature = createHmac('sha256', 'webhook-test-secret')
+        .update(JSON.stringify(payload))
+        .digest('hex');
+
+      const response = await invoke({
+        method: 'POST',
+        path: '/webhooks/events',
+        headers: {
+          ...headers,
+          'x-webhook-provider': 'generic',
+          'x-anchor-signature': signature,
+        },
+        body: payload,
+      });
+
+      if (index < 20) {
+        expect(response.status).toBe(200);
+      }
+    }
+
+    const rateLimitedResponse = await invoke({
+      method: 'POST',
+      path: '/webhooks/events',
+      headers: {
+        ...headers,
+        'x-webhook-provider': 'generic',
+        'x-anchor-signature': createHmac('sha256', 'webhook-test-secret')
+          .update(
+            JSON.stringify({
+              id: 'evt_rate_limit_21',
+              type: 'deposit.completed',
+              transaction_id: transactionId,
+            }),
+          )
+          .digest('hex'),
+      },
+      body: {
+        id: 'evt_rate_limit_21',
+        type: 'deposit.completed',
+        transaction_id: transactionId,
+      },
+    });
+
+    expect(rateLimitedResponse.status).toBe(429);
+    expect(rateLimitedResponse.body.error).toBe('rate_limited');
+    expect(rateLimitedResponse.headers['retry-after']).toBeDefined();
+  });
+
   it('8d) webhook without id field returns a generated event_id', async () => {
     const payload = {
       type: 'deposit.completed',
@@ -1912,6 +2018,55 @@ describe('MVP Express-mounted integration', () => {
     expect((response.body.event_id as string).length).toBeGreaterThan(0);
   });
 
+  it('8i) duplicate webhook with conflicting provider returns persisted provider', async () => {
+    const initialCallbackCount = webhookCallbackCount;
+    const payload = {
+      id: `evt_conflicting_provider_${Date.now()}`,
+      type: 'deposit.completed',
+      transaction_id: transactionId,
+    };
+
+    const signature = createHmac('sha256', 'webhook-test-secret')
+      .update(JSON.stringify(payload))
+      .digest('hex');
+
+    // First request with provider 'provider-a'
+    const firstResponse = await invoke({
+      method: 'POST',
+      path: '/webhooks/events',
+      headers: {
+        'content-type': 'application/json',
+        'x-webhook-provider': 'provider-a',
+        'x-anchor-signature': signature,
+      },
+      body: payload,
+    });
+
+    expect(firstResponse.status).toBe(200);
+    expect(firstResponse.body.duplicate).toBe(false);
+    expect(firstResponse.body.event_id).toBe(payload.id);
+    expect(firstResponse.body.provider).toBe('provider-a');
+    expect(webhookCallbackCount).toBe(initialCallbackCount + 1);
+
+    // Second request with same event ID but different provider 'provider-b'
+    const duplicateResponse = await invoke({
+      method: 'POST',
+      path: '/webhooks/events',
+      headers: {
+        'content-type': 'application/json',
+        'x-webhook-provider': 'provider-b', // Different provider
+        'x-anchor-signature': signature,
+      },
+      body: payload,
+    });
+
+    expect(duplicateResponse.status).toBe(200);
+    expect(duplicateResponse.body.duplicate).toBe(true);
+    expect(duplicateResponse.body.event_id).toBe(payload.id);
+    expect(duplicateResponse.body.provider).toBe('provider-a'); // Should return the persisted provider, not the request provider
+    expect(webhookCallbackCount).toBe(initialCallbackCount + 1); // Callback should not be invoked again
+  });
+
   it('8i) oversized Buffer-backed rawBody returns 413 payload_too_large', async () => {
     const payloadText = JSON.stringify({ account: 'G'.repeat(2048), challenge: 'x' });
 
@@ -1953,6 +2108,80 @@ describe('MVP Express-mounted integration', () => {
     expect(typeof response.body.received_at).toBe('string');
     const parsed = Date.parse(response.body.received_at as string);
     expect(Number.isNaN(parsed)).toBe(false);
+  });
+
+  it('8g) chunked oversized webhook body returns 413 payload_too_large', async () => {
+    const customDbUrl = makeSqliteDbUrlForTests();
+    const customDbPath = customDbUrl.startsWith('file:')
+      ? customDbUrl.slice('file:'.length)
+      : customDbUrl;
+    const customAnchor = createAnchor({
+      network: { network: 'testnet' },
+      server: {},
+      security: {
+        sep10SigningKey: sep10ServerKeypair.secret(),
+        interactiveJwtSecret: 'jwt-test-secret-webhook-oversize',
+        distributionAccountSecret: 'distribution-test-secret',
+        webhookSecret: 'webhook-test-secret',
+        verifyWebhookSignatures: true,
+      },
+      assets: {
+        assets: [
+          {
+            code: 'USDC',
+            issuer: 'GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5',
+          },
+        ],
+      },
+      framework: {
+        database: { provider: 'sqlite', url: customDbUrl },
+        http: { maxBodyBytes: 1024 },
+      },
+      webhooks: {
+        onEvent: async () => {
+          throw new Error('should not be called for oversized body');
+        },
+      },
+    });
+
+    await customAnchor.init();
+    const customInvoke = createMountedInvoker(customAnchor);
+
+    try {
+      // Create a payload larger than the configured maxBodyBytes (1024 bytes)
+      const largePayload = {
+        id: 'evt_oversized',
+        type: 'deposit.completed',
+        data: 'x'.repeat(2000),
+      };
+      const payloadText = JSON.stringify(largePayload);
+      const signature = createHmac('sha256', 'webhook-test-secret')
+        .update(payloadText)
+        .digest('hex');
+
+      const response = await customInvoke({
+        method: 'POST',
+        path: '/webhooks/events',
+        headers: {
+          'content-type': 'application/json',
+          'x-webhook-provider': 'generic',
+          'x-anchor-signature': signature,
+        },
+        rawBody: Buffer.from(payloadText),
+      });
+
+      // The body should be rejected at the byte limit before JSON parsing
+      expect(response.status).toBe(413);
+      expect(response.body.error).toBe('payload_too_large');
+      expect(response.body.message).toBe('Request body too large. Max 1024 bytes');
+    } finally {
+      await customAnchor.shutdown();
+      try {
+        unlinkSync(customDbPath);
+      } catch {
+        // ignore cleanup errors in CI
+      }
+    }
   });
 
   it('8f) failed webhook error response includes event_id', async () => {
@@ -2226,6 +2455,75 @@ describe('MVP Express-mounted integration', () => {
     expect(tokenResponse.body.error).toBe('invalid_challenge');
     expect(tokenResponse.body.message).toBe('Challenge transaction is invalid');
   });
+  it('10d) challenge with a different transaction source is rejected', async () => {
+    const account = clientKeypair.publicKey();
+    const wrongServerKeypair = Keypair.random();
+    const now = Math.floor(Date.now() / 1000);
+    const challenge = new TransactionBuilder(new Account(wrongServerKeypair.publicKey(), '0'), {
+      fee: '100',
+      networkPassphrase: 'Test SDF Network ; September 2015',
+    })
+      .addOperation(
+        Operation.manageData({
+          name: 'anchor_auth',
+          value: 'wrong-source-test',
+          source: account,
+        }),
+      )
+      .setTimebounds(now, now + 300)
+      .build();
+    challenge.sign(wrongServerKeypair);
+    challenge.sign(clientKeypair);
+
+    const tokenResponse = await invoke({
+      method: 'POST',
+      path: '/auth/token',
+      headers: { 'content-type': 'application/json', 'x-forwarded-for': '10.0.0.8' },
+      body: { account, challenge: challenge.toXDR() },
+    });
+
+    expect(tokenResponse.status).toBe(401);
+    expect(tokenResponse.body.error).toBe('invalid_challenge');
+    expect(tokenResponse.body.message).toBe('Challenge source account mismatch');
+  });
+  it('10e) persistence failure during auth token exchange returns a stable 500', async () => {
+    const account = clientKeypair.publicKey();
+    const challengeResponse = await invoke({
+      path: `/auth/challenge?account=${account}`,
+      headers: { 'x-forwarded-for': '10.0.0.24' },
+    });
+    expect(challengeResponse.status).toBe(200);
+    const challengeXdr = String(challengeResponse.body.challenge ?? '');
+    const networkPassphrase = String(challengeResponse.body.network_passphrase ?? '');
+    const challengeTx = new Transaction(challengeXdr, networkPassphrase);
+    challengeTx.sign(clientKeypair);
+
+    const databaseDescriptor = Object.getOwnPropertyDescriptor(anchor, 'database');
+    if (!databaseDescriptor || !(databaseDescriptor.value as DatabaseAdapter | null)) {
+      throw new Error('Expected initialized database adapter');
+    }
+    const database = databaseDescriptor.value as DatabaseAdapter;
+    const originalMark = database.markAuthChallengeConsumed.bind(database);
+    database.markAuthChallengeConsumed = async () => {
+      throw new Error('database unavailable');
+    };
+
+    try {
+      const tokenResponse = await invoke({
+        method: 'POST',
+        path: '/auth/token',
+        headers: { 'content-type': 'application/json', 'x-forwarded-for': '10.0.0.13' },
+        body: { account, challenge: challengeTx.toXDR() },
+      });
+
+      expect(tokenResponse.status).toBe(500);
+      expect(tokenResponse.body.error).toBe('server_error');
+      expect(tokenResponse.body.message).toBe('Failed to record challenge consumption');
+      expect(tokenResponse.body).not.toHaveProperty('token');
+    } finally {
+      database.markAuthChallengeConsumed = originalMark;
+    }
+  });
 
   it('10d) challenge with a different transaction source is rejected', async () => {
     const account = clientKeypair.publicKey();
@@ -2275,7 +2573,7 @@ describe('MVP Express-mounted integration', () => {
     const tokenResponse = await invoke({
       method: 'POST',
       path: '/auth/token',
-      headers: { 'content-type': 'application/json', 'x-forwarded-for': '10.0.0.13' },
+      headers: { 'content-type': 'application/json', 'x-forwarded-for': '10.0.0.24' },
       body: { account, challenge: challengeTx.toXDR() },
     });
 
@@ -2540,6 +2838,42 @@ describe('MVP Express-mounted integration', () => {
     expect(response.body.message).toBe('Request body must be valid JSON');
   });
 
+  it('15f) JSON POST routes reject missing or unrelated content types', async () => {
+    const requests: TestRequestOptions[] = [
+      {
+        method: 'POST',
+        path: '/auth/token',
+        headers: { 'content-type': 'text/plain', 'x-forwarded-for': '10.0.0.151' },
+        rawBody: '{}',
+      },
+      {
+        method: 'POST',
+        path: '/transactions/deposit/interactive',
+        headers: {
+          'content-type': 'text/plain',
+          authorization: 'Bearer ' + accessToken,
+          'x-forwarded-for': '10.0.0.152',
+        },
+        body: { asset_code: 'USDC', amount: '10' },
+      },
+      {
+        method: 'POST',
+        path: '/webhooks/events',
+        headers: { 'content-type': 'text/plain', 'x-forwarded-for': '10.0.0.153' },
+        body: { id: 'content-type-check' },
+      },
+    ];
+
+    for (const request of requests) {
+      const response = await invoke(request);
+      expect(response.status).toBe(400);
+      expect(response.body).toEqual({
+        error: 'invalid_request',
+        message: 'Content-Type must be application/json',
+      });
+    }
+  });
+
   it('15g) oversize body on POST /auth/token returns 413', async () => {
     const customDbUrl = makeSqliteDbUrlForTests();
     const customDbPath = customDbUrl.startsWith('file:')
@@ -2697,6 +3031,89 @@ describe('MVP Express-mounted integration', () => {
     }
   });
 
+  // ── Unauthenticated transaction lookup ───────────────────────────────────
+
+  it('15i) oversize body on POST /transactions/deposit/interactive returns 413', async () => {
+    const customDbUrl = makeSqliteDbUrlForTests();
+    const customDbPath = customDbUrl.startsWith('file:')
+      ? customDbUrl.slice('file:'.length)
+      : customDbUrl;
+    const customAnchor = createAnchor({
+      network: { network: 'testnet' },
+      server: { interactiveDomain: 'https://anchor.example.com' },
+      security: {
+        sep10SigningKey: sep10ServerKeypair.secret(),
+        interactiveJwtSecret: 'jwt-test-secret-oversize',
+        distributionAccountSecret: 'distribution-test-secret',
+      },
+      assets: {
+        assets: [
+          {
+            code: 'USDC',
+            issuer: 'GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5',
+            deposits_enabled: true,
+            min_amount: 1,
+            max_amount: 1000,
+          },
+        ],
+      },
+      framework: {
+        database: { provider: 'sqlite', url: customDbUrl },
+        http: { maxBodyBytes: 1024 },
+      },
+    });
+
+    await customAnchor.init();
+    const customInvoke = createMountedInvoker(customAnchor);
+
+    try {
+      // create access token for this custom anchor
+      const testKeypair = Keypair.random();
+      const account = testKeypair.publicKey();
+      const challengeResponse = await customInvoke({
+        path: `/auth/challenge?account=${account}`,
+        headers: { 'x-forwarded-for': '10.0.0.1' },
+      });
+      expect(challengeResponse.status).toBe(200);
+      const challengeXdr = String(challengeResponse.body.challenge ?? '');
+      const networkPassphrase = String(challengeResponse.body.network_passphrase ?? '');
+      const challengeTx = new Transaction(challengeXdr, networkPassphrase);
+      challengeTx.sign(testKeypair);
+
+      const tokenResponse = await customInvoke({
+        method: 'POST',
+        path: '/auth/token',
+        headers: { 'content-type': 'application/json', 'x-forwarded-for': '10.0.0.1' },
+        body: { account, challenge: challengeTx.toXDR() },
+      });
+      expect(tokenResponse.status).toBe(200);
+      const access = String(tokenResponse.body.token ?? '');
+
+      const oversizedBody = JSON.stringify({
+        asset_code: 'USDC',
+        amount: '1',
+        extra: 'x'.repeat(2048),
+      });
+      const response = await customInvoke({
+        method: 'POST',
+        path: '/transactions/deposit/interactive',
+        headers: { 'content-type': 'application/json', authorization: `Bearer ${access}` },
+        rawBody: oversizedBody,
+      });
+
+      expect(response.status).toBe(413);
+      expect(response.body.error).toBe('payload_too_large');
+      expect(response.body.message).toBe('Request body too large. Max 1024 bytes');
+    } finally {
+      await customAnchor.shutdown();
+      try {
+        unlinkSync(customDbPath);
+      } catch {
+        // ignore cleanup errors in CI
+      }
+    }
+  });
+
   it('17) GET /transactions/:id without bearer token returns 401', async () => {
     const response = await invoke({
       method: 'GET',
@@ -2717,6 +3134,35 @@ describe('MVP Express-mounted integration', () => {
 
     expect(response.status).toBe(400);
     expect(response.body.error).toBe('invalid_request');
+  });
+
+  it('17c) encoded path separators on GET /transactions/:id return 400 before lookup', async () => {
+    const database = (
+      anchor as unknown as {
+        database: {
+          getInteractiveTransactionById: (id: string) => Promise<unknown>;
+        };
+      }
+    ).database;
+    const lookupSpy = vi.spyOn(database, 'getInteractiveTransactionById');
+
+    try {
+      for (const path of ['/transactions/%2F', '/transactions/%5C']) {
+        const response = await invoke({
+          method: 'GET',
+          path,
+          headers: { authorization: `Bearer ${accessToken}` },
+        });
+
+        expect(response.status).toBe(400);
+        expect(response.body.error).toBe('invalid_request');
+        expect(response.body.message).toBe('Transaction id must not contain path separators');
+      }
+
+      expect(lookupSpy).not.toHaveBeenCalled();
+    } finally {
+      lookupSpy.mockRestore();
+    }
   });
 
   // ── Non-positive deposit amounts ─────────────────────────────────────────
@@ -2760,6 +3206,7 @@ describe('MVP Express-mounted integration', () => {
       headers: {
         'content-type': 'application/json',
         authorization: `Bearer ${accessToken}`,
+        'x-forwarded-for': '10.0.0.163',
       },
       body: { asset_code: 'USDC', amount: 'abc' },
     });

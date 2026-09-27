@@ -1,5 +1,6 @@
 import { AnchorConfig } from '@/core/config';
 import type { AnchorKitConfig } from '@/types/config';
+import { ValidationUtils } from '@/utils/validation';
 import { describe, expect, it } from 'vitest';
 
 describe('Asset Validation (#254)', () => {
@@ -352,5 +353,26 @@ describe('Operational Website Validation (#388)', () => {
     const anchor = new AnchorConfig(config);
     expect(() => anchor.validate()).toThrow();
     expect(() => anchor.validate()).toThrow(/Invalid email format for operational.supportEmail/);
+  });
+});
+
+describe('Stellar Address Checksum Validation (#386)', () => {
+  const VALID_PUBLIC_KEY = 'GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5';
+  // One-character mutation of the StrKey checksum (final char 5 -> 3)
+  const BAD_CHECKSUM_KEY = 'GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA3';
+
+  it('should return true for a valid public key', () => {
+    expect(ValidationUtils.isValidStellarAddress(VALID_PUBLIC_KEY)).toBe(true);
+  });
+
+  it('should return false for a regex-shaped key with a bad checksum', () => {
+    expect(BAD_CHECKSUM_KEY).toMatch(/^G[A-Z2-7]{55}$/);
+    expect(ValidationUtils.isValidStellarAddress(BAD_CHECKSUM_KEY)).toBe(false);
+  });
+
+  it('should return false for empty or non-string input', () => {
+    expect(ValidationUtils.isValidStellarAddress('')).toBe(false);
+    expect(ValidationUtils.isValidStellarAddress(null as unknown as string)).toBe(false);
+    expect(ValidationUtils.isValidStellarAddress(undefined as unknown as string)).toBe(false);
   });
 });

@@ -60,6 +60,9 @@ jobs:
       - name: Build package
         run: bun run build
 
+      - name: Verify npm package contents
+        run: bun run check:pack
+
       - name: Update npm for trusted publishing support
         run: npm install -g npm@latest
 

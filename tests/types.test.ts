@@ -598,9 +598,7 @@ describe('AnchorKitConfig Type Tests', () => {
         },
       };
 
-      expectTypeOf(config.framework.database.provider).toEqualTypeOf<
-        'postgres' | 'sqlite' | 'mysql'
-      >();
+      expectTypeOf(config.framework.database.provider).toEqualTypeOf<'postgres' | 'sqlite'>();
       expectTypeOf(config.framework.database.url).toEqualTypeOf<string>();
     });
   });
@@ -755,18 +753,16 @@ describe('AnchorKitConfig Type Tests', () => {
         },
       };
 
-      const mysqlConfig: FrameworkConfig = {
+      const mysqlConfig = {
         database: {
           provider: 'mysql',
           url: 'mysql://user:pass@localhost/db',
         },
-      };
+      } as unknown as FrameworkConfig;
 
-      expectTypeOf(postgresConfig.database.provider).toEqualTypeOf<
-        'postgres' | 'sqlite' | 'mysql'
-      >();
-      expectTypeOf(sqliteConfig.database.provider).toEqualTypeOf<'postgres' | 'sqlite' | 'mysql'>();
-      expectTypeOf(mysqlConfig.database.provider).toEqualTypeOf<'postgres' | 'sqlite' | 'mysql'>();
+      expectTypeOf(postgresConfig.database.provider).toEqualTypeOf<'postgres' | 'sqlite'>();
+      expectTypeOf(sqliteConfig.database.provider).toEqualTypeOf<'postgres' | 'sqlite'>();
+      expectTypeOf(mysqlConfig.database.provider).toEqualTypeOf<'postgres' | 'sqlite'>();
     });
 
     it('should support logging configuration', () => {

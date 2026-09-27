@@ -6,7 +6,7 @@ import { Readable } from 'node:stream';
 import { unlinkSync } from 'node:fs';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { Keypair, Transaction } from '@stellar/stellar-sdk';
-import { createExampleApp } from '../example/express-app.ts';
+import { createExampleApp, isSqliteDatabaseUrl } from '../example/express-app.ts';
 import { version } from '../package.json';
 
 interface ExampleAppRuntime {
@@ -36,6 +36,7 @@ interface InvokeOptions {
 interface InvokeResponse {
   status: number;
   body: Record<string, unknown>;
+  headers: Record<string, string>;
 }
 
 const DEFAULT_CHALLENGE_EXPIRATION_SECONDS = 300;
@@ -111,6 +112,7 @@ async function invokeExpress(app: Express, options: InvokeOptions): Promise<Invo
         resolve({
           status: statusCode,
           body,
+          headers: responseHeaders,
         });
       },
     } as unknown as ServerResponse;
@@ -173,6 +175,22 @@ describe('example/express-app', () => {
     await harness.cleanup();
   });
 
+  it.each([
+    '/tmp/anchor.sqlite',
+    './anchor.sqlite',
+    'file:./anchor.sqlite',
+    'sqlite:./anchor.sqlite',
+  ])('recognizes %s as SQLite', (databaseUrl) => {
+    expect(isSqliteDatabaseUrl(databaseUrl)).toBe(true);
+  });
+
+  it.each(['postgres://user:pass@localhost/db', 'postgresql://localhost/db'])(
+    'keeps %s on PostgreSQL',
+    (databaseUrl) => {
+      expect(isSqliteDatabaseUrl(databaseUrl)).toBe(false);
+    },
+  );
+
   it('mounts /anchor and serves /health', async () => {
     const response = await invokeExpress(harness.runtime.app, { path: '/anchor/health' });
     expect(response.status).toBe(200);
@@ -186,6 +204,7 @@ describe('example/express-app', () => {
       path: `/anchor/auth/challenge?account=${account}`,
     });
     expect(challengeResponse.status).toBe(200);
+    expect(challengeResponse.headers['cache-control']).toBe('no-store');
     const networkPassphrase = String(challengeResponse.body.network_passphrase ?? '');
     const challengeXdr = String(challengeResponse.body.challenge ?? '');
     const challengeTx = new Transaction(challengeXdr, networkPassphrase);

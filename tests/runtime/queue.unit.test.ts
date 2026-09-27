@@ -1,5 +1,7 @@
+import { createAnchor, makeSqliteDbUrlForTests } from '@/core/factory.ts';
 import type { QueueJob } from '@/runtime/interfaces.ts';
 import { InMemoryQueueAdapter } from '@/runtime/queue/in-memory-queue.ts';
+import { Keypair } from '@stellar/stellar-sdk';
 import { describe, expect, it } from 'vitest';
 
 function deferred<T = void>() {
@@ -12,6 +14,16 @@ function deferred<T = void>() {
 }
 
 describe('InMemoryQueueAdapter', () => {
+  it('rejects invalid constructor concurrency values', () => {
+    for (const value of [0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY]) {
+      expect(() => new InMemoryQueueAdapter({ concurrency: value as number })).toThrow(
+        /positive safe integer/i,
+      );
+    }
+
+    expect(() => new InMemoryQueueAdapter({ concurrency: 1 })).not.toThrow();
+  });
+
   it('should honor concurrency limits when processing jobs', async () => {
     const concurrency = 2;
     const queue = new InMemoryQueueAdapter({ concurrency });
@@ -382,5 +394,82 @@ describe('InMemoryQueueAdapter', () => {
     jobRelease.resolve();
     await stopPromise;
     expect(jobFinished).toBe(true);
+  });
+
+  it('rejects a different worker while the queue is running', async () => {
+    const queue = new InMemoryQueueAdapter({ concurrency: 1 });
+    const firstWorker = async (_job: QueueJob): Promise<void> => undefined;
+    const secondWorker = async (_job: QueueJob): Promise<void> => undefined;
+
+    await queue.start(firstWorker);
+
+    await expect(queue.start(secondWorker)).rejects.toThrow(/already running/i);
+    await queue.stop();
+  });
+
+  it('keeps pending jobs across stop and restart', async () => {
+    const queue = new InMemoryQueueAdapter({ concurrency: 1 });
+    const processed: number[] = [];
+    const started = deferred();
+    const complete = deferred();
+
+    const worker = async (job: QueueJob): Promise<void> => {
+      const id = job.payload.jobId as number;
+      processed.push(id);
+      if (processed.length === 3) {
+        started.resolve();
+      }
+      if (id === 3) {
+        complete.resolve();
+      }
+    };
+
+    await queue.enqueue({ type: 'process_watcher_task', payload: { jobId: 1 } });
+    await queue.enqueue({ type: 'process_watcher_task', payload: { jobId: 2 } });
+    await queue.start(worker);
+    await queue.stop();
+    await queue.enqueue({ type: 'process_watcher_task', payload: { jobId: 3 } });
+    await queue.start(worker);
+
+    await complete.promise;
+    await started.promise;
+    expect(processed).toEqual([1, 2, 3]);
+  });
+
+  it('surfaces unknown queue job types instead of silently succeeding', async () => {
+    const anchor = createAnchor({
+      network: { network: 'testnet' },
+      server: { interactiveDomain: 'https://anchor.example.com' },
+      security: {
+        sep10SigningKey: Keypair.random().secret(),
+        interactiveJwtSecret: 'jwt-secret',
+        distributionAccountSecret: 'distribution-secret',
+      },
+      assets: {
+        assets: [
+          {
+            code: 'USDC',
+            issuer: 'GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5',
+          },
+        ],
+      },
+      framework: {
+        database: { provider: 'sqlite', url: makeSqliteDbUrlForTests() },
+      },
+    });
+
+    await anchor.init();
+    const processQueueJob = (
+      Object.getPrototypeOf(anchor) as {
+        processQueueJob: (job: { type: string; payload: Record<string, unknown> }) => Promise<void>;
+      }
+    ).processQueueJob.bind(anchor);
+    await expect(
+      processQueueJob({
+        type: 'unknown_job',
+        payload: { jobId: 42 },
+      }),
+    ).rejects.toThrow(/Unknown queue job type: unknown_job/);
+    await anchor.shutdown();
   });
 });

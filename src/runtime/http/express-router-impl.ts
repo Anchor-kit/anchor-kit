@@ -15,6 +15,7 @@ import jwt from 'jsonwebtoken';
 import { createHash, randomUUID } from 'node:crypto';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { version } from '../../../package.json';
+import { extractClientIdentifier } from './client-identifier.ts';
 
 const SEP10_NONCE_OP = 'anchor_auth';
 
@@ -52,6 +53,16 @@ function sendJson(res: ServerResponse, status: number, body: Record<string, unkn
     res.setHeader('content-type', 'application/json');
   }
   res.end(JSON.stringify(body));
+}
+
+function sendMethodNotAllowed(res: ServerResponse, allowedMethods: string[]): void {
+  if (!res.headersSent) {
+    res.setHeader('Allow', allowedMethods.join(', '));
+  }
+  sendJson(res, 405, {
+    error: 'method_not_allowed',
+    message: 'Method not allowed',
+  });
 }
 
 function sendJsonUnauthorized(res: ServerResponse, body: Record<string, unknown>): void {
@@ -138,6 +149,16 @@ async function parsePostJsonBody(
   res: ServerResponse,
   maxBodyBytes: number,
 ): Promise<{ rawBody: RawBodyValue; body: Record<string, unknown> } | null> {
+  const contentType = firstNonEmptyString(req.headers['content-type']);
+  const mediaType = contentType?.split(';', 1)[0]?.trim().toLowerCase();
+  if (mediaType !== 'application/json') {
+    sendJson(res, 400, {
+      error: 'invalid_request',
+      message: 'Content-Type must be application/json',
+    });
+    return null;
+  }
+
   let rawBody: RawBodyValue;
   try {
     rawBody = await readRawBody(req, maxBodyBytes);
@@ -205,16 +226,6 @@ function endpointPath(req: IncomingMessage): string {
   return parseUrl(req).pathname;
 }
 
-function extractClientIdentifier(req: IncomingMessage, trustForwardedFor: boolean): string {
-  const socketIp = req.socket?.remoteAddress;
-  if (trustForwardedFor) {
-    const forwardedFor = req.headers['x-forwarded-for'];
-    const leftMost = typeof forwardedFor === 'string' ? forwardedFor.split(',')[0].trim() : null;
-    return leftMost || socketIp || 'unknown';
-  }
-  return socketIp || 'unknown';
-}
-
 function hasValidSignature(transaction: Transaction, publicKey: string): boolean {
   const keypair = Keypair.fromPublicKey(publicKey);
   const hash = transaction.hash();
@@ -260,10 +271,9 @@ function authenticate(
   if (!token) return null;
 
   try {
-    const decoded = jwt.verify(
-      token,
-      context.config.get('security').interactiveJwtSecret,
-    ) as jwt.JwtPayload;
+    const decoded = jwt.verify(token, context.config.get('security').interactiveJwtSecret, {
+      algorithms: ['HS256'],
+    }) as jwt.JwtPayload;
     const account = typeof decoded.sub === 'string' ? decoded.sub : null;
     const scope = typeof decoded.scope === 'string' ? decoded.scope : null;
     const typ = typeof decoded.typ === 'string' ? decoded.typ : null;
@@ -289,7 +299,11 @@ function checkRateLimit(
   endpoint: keyof ExpressRouterContext['rateRules'],
 ): boolean {
   const trustForwardedFor = context.config.get('framework')?.rateLimit?.trustForwardedFor ?? false;
-  const clientId = extractClientIdentifier(req, trustForwardedFor);
+  const clientId = extractClientIdentifier(
+    req.socket?.remoteAddress,
+    req.headers['x-forwarded-for'],
+    trustForwardedFor,
+  );
   const key = `${endpoint}:${clientId}`;
   const result = context.rateLimiter.hit(key, context.rateRules[endpoint]);
 
@@ -344,7 +358,8 @@ async function handleAuthChallenge(
     return;
   }
 
-  const account = parseUrl(req).searchParams.get('account');
+  // Accept canonical Stellar public keys and treat surrounding whitespace as non-semantic.
+  const account = parseUrl(req).searchParams.get('account')?.trim() ?? '';
   if (!account) {
     sendJson(res, 400, {
       error: 'invalid_request',
@@ -417,7 +432,7 @@ async function handleAuthToken(
     return;
   }
 
-  const account = typeof parsedBody.body.account === 'string' ? parsedBody.body.account : '';
+  const account = typeof parsedBody.body.account === 'string' ? parsedBody.body.account.trim() : '';
   const signedChallenge =
     typeof parsedBody.body.challenge === 'string' ? parsedBody.body.challenge : '';
   if (!account || !signedChallenge) {
@@ -496,7 +511,21 @@ async function handleAuthToken(
     return;
   }
 
-  await context.database.markAuthChallengeConsumed(stored.id);
+  let consumed: boolean;
+  try {
+    consumed = await context.database.markAuthChallengeConsumed(stored.id);
+  } catch {
+    sendJson(res, 500, {
+      error: 'server_error',
+      message: 'Failed to record challenge consumption',
+    });
+    return;
+  }
+
+  if (!consumed) {
+    sendJson(res, 401, { error: 'invalid_challenge', message: 'Challenge already used' });
+    return;
+  }
 
   const tokenLifetime = context.config.get('security').authTokenLifetimeSeconds ?? 3600;
   const expiresAt = new Date((Math.floor(Date.now() / 1000) + tokenLifetime) * 1000).toISOString();
@@ -752,6 +781,27 @@ async function handleTransaction(
   sendJson(res, 200, responseData);
 }
 
+const MAX_PROVIDER_IDENTIFIER_LENGTH = 64;
+
+function normalizeProviderIdentifier(value: unknown): string | null {
+  const normalized = firstNonEmptyString(value);
+  if (!normalized) {
+    return null;
+  }
+
+  if (normalized.length > MAX_PROVIDER_IDENTIFIER_LENGTH) {
+    throw new ValidationError(
+      `Webhook provider identifier must be ${MAX_PROVIDER_IDENTIFIER_LENGTH} characters or fewer`,
+    );
+  }
+
+  return normalized;
+}
+
+function hasPathSeparator(value: string): boolean {
+  return value.includes('/') || value.includes('\\');
+}
+
 async function handleWebhook(
   context: ExpressRouterContext,
   req: IncomingMessage,
@@ -767,15 +817,31 @@ async function handleWebhook(
   }
 
   const { rawBody, body: payload } = parsedBody;
+  let provider: string;
+
+  try {
+    const providerHeader = req.headers['x-webhook-provider'];
+    const providerBody = payload.provider;
+    provider =
+      normalizeProviderIdentifier(providerHeader) ??
+      normalizeProviderIdentifier(providerBody) ??
+      'generic';
+  } catch (error) {
+    if (error instanceof ValidationError) {
+      sendJson(res, 400, {
+        error: 'invalid_request',
+        message: error.message,
+      });
+      return;
+    }
+    throw error;
+  }
+
   const eventIdField = payload.id;
   const eventId =
     typeof eventIdField === 'string' && eventIdField.trim().length > 0
       ? eventIdField
       : randomUUID();
-  const providerHeader = req.headers['x-webhook-provider'];
-  const providerBody = payload.provider;
-  const provider =
-    firstNonEmptyString(providerHeader) ?? firstNonEmptyString(providerBody) ?? 'generic';
   const signatureHeader = req.headers['x-anchor-signature'];
   const signature = firstNonEmptyString(signatureHeader);
 
@@ -793,7 +859,7 @@ async function handleWebhook(
       duplicate: result.duplicate,
       event_id: result.eventId,
       received_at: new Date().toISOString(),
-      provider,
+      provider: result.provider,
     });
   } catch {
     sendJson(res, 400, {
@@ -802,6 +868,24 @@ async function handleWebhook(
       event_id: eventId,
     });
   }
+}
+
+const TRANSACTION_PATH_RE = /^\/transactions\/([^/]*)$/;
+
+const KNOWN_ROUTES: Record<string, string[]> = {
+  '/health': ['GET'],
+  '/info': ['GET'],
+  '/auth/challenge': ['GET'],
+  '/auth/token': ['POST'],
+  '/transactions/deposit/interactive': ['POST'],
+  '/webhooks/events': ['POST'],
+};
+
+function getAllowedMethods(path: string): string[] | null {
+  const exactMatch = KNOWN_ROUTES[path];
+  if (exactMatch) return exactMatch;
+  if (TRANSACTION_PATH_RE.test(path)) return ['GET'];
+  return null;
 }
 
 export async function handleExpressRouterRequest(
@@ -837,7 +921,7 @@ export async function handleExpressRouterRequest(
     return;
   }
 
-  const transactionMatch = /^\/transactions\/([^/]*)$/.exec(path);
+  const transactionMatch = TRANSACTION_PATH_RE.exec(path);
   if (method === 'GET' && transactionMatch) {
     const transactionIdRaw = transactionMatch[1];
     let transactionId: string;
@@ -859,12 +943,26 @@ export async function handleExpressRouterRequest(
       return;
     }
 
+    if (hasPathSeparator(transactionId)) {
+      sendJson(res, 400, {
+        error: 'invalid_request',
+        message: 'Transaction id must not contain path separators',
+      });
+      return;
+    }
+
     await handleTransaction(context, req, res, transactionId);
     return;
   }
 
   if (method === 'POST' && path === '/webhooks/events') {
     await handleWebhook(context, req, res);
+    return;
+  }
+
+  const allowedMethods = getAllowedMethods(path);
+  if (allowedMethods) {
+    sendMethodNotAllowed(res, allowedMethods);
     return;
   }
 

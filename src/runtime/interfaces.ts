@@ -1,3 +1,5 @@
+import type { TransactionStatus } from '@/types/transaction-status.ts';
+
 export interface AuthChallengeRecord {
   id: string;
   account: string;
@@ -13,7 +15,7 @@ export interface InteractiveTransactionRecord {
   kind: 'deposit';
   assetCode: string;
   amount: string;
-  status: string;
+  status: TransactionStatus;
   createdAt: string;
   updatedAt: string;
 }
@@ -61,7 +63,7 @@ export interface DatabaseAdapter {
     expiresAt: string;
   }): Promise<void>;
   getAuthChallengeByChallenge(challenge: string): Promise<AuthChallengeRecord | null>;
-  markAuthChallengeConsumed(id: string): Promise<void>;
+  markAuthChallengeConsumed(id: string): Promise<boolean>;
 
   insertInteractiveTransaction(input: {
     id: string;
@@ -69,11 +71,11 @@ export interface DatabaseAdapter {
     kind: 'deposit';
     assetCode: string;
     amount: string;
-    status: string;
+    status: TransactionStatus;
   }): Promise<InteractiveTransactionRecord>;
   getInteractiveTransactionById(id: string): Promise<InteractiveTransactionRecord | null>;
   listPendingTransactionsBefore(cutoffIso: string): Promise<InteractiveTransactionRecord[]>;
-  updateTransactionStatus(id: string, status: string): Promise<void>;
+  updateTransactionStatus(id: string, status: TransactionStatus): Promise<boolean>;
 
   getIdempotencyRecord(scope: string, idempotencyKey: string): Promise<IdempotencyRecord | null>;
   insertOrGetIdempotencyRecord(input: {
@@ -142,5 +144,5 @@ export interface WebhookProcessor {
     payload: Record<string, unknown>;
     rawBody: string | Buffer | Uint8Array;
     signature?: string;
-  }): Promise<{ duplicate: boolean; eventId: string }>;
+  }): Promise<{ duplicate: boolean; eventId: string; provider: string }>;
 }

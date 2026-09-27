@@ -43,6 +43,35 @@ describe('AnchorConfig', () => {
       expect(op).toBeDefined();
       expect(op?.transactionRetentionDays).toBe(90);
     });
+
+    it('should reject invalid transaction retention values', () => {
+      const invalidValues = [0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY, 2 ** 53];
+
+      invalidValues.forEach((value) => {
+        const invalidConfig: AnchorKitConfig = {
+          ...validBaseConfig,
+          operational: {
+            transactionRetentionDays: value,
+          },
+        };
+
+        expect(() => new AnchorConfig(invalidConfig).validate()).toThrow(
+          /transactionRetentionDays/,
+        );
+      });
+    });
+
+    it('should accept valid positive integer retention values unchanged', () => {
+      const config = new AnchorConfig({
+        ...validBaseConfig,
+        operational: {
+          transactionRetentionDays: 30,
+        },
+      });
+
+      expect(config.get('operational')?.transactionRetentionDays).toBe(30);
+      expect(() => config.validate()).not.toThrow();
+    });
   });
 
   describe('getAsset()', () => {
@@ -243,6 +272,19 @@ describe('AnchorConfig', () => {
       expect(() => config.validate()).not.toThrow();
     });
 
+    it('should accept valid challenge lifetime', () => {
+      const configWithChallengeTtl: AnchorKitConfig = {
+        ...validBaseConfig,
+        security: {
+          ...validBaseConfig.security,
+          challengeExpirationSeconds: 300,
+        },
+      };
+      const config = new AnchorConfig(configWithChallengeTtl);
+      expect(() => config.validate()).not.toThrow();
+      expect(config.get('security').challengeExpirationSeconds).toBe(300);
+    });
+
     it('should accept valid auth token lifetime', () => {
       const configWithTtl: AnchorKitConfig = {
         ...validBaseConfig,
@@ -261,30 +303,101 @@ describe('AnchorConfig', () => {
       expect(config.get('security').authTokenLifetimeSeconds).toBeUndefined();
     });
 
-    it('should reject invalid auth token lifetime (zero)', () => {
+    it.each([
+      ['challengeExpirationSeconds', 0],
+      ['challengeExpirationSeconds', -100],
+      ['challengeExpirationSeconds', 1.5],
+      ['challengeExpirationSeconds', Number.MAX_SAFE_INTEGER + 1],
+      ['challengeExpirationSeconds', Number.NaN],
+      ['challengeExpirationSeconds', Number.POSITIVE_INFINITY],
+      ['authTokenLifetimeSeconds', 0],
+      ['authTokenLifetimeSeconds', -100],
+      ['authTokenLifetimeSeconds', 1.5],
+      ['authTokenLifetimeSeconds', Number.MAX_SAFE_INTEGER + 1],
+      ['authTokenLifetimeSeconds', Number.NaN],
+      ['authTokenLifetimeSeconds', Number.POSITIVE_INFINITY],
+    ])('should reject invalid %s lifetime value %p', (key, value) => {
       const invalidConfig: AnchorKitConfig = {
         ...validBaseConfig,
         security: {
           ...validBaseConfig.security,
-          authTokenLifetimeSeconds: 0,
+          [key]: value,
         },
       };
       const config = new AnchorConfig(invalidConfig);
       expect(() => config.validate()).toThrow(ConfigError);
-      expect(() => config.validate()).toThrow(/authTokenLifetimeSeconds must be > 0/);
+      expect(() => config.validate()).toThrow(/must be a safe positive integer/);
     });
 
-    it('should reject invalid auth token lifetime (negative)', () => {
-      const invalidConfig: AnchorKitConfig = {
-        ...validBaseConfig,
-        security: {
-          ...validBaseConfig.security,
-          authTokenLifetimeSeconds: -100,
+    describe('operational supportEmail validation', () => {
+      it('should accept valid operational supportEmail', () => {
+        const config = new AnchorConfig({
+          ...validBaseConfig,
+          operational: { supportEmail: 'support@example.com' },
+        });
+        expect(() => config.validate()).not.toThrow();
+      });
+
+      it('should accept omitted operational supportEmail', () => {
+        const config = new AnchorConfig({
+          ...validBaseConfig,
+          operational: { name: 'Test Anchor' },
+        });
+        expect(() => config.validate()).not.toThrow();
+      });
+
+      it('should reject malformed operational supportEmail', () => {
+        const config = new AnchorConfig({
+          ...validBaseConfig,
+          operational: { supportEmail: 'invalid-email-address' },
+        });
+        expect(() => config.validate()).toThrow(ConfigError);
+        expect(() => config.validate()).toThrow(
+          /Invalid email format for operational.supportEmail/,
+        );
+      });
+    });
+
+    describe('KYC age bounds validation', () => {
+      it.each([
+        { kyc: { minAge: 18 }, name: 'minimum age only' },
+        { kyc: { maxAge: 120 }, name: 'maximum age only' },
+        { kyc: { minAge: 18, maxAge: 120 }, name: 'ordered age range' },
+        { kyc: { minAge: 0, maxAge: 0 }, name: 'zero age bounds' },
+      ])('should accept valid KYC $name', ({ kyc }) => {
+        const config = new AnchorConfig({
+          ...validBaseConfig,
+          kyc,
+        });
+
+        expect(() => config.validate()).not.toThrow();
+      });
+
+      it.each([
+        { kyc: { minAge: -1 }, message: /kyc\.minAge must be a finite non-negative integer/ },
+        { kyc: { maxAge: -1 }, message: /kyc\.maxAge must be a finite non-negative integer/ },
+        { kyc: { minAge: 18.5 }, message: /kyc\.minAge must be a finite non-negative integer/ },
+        {
+          kyc: { maxAge: Number.NaN },
+          message: /kyc\.maxAge must be a finite non-negative integer/,
         },
-      };
-      const config = new AnchorConfig(invalidConfig);
-      expect(() => config.validate()).toThrow(ConfigError);
-      expect(() => config.validate()).toThrow(/authTokenLifetimeSeconds must be > 0/);
+        {
+          kyc: { minAge: Number.POSITIVE_INFINITY },
+          message: /kyc\.minAge must be a finite non-negative integer/,
+        },
+        {
+          kyc: { minAge: 65, maxAge: 18 },
+          message: /kyc\.minAge must be less than or equal to kyc\.maxAge/,
+        },
+      ])('should reject invalid KYC age bounds %#', ({ kyc, message }) => {
+        const config = new AnchorConfig({
+          ...validBaseConfig,
+          kyc,
+        });
+
+        expect(() => config.validate()).toThrow(ConfigError);
+        expect(() => config.validate()).toThrow(message);
+      });
     });
 
     describe('operational supportEmail validation', () => {
