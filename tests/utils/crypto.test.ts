@@ -61,6 +61,11 @@ describe('CryptoUtils', () => {
       expect(decoded.exp).toBeDefined();
     });
 
+    it('should treat expiresIn: 0 as an immediate expiry (not unlimited)', async () => {
+      const token = await CryptoUtils.generateJwt(payload, secret, { expiresIn: 0 });
+      await expect(CryptoUtils.verifyJwt(token, secret)).rejects.toThrow();
+    });
+
     it('should throw error for invalid secret', async () => {
       const token = await CryptoUtils.generateJwt(payload, secret);
       await expect(CryptoUtils.verifyJwt(token, 'wrong-secret')).rejects.toThrow();

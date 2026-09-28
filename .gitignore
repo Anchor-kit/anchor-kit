@@ -1,7 +1,8 @@
-
+.idea
 node_modules
 dist
 .env
 .DS_Store
 setup-repo.ts
 tsconfig.tsbuildinfo
+.fallow/

@@ -60,7 +60,8 @@ export const CryptoUtils = {
     const secretKey = new TextEncoder().encode(secret);
     const builder = new jose.SignJWT(payload).setProtectedHeader({ alg: 'HS256' }).setIssuedAt();
 
-    if (options.expiresIn) {
+    // Honor an explicit expiresIn of 0 (immediate expiry). Only skip when option omitted.
+    if (options.expiresIn !== undefined) {
       builder.setExpirationTime(options.expiresIn);
     }
 

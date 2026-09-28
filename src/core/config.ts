@@ -1,7 +1,8 @@
 import { ConfigError } from '@/core/errors.ts';
-import type { AnchorKitConfig, Asset, NetworkConfig } from '@/types/config.ts';
+import type { AnchorKitConfig, Asset, AnchorKitConfigSnapshot } from '@/types/config.ts';
 import { AnchorKitConfigSchema, DatabaseUrlSchema } from '@/utils/validation.ts';
 import { Networks } from '@stellar/stellar-sdk';
+import { mergeAnchorConfigWithDefaults } from './config-defaults.ts';
 
 /**
  * AnchorConfig
@@ -11,88 +12,8 @@ export class AnchorConfig {
   private config: AnchorKitConfig;
 
   constructor(config: Partial<AnchorKitConfig>) {
-    const merged = this.mergeWithDefaults(config || {});
-    this.config = this.deepFreeze(merged) as AnchorKitConfig;
-  }
-
-  /**
-   * Merge partial config with sensible defaults for network and operational.
-   */
-  private mergeWithDefaults(input: Partial<AnchorKitConfig>): AnchorKitConfig {
-    const defaultNetworkPassphrases: Record<string, string> = {
-      public: Networks.PUBLIC,
-      testnet: Networks.TESTNET,
-      futurenet: Networks.FUTURENET,
-    };
-
-    const hasNetworkProp = Object.prototype.hasOwnProperty.call(input, 'network');
-    const networkInput = input.network as Partial<NetworkConfig> | undefined;
-
-    let network: NetworkConfig | undefined;
-    if (hasNetworkProp && typeof networkInput === 'undefined') {
-      network = undefined;
-    } else {
-      network = {
-        network: networkInput?.network || 'testnet',
-        horizonUrl: networkInput?.horizonUrl,
-        networkPassphrase:
-          networkInput?.networkPassphrase ||
-          defaultNetworkPassphrases[networkInput?.network || 'testnet'],
-      };
-    }
-
-    const operationalInput = input.operational;
-    const operational = {
-      name: operationalInput?.name,
-      website: operationalInput?.website,
-      supportEmail: operationalInput?.supportEmail,
-      address: operationalInput?.address,
-      transactionRetentionDays: operationalInput?.transactionRetentionDays ?? 90,
-    } as AnchorKitConfig['operational'];
-
-    // Keep original input values for required sections so explicit `undefined`
-    // is preserved (validation will catch missing required fields).
-    const merged: {
-      [K in keyof AnchorKitConfig]: AnchorKitConfig[K] | undefined;
-    } = {
-      network,
-      server: input.server,
-      security: input.security,
-      assets: input.assets,
-      kyc: input.kyc,
-      kycRequired: input.kycRequired,
-      operational,
-      metadata: input.metadata,
-      framework: input.framework
-        ? {
-            ...input.framework,
-            queue: {
-              backend: input.framework.queue?.backend ?? 'memory',
-              concurrency: input.framework.queue?.concurrency ?? 1,
-            },
-            watchers: {
-              enabled: input.framework.watchers?.enabled ?? true,
-              pollIntervalMs: input.framework.watchers?.pollIntervalMs ?? 15000,
-              transactionTimeoutMs: input.framework.watchers?.transactionTimeoutMs ?? 300000,
-              retentionDays: input.framework.watchers?.retentionDays ?? 90,
-            },
-            http: {
-              maxBodyBytes: input.framework.http?.maxBodyBytes ?? 1024 * 1024,
-            },
-            rateLimit: {
-              windowMs: input.framework.rateLimit?.windowMs ?? 60000,
-              authChallengeMax: input.framework.rateLimit?.authChallengeMax ?? 30,
-              authTokenMax: input.framework.rateLimit?.authTokenMax ?? 30,
-              webhookMax: input.framework.rateLimit?.webhookMax ?? 120,
-              depositMax: input.framework.rateLimit?.depositMax ?? 60,
-              trustForwardedFor: input.framework.rateLimit?.trustForwardedFor ?? false,
-            },
-          }
-        : undefined,
-      webhooks: input.webhooks,
-    };
-
-    return merged as AnchorKitConfig;
+    const merged = mergeAnchorConfigWithDefaults(config || {});
+    this.config = this.deepFreeze(merged);
   }
 
   /**
@@ -123,7 +44,7 @@ export class AnchorConfig {
   /**
    * Return the raw configuration object
    */
-  public getConfig(): AnchorKitConfig {
+  public getConfig(): AnchorKitConfigSnapshot {
     return this.config;
   }
 
@@ -165,23 +86,16 @@ export class AnchorConfig {
     }
 
     const network = this.config.network?.network;
-    let defaultPassphrase: string;
+    const defaultPassphrase =
+      network === 'public'
+        ? Networks.PUBLIC
+        : network === 'testnet'
+          ? Networks.TESTNET
+          : network === 'futurenet'
+            ? Networks.FUTURENET
+            : null;
 
-    switch (network) {
-      case 'public':
-        defaultPassphrase = Networks.PUBLIC;
-        break;
-      case 'testnet':
-        defaultPassphrase = Networks.TESTNET;
-        break;
-      case 'futurenet':
-        defaultPassphrase = Networks.FUTURENET;
-        break;
-      default:
-        return false;
-    }
-
-    return passphrase === defaultPassphrase;
+    return defaultPassphrase ? passphrase === defaultPassphrase : false;
   }
 
   /**
