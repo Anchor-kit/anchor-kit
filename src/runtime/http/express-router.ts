@@ -32,11 +32,6 @@ interface AuthenticatedRequestData {
   account: string;
 }
 
-interface JsonResponse {
-  status: number;
-  body: Record<string, unknown>;
-}
-
 interface RawBodyCarrier {
   rawBody?: string;
 }
@@ -407,7 +402,27 @@ export class AnchorExpressRouter {
         return;
       }
 
-      if (new Date(stored.expiresAt).getTime() < Date.now()) {
+      const now = Date.now();
+      const timeBounds = transaction.timeBounds;
+      if (
+        !timeBounds ||
+        Date.parse(stored.expiresAt) !== Number(timeBounds.maxTime) * 1000 ||
+        !Number.isFinite(Number(timeBounds.minTime))
+      ) {
+        sendJson(res, 401, {
+          error: 'invalid_challenge',
+          message: 'Challenge time bounds are invalid',
+        });
+        return;
+      }
+
+      if (now < Number(timeBounds.minTime) * 1000) {
+        sendJson(res, 401, { error: 'invalid_challenge', message: 'Challenge not yet valid' });
+        return;
+      }
+
+      // Challenge time bounds are valid from minTime up to, but not including, maxTime.
+      if (Date.parse(stored.expiresAt) <= now) {
         sendJson(res, 401, { error: 'invalid_challenge', message: 'Challenge expired' });
         return;
       }
@@ -500,11 +515,37 @@ export class AnchorExpressRouter {
       );
       const scope = `deposit:${auth.account}`;
       const requestHash = sha256(JSON.stringify({ assetCode, amount }));
+      const transactionId = randomUUID();
+      const createdAt = new Date(Date.now()).toISOString();
+      const transactionInput = {
+        id: transactionId,
+        account: auth.account,
+        kind: 'deposit' as const,
+        assetCode,
+        amount,
+        status: 'pending_user_transfer_start' as const,
+      };
+      const responseBody = {
+        id: transactionId,
+        kind: transactionInput.kind,
+        status: transactionInput.status,
+        amount,
+        asset_code: assetCode,
+        asset_issuer: selectedAsset.issuer,
+        interactive_url: `${this.config.get('server').interactiveDomain ?? 'http://localhost:3000'}/deposit/${transactionId}`,
+        created_at: createdAt,
+      };
 
       if (idempotencyKey !== null) {
-        const existing = await this.database.getIdempotencyRecord(scope, idempotencyKey);
-        if (existing) {
-          if (existing.requestHash !== requestHash) {
+        const reservation = await this.database.reserveIdempotencyRecord({
+          id: randomUUID(),
+          scope,
+          idempotencyKey,
+          requestHash,
+        });
+
+        if (!reservation.inserted) {
+          if (reservation.record.requestHash !== requestHash) {
             sendJson(res, 409, {
               error: 'idempotency_conflict',
               message: 'Idempotency key was already used with a different request body',
@@ -512,50 +553,77 @@ export class AnchorExpressRouter {
             return;
           }
 
-          sendJson(res, existing.statusCode, {
-            ...(JSON.parse(existing.responseBody) as Record<string, unknown>),
+          if (reservation.record.status === 'pending') {
+            res.setHeader('Retry-After', '1');
+            sendJson(res, 409, {
+              error: 'idempotency_in_progress',
+              message:
+                'A request with this idempotency key is still being processed; retry shortly',
+            });
+            return;
+          }
+
+          let cachedResponse: unknown;
+          try {
+            cachedResponse = JSON.parse(reservation.record.responseBody);
+          } catch {
+            cachedResponse = null;
+          }
+          if (
+            !cachedResponse ||
+            typeof cachedResponse !== 'object' ||
+            Array.isArray(cachedResponse) ||
+            typeof (cachedResponse as Record<string, unknown>).id !== 'string' ||
+            !(cachedResponse as Record<string, unknown>).id
+          ) {
+            res.setHeader('Retry-After', '1');
+            sendJson(res, 503, {
+              error: 'idempotency_response_unavailable',
+              message: 'The stored response is incomplete; retry shortly',
+            });
+            return;
+          }
+
+          sendJson(res, reservation.record.statusCode, {
+            ...(cachedResponse as Record<string, unknown>),
             idempotency_replay: true,
           });
           return;
         }
+
+        try {
+          await this.database.createDepositWithIdempotency({
+            transaction: { ...transactionInput, createdAt },
+            idempotency: {
+              scope,
+              idempotencyKey,
+              requestHash,
+              statusCode: 201,
+              responseBody: JSON.stringify(responseBody),
+            },
+          });
+        } catch (error) {
+          try {
+            await this.database.deletePendingIdempotencyRecord(scope, idempotencyKey, requestHash);
+          } catch {
+            // Keep a pending record if cleanup fails so retries cannot create duplicates.
+          }
+          throw error;
+        }
+
+        sendJson(res, 201, responseBody);
+        return;
       }
 
-      const transactionId = randomUUID();
-      const created = await this.database.insertInteractiveTransaction({
-        id: transactionId,
-        account: auth.account,
-        kind: 'deposit',
-        assetCode,
-        amount,
-        status: 'pending_user_transfer_start',
+      const created = await this.database.insertInteractiveTransaction(transactionInput);
+      sendJson(res, 201, {
+        ...responseBody,
+        id: created.id,
+        status: created.status,
+        amount: created.amount,
+        asset_code: created.assetCode,
+        created_at: created.createdAt,
       });
-
-      const response: JsonResponse = {
-        status: 201,
-        body: {
-          id: created.id,
-          kind: created.kind,
-          status: created.status,
-          amount: created.amount,
-          asset_code: created.assetCode,
-          asset_issuer: selectedAsset.issuer,
-          interactive_url: `${this.config.get('server').interactiveDomain ?? 'http://localhost:3000'}/deposit/${created.id}`,
-          created_at: created.createdAt,
-        },
-      };
-
-      if (typeof idempotencyKey === 'string' && idempotencyKey.length > 0) {
-        await this.database.insertIdempotencyRecord({
-          id: randomUUID(),
-          scope,
-          idempotencyKey,
-          requestHash,
-          statusCode: response.status,
-          responseBody: JSON.stringify(response.body),
-        });
-      }
-
-      sendJson(res, response.status, response.body);
       return;
     }
 

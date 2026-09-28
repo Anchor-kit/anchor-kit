@@ -193,7 +193,12 @@ describe('AnchorKitConfigSchema', () => {
       distributionAccountSecret: 'SD7Q4...',
     },
     assets: {
-      assets: [{ code: 'USDC', issuer: 'GD...' }],
+      assets: [
+        {
+          code: 'USDC',
+          issuer: 'GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5',
+        },
+      ],
     },
     framework: {
       database: { provider: 'sqlite', url: 'file:./test.db' },

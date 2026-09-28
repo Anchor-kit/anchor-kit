@@ -25,6 +25,7 @@ export interface IdempotencyRecord {
   scope: string;
   idempotencyKey: string;
   requestHash: string;
+  status: 'pending' | 'completed';
   statusCode: number;
   responseBody: string;
   createdAt: string;
@@ -78,6 +79,35 @@ export interface DatabaseAdapter {
   updateTransactionStatus(id: string, status: TransactionStatus): Promise<void>;
 
   getIdempotencyRecord(scope: string, idempotencyKey: string): Promise<IdempotencyRecord | null>;
+  reserveIdempotencyRecord(input: {
+    id: string;
+    scope: string;
+    idempotencyKey: string;
+    requestHash: string;
+  }): Promise<{ record: IdempotencyRecord; inserted: boolean }>;
+  createDepositWithIdempotency(input: {
+    transaction: {
+      id: string;
+      account: string;
+      kind: 'deposit';
+      assetCode: string;
+      amount: string;
+      status: TransactionStatus;
+      createdAt: string;
+    };
+    idempotency: {
+      scope: string;
+      idempotencyKey: string;
+      requestHash: string;
+      statusCode: number;
+      responseBody: string;
+    };
+  }): Promise<InteractiveTransactionRecord>;
+  deletePendingIdempotencyRecord(
+    scope: string,
+    idempotencyKey: string,
+    requestHash: string,
+  ): Promise<void>;
   insertIdempotencyRecord(input: {
     id: string;
     scope: string;

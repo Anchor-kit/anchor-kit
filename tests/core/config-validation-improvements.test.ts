@@ -167,4 +167,39 @@ describe('Config Validation Improvements (#124, #125)', () => {
     expect(() => config.validate()).toThrow(ConfigError);
     expect(() => config.validate()).toThrow(/kycRequired.*USDC|non-empty string/i);
   });
+
+  it('accepts native XLM without an issuer', () => {
+    const config = new AnchorConfig({
+      ...validBaseConfig,
+      assets: { assets: [{ code: 'XLM' }] },
+    });
+
+    expect(() => config.validate()).not.toThrow();
+  });
+
+  it('rejects an issuer configured for native XLM', () => {
+    const config = new AnchorConfig({
+      ...validBaseConfig,
+      assets: {
+        assets: [
+          { code: 'XLM', issuer: 'GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5' },
+        ],
+      },
+    });
+
+    expect(() => config.validate()).toThrow(ConfigError);
+    expect(() => config.validate()).toThrow(/XLM must not specify an issuer/i);
+  });
+
+  it('rejects issued assets with a missing or malformed issuer', () => {
+    for (const issuer of [undefined, 'not-a-stellar-public-key']) {
+      const config = new AnchorConfig({
+        ...validBaseConfig,
+        assets: { assets: [{ code: 'USDC', issuer } as { code: string; issuer?: string }] },
+      });
+
+      expect(() => config.validate()).toThrow(ConfigError);
+      expect(() => config.validate()).toThrow(/issued assets require a valid issuer/i);
+    }
+  });
 });

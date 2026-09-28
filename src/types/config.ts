@@ -159,9 +159,9 @@ export interface Asset {
   code: string;
 
   /**
-   * Asset issuer public key
+   * Asset issuer public key. Required for issued assets and omitted for native XLM.
    */
-  issuer: string;
+  issuer?: string;
 
   /**
    * Human-readable name

@@ -44,6 +44,18 @@ Anchor-Kit auto-creates MVP tables during `anchor.init()`:
 
 PostgreSQL is the preferred production path.
 
+Deposit idempotency is scoped to the authenticated account. Reusing a key with a different
+request body returns `409 idempotency_conflict`. A matching request that is still being processed
+returns `409 idempotency_in_progress` with `Retry-After: 1`; retry after that interval. Once
+complete, matching requests receive the cached response. Deposit creation and response caching are
+atomic. If either write fails, the request returns `500`, the transaction is rolled back, and the
+reservation is removed so the same key can be retried safely. An incomplete cached response returns
+`503 idempotency_response_unavailable` with `Retry-After` rather than replaying a placeholder.
+
+For SEP-10 challenges, the signed XDR time bounds are valid from `minTime` through the instant
+before `maxTime`; a challenge is expired exactly at `maxTime`. Native XLM configuration omits
+`issuer`; every issued asset requires a valid Stellar public key issuer.
+
 ## 4) Express integration
 
 ```ts

@@ -1,4 +1,5 @@
 import type { AnchorKitConfig, NetworkConfig, SecurityConfig } from '@/types/config.ts';
+import { StrKey } from '@stellar/stellar-sdk';
 import DOMPurify from 'isomorphic-dompurify';
 
 /**
@@ -107,9 +108,11 @@ export const AssetSchema = {
     if (!asset || typeof asset !== 'object') return false;
     const a = asset as Record<string, unknown>;
 
-    // Required fields: code, issuer
+    // Native XLM has no issuer; every issued asset needs a valid issuer key.
     if (typeof a.code !== 'string' || a.code.length === 0) return false;
-    if (typeof a.issuer !== 'string' || !ValidationUtils.isValidStellarAddress(a.issuer)) {
+    if (a.code === 'XLM') {
+      if (a.issuer !== undefined) return false;
+    } else if (typeof a.issuer !== 'string' || !StrKey.isValidEd25519PublicKey(a.issuer)) {
       return false;
     }
 
@@ -229,6 +232,16 @@ export const AnchorKitConfigSchema = {
     // Assets Section
     if (!assets.assets || !Array.isArray(assets.assets) || assets.assets.length === 0) {
       throw new Error('At least one asset must be configured in assets.assets');
+    }
+
+    for (const asset of assets.assets) {
+      if (!AssetSchema.isValid(asset)) {
+        const code =
+          typeof asset?.code === 'string' && asset.code.length > 0 ? asset.code : 'unknown';
+        throw new Error(
+          `Invalid asset configuration for ${code}: XLM must not specify an issuer and issued assets require a valid issuer public key.`,
+        );
+      }
     }
 
     const configuredAssetCodes = new Set(

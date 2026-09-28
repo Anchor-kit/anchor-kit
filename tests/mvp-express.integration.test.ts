@@ -1,7 +1,9 @@
 import { makeSqliteDbUrlForTests } from '@/core/factory.ts';
 import { createAnchor, type AnchorInstance } from '@/index.ts';
+import type { DatabaseAdapter } from '@/runtime/interfaces.ts';
 import { Keypair, Transaction } from '@stellar/stellar-sdk';
-import { createHmac } from 'node:crypto';
+import { Database } from 'bun:sqlite';
+import { createHash, createHmac, randomUUID } from 'node:crypto';
 import { unlinkSync } from 'node:fs';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { Readable } from 'node:stream';
@@ -84,7 +86,13 @@ function createMountedInvoker(anchor: AnchorInstance) {
       }
 
       req.url = rawUrl.slice('/anchor'.length) || '/';
-      middleware(req, res, () => {
+      middleware(req, res, (error) => {
+        if (error) {
+          res.statusCode = 500;
+          res.setHeader('content-type', 'application/json');
+          res.end(JSON.stringify({ error: 'internal_server_error' }));
+          return;
+        }
         res.statusCode = 404;
         res.setHeader('content-type', 'application/json');
         res.end(JSON.stringify({ error: 'not_found' }));
@@ -592,6 +600,147 @@ describe('MVP Express-mounted integration', () => {
     expect(response.body.idempotency_replay).toBe(true);
   });
 
+  it('6d) concurrent same-key deposits do not create duplicate transactions', async () => {
+    const database = (anchor as unknown as { database: DatabaseAdapter }).database;
+    if (!database) throw new Error('Expected initialized database');
+
+    const createDeposit = database.createDepositWithIdempotency.bind(database);
+    let createCalls = 0;
+    let signalCreateStarted!: () => void;
+    let releaseCreate!: () => void;
+    const createStarted = new Promise<void>((resolve) => {
+      signalCreateStarted = resolve;
+    });
+    const createBarrier = new Promise<void>((resolve) => {
+      releaseCreate = resolve;
+    });
+    database.createDepositWithIdempotency = async (input) => {
+      createCalls += 1;
+      signalCreateStarted();
+      await createBarrier;
+      return createDeposit(input);
+    };
+
+    try {
+      const options: TestRequestOptions = {
+        method: 'POST',
+        path: '/transactions/deposit/interactive',
+        headers: {
+          'content-type': 'application/json',
+          authorization: `Bearer ${accessToken}`,
+          'idempotency-key': 'concurrent-deposit-key',
+        },
+        body: { asset_code: 'USDC', amount: '15.5' },
+      };
+
+      const firstRequest = invoke(options);
+      await createStarted;
+      const secondResponse = await invoke(options);
+      releaseCreate();
+      const firstResponse = await firstRequest;
+      const responses = [firstResponse, secondResponse];
+
+      expect(responses.map(({ status }) => status).sort()).toEqual([201, 409]);
+      const createdResponse = responses.find(({ status }) => status === 201);
+      const pendingResponse = responses.find(({ status }) => status === 409);
+      expect(typeof createdResponse?.body.id).toBe('string');
+      expect(pendingResponse?.body.error).toBe('idempotency_in_progress');
+      expect(pendingResponse?.headers['retry-after']).toBe('1');
+      expect(createCalls).toBe(1);
+    } finally {
+      releaseCreate();
+      database.createDepositWithIdempotency = createDeposit;
+    }
+  });
+
+  it('6e) failed deposit persistence is visible and can be retried safely', async () => {
+    const database = (anchor as unknown as { database: DatabaseAdapter }).database;
+    const rawDatabase = new Database(dbPath);
+    rawDatabase.exec(`
+      CREATE TRIGGER fail_deposit_response_update
+      BEFORE UPDATE ON idempotency_keys
+      WHEN OLD.status = 'pending' AND NEW.status = 'completed'
+      BEGIN SELECT RAISE(FAIL, 'injected response update failure'); END;
+    `);
+
+    const options: TestRequestOptions = {
+      method: 'POST',
+      path: '/transactions/deposit/interactive',
+      headers: {
+        'content-type': 'application/json',
+        authorization: `Bearer ${accessToken}`,
+        'idempotency-key': 'deposit-retry-after-write-failure',
+      },
+      body: { asset_code: 'USDC', amount: '21.21' },
+    };
+
+    try {
+      const failedResponse = await invoke(options);
+      expect(failedResponse.status).toBe(500);
+      expect(failedResponse.body.error).toBe('internal_server_error');
+      expect(
+        await database.getIdempotencyRecord(
+          `deposit:${clientKeypair.publicKey()}`,
+          'deposit-retry-after-write-failure',
+        ),
+      ).toBeNull();
+
+      rawDatabase.exec('DROP TRIGGER fail_deposit_response_update');
+      const retryResponse = await invoke(options);
+      expect(retryResponse.status).toBe(201);
+      expect(retryResponse.body.id).toBeDefined();
+
+      const replayResponse = await invoke(options);
+      expect(replayResponse.status).toBe(201);
+      expect(replayResponse.body.id).toBe(retryResponse.body.id);
+      expect(replayResponse.body.idempotency_replay).toBe(true);
+
+      const count = rawDatabase
+        .prepare(
+          'SELECT COUNT(*) AS count FROM interactive_transactions WHERE account = ? AND asset_code = ? AND amount = ?',
+        )
+        .get(clientKeypair.publicKey(), 'USDC', '21.21') as { count: number };
+      expect(Number(count.count)).toBe(1);
+    } finally {
+      rawDatabase.exec('DROP TRIGGER IF EXISTS fail_deposit_response_update');
+      rawDatabase.close();
+    }
+  });
+
+  it('6f) incomplete legacy idempotency responses are not replayed as success', async () => {
+    const database = (anchor as unknown as { database: DatabaseAdapter }).database;
+    const amount = '23.23';
+    const idempotencyKey = 'legacy-empty-response-key';
+    const requestHash = createHash('sha256')
+      .update(JSON.stringify({ assetCode: 'USDC', amount }))
+      .digest('hex');
+
+    await database.insertIdempotencyRecord({
+      id: randomUUID(),
+      scope: `deposit:${clientKeypair.publicKey()}`,
+      idempotencyKey,
+      requestHash,
+      statusCode: 201,
+      responseBody: '',
+    });
+
+    const response = await invoke({
+      method: 'POST',
+      path: '/transactions/deposit/interactive',
+      headers: {
+        'content-type': 'application/json',
+        authorization: `Bearer ${accessToken}`,
+        'idempotency-key': idempotencyKey,
+      },
+      body: { asset_code: 'USDC', amount },
+    });
+
+    expect(response.status).toBe(503);
+    expect(response.body.error).toBe('idempotency_response_unavailable');
+    expect(response.body).not.toHaveProperty('id');
+    expect(response.headers['retry-after']).toBe('1');
+  });
+
   it('7) transaction lookup fetches persisted data', async () => {
     const response = await invoke({
       method: 'GET',
@@ -887,6 +1036,89 @@ describe('MVP Express-mounted integration', () => {
       expect(tokenResponse.body.error).toBe('invalid_challenge');
       expect(tokenResponse.body.message).toBe('Challenge expired');
       expect(tokenResponse.body).not.toHaveProperty('access_token');
+    } finally {
+      dateNowSpy.mockRestore();
+    }
+  });
+
+  it('10aa) challenge is valid before maxTime and expires at maxTime', async () => {
+    const account = clientKeypair.publicKey();
+    const initialNow = Date.UTC(2026, 1, 1, 0, 0, 0);
+    const dateNowSpy = vi.spyOn(Date, 'now').mockReturnValue(initialNow);
+    const boundaryCases = [
+      { offset: -1, status: 200 },
+      { offset: 0, status: 401 },
+      { offset: 1, status: 401 },
+    ] as const;
+
+    try {
+      for (const [index, boundaryCase] of boundaryCases.entries()) {
+        dateNowSpy.mockReturnValue(initialNow);
+        const challengeResponse = await invoke({
+          path: `/auth/challenge?account=${account}`,
+          headers: { 'x-forwarded-for': `10.0.1.${index + 1}` },
+        });
+        expect(challengeResponse.status).toBe(200);
+
+        const expiresAt = Date.parse(String(challengeResponse.body.expires_at));
+        const challengeTx = new Transaction(
+          String(challengeResponse.body.challenge),
+          String(challengeResponse.body.network_passphrase),
+        );
+        expect(Number(challengeTx.timeBounds?.maxTime) * 1000).toBe(expiresAt);
+        challengeTx.sign(clientKeypair);
+
+        dateNowSpy.mockReturnValue(expiresAt + boundaryCase.offset);
+        const tokenResponse = await invoke({
+          method: 'POST',
+          path: '/auth/token',
+          headers: {
+            'content-type': 'application/json',
+            'x-forwarded-for': `10.0.1.${index + 1}`,
+          },
+          body: { account, challenge: challengeTx.toXDR() },
+        });
+
+        expect(tokenResponse.status).toBe(boundaryCase.status);
+        if (boundaryCase.status === 401) {
+          expect(tokenResponse.body.message).toBe('Challenge expired');
+        }
+      }
+    } finally {
+      dateNowSpy.mockRestore();
+    }
+  });
+
+  it('10ab) future challenges are distinct from expired challenges', async () => {
+    const account = clientKeypair.publicKey();
+    const initialNow = Date.UTC(2026, 1, 2, 0, 0, 0);
+    const dateNowSpy = vi.spyOn(Date, 'now').mockReturnValue(initialNow);
+
+    try {
+      const challengeResponse = await invoke({
+        path: `/auth/challenge?account=${account}`,
+        headers: { 'x-forwarded-for': '10.0.1.10' },
+      });
+      expect(challengeResponse.status).toBe(200);
+      const challengeTx = new Transaction(
+        String(challengeResponse.body.challenge),
+        String(challengeResponse.body.network_passphrase),
+      );
+      challengeTx.sign(clientKeypair);
+
+      dateNowSpy.mockReturnValue(initialNow - 1);
+      const tokenResponse = await invoke({
+        method: 'POST',
+        path: '/auth/token',
+        headers: {
+          'content-type': 'application/json',
+          'x-forwarded-for': '10.0.1.10',
+        },
+        body: { account, challenge: challengeTx.toXDR() },
+      });
+
+      expect(tokenResponse.status).toBe(401);
+      expect(tokenResponse.body.message).toBe('Challenge not yet valid');
     } finally {
       dateNowSpy.mockRestore();
     }

@@ -114,6 +114,7 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
           scope TEXT NOT NULL,
           idempotency_key TEXT NOT NULL,
           request_hash TEXT NOT NULL,
+          status TEXT NOT NULL DEFAULT 'completed',
           status_code INTEGER NOT NULL,
           response_body TEXT NOT NULL,
           created_at TEXT NOT NULL,
@@ -141,6 +142,14 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
           created_at TEXT NOT NULL
         );
       `);
+      const idempotencyColumns = this.sqlite
+        .prepare('PRAGMA table_info(idempotency_keys)')
+        .all() as Array<{ name?: unknown }>;
+      if (!idempotencyColumns.some((column) => column.name === 'status')) {
+        this.sqlite.exec(
+          "ALTER TABLE idempotency_keys ADD COLUMN status TEXT NOT NULL DEFAULT 'completed'",
+        );
+      }
       return;
     }
 
@@ -173,12 +182,16 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
           scope TEXT NOT NULL,
           idempotency_key TEXT NOT NULL,
           request_hash TEXT NOT NULL,
+          status TEXT NOT NULL DEFAULT 'completed',
           status_code INTEGER NOT NULL,
           response_body TEXT NOT NULL,
           created_at TIMESTAMPTZ NOT NULL,
           UNIQUE(scope, idempotency_key)
         );
       `);
+      await this.postgres.query(
+        "ALTER TABLE idempotency_keys ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'completed'",
+      );
       await this.postgres.query(`
         CREATE TABLE IF NOT EXISTS webhook_events (
           id TEXT PRIMARY KEY,
@@ -407,6 +420,159 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
 
     const row = response.rows[0];
     return row ? this.mapIdempotencyRow(row) : null;
+  }
+
+  public async reserveIdempotencyRecord(input: {
+    id: string;
+    scope: string;
+    idempotencyKey: string;
+    requestHash: string;
+  }): Promise<{ record: IdempotencyRecord; inserted: boolean }> {
+    const createdAt = nowIso();
+    let inserted: boolean;
+
+    if (this.sqlite) {
+      const result = this.sqlite
+        .prepare(
+          "INSERT INTO idempotency_keys (id, scope, idempotency_key, request_hash, status, status_code, response_body, created_at) VALUES (?, ?, ?, ?, 'pending', 0, '', ?) ON CONFLICT(scope, idempotency_key) DO NOTHING",
+        )
+        .run(input.id, input.scope, input.idempotencyKey, input.requestHash, createdAt);
+      inserted = result.changes === 1;
+    } else {
+      const result = await this.requirePostgres().query<Record<string, unknown>>(
+        "INSERT INTO idempotency_keys (id, scope, idempotency_key, request_hash, status, status_code, response_body, created_at) VALUES ($1, $2, $3, $4, 'pending', 0, '', $5) ON CONFLICT (scope, idempotency_key) DO NOTHING RETURNING id",
+        [input.id, input.scope, input.idempotencyKey, input.requestHash, createdAt],
+      );
+      inserted = result.rows.length === 1;
+    }
+
+    const record = await this.getIdempotencyRecord(input.scope, input.idempotencyKey);
+    if (!record) {
+      throw new ConfigError('Failed to reserve idempotency record');
+    }
+    return { record, inserted };
+  }
+
+  public async createDepositWithIdempotency(input: {
+    transaction: {
+      id: string;
+      account: string;
+      kind: 'deposit';
+      assetCode: string;
+      amount: string;
+      status: TransactionStatus;
+      createdAt: string;
+    };
+    idempotency: {
+      scope: string;
+      idempotencyKey: string;
+      requestHash: string;
+      statusCode: number;
+      responseBody: string;
+    };
+  }): Promise<InteractiveTransactionRecord> {
+    const { transaction, idempotency } = input;
+
+    if (this.sqlite) {
+      const sqlite = this.sqlite;
+      const create = sqlite.transaction(() => {
+        sqlite
+          .prepare(
+            'INSERT INTO interactive_transactions (id, account, kind, asset_code, amount, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+          )
+          .run(
+            transaction.id,
+            transaction.account,
+            transaction.kind,
+            transaction.assetCode,
+            transaction.amount,
+            transaction.status,
+            transaction.createdAt,
+            transaction.createdAt,
+          );
+
+        const result = sqlite
+          .prepare(
+            "UPDATE idempotency_keys SET status = 'completed', status_code = ?, response_body = ? WHERE scope = ? AND idempotency_key = ? AND request_hash = ? AND status = 'pending'",
+          )
+          .run(
+            idempotency.statusCode,
+            idempotency.responseBody,
+            idempotency.scope,
+            idempotency.idempotencyKey,
+            idempotency.requestHash,
+          );
+        if (result.changes !== 1) {
+          throw new ConfigError('Pending idempotency reservation was not found');
+        }
+      });
+      create();
+    } else {
+      const postgres = this.requirePostgres();
+      await postgres.query('BEGIN');
+      try {
+        await postgres.query(
+          'INSERT INTO interactive_transactions (id, account, kind, asset_code, amount, status, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $7)',
+          [
+            transaction.id,
+            transaction.account,
+            transaction.kind,
+            transaction.assetCode,
+            transaction.amount,
+            transaction.status,
+            transaction.createdAt,
+          ],
+        );
+        const result = await postgres.query<Record<string, unknown>>(
+          "UPDATE idempotency_keys SET status = 'completed', status_code = $1, response_body = $2 WHERE scope = $3 AND idempotency_key = $4 AND request_hash = $5 AND status = 'pending' RETURNING id",
+          [
+            idempotency.statusCode,
+            idempotency.responseBody,
+            idempotency.scope,
+            idempotency.idempotencyKey,
+            idempotency.requestHash,
+          ],
+        );
+        if (result.rows.length !== 1) {
+          throw new ConfigError('Pending idempotency reservation was not found');
+        }
+        await postgres.query('COMMIT');
+      } catch (error) {
+        await postgres.query('ROLLBACK');
+        throw error;
+      }
+    }
+
+    return {
+      id: transaction.id,
+      account: transaction.account,
+      kind: transaction.kind,
+      assetCode: transaction.assetCode,
+      amount: transaction.amount,
+      status: transaction.status,
+      createdAt: transaction.createdAt,
+      updatedAt: transaction.createdAt,
+    };
+  }
+
+  public async deletePendingIdempotencyRecord(
+    scope: string,
+    idempotencyKey: string,
+    requestHash: string,
+  ): Promise<void> {
+    if (this.sqlite) {
+      this.sqlite
+        .prepare(
+          "DELETE FROM idempotency_keys WHERE scope = ? AND idempotency_key = ? AND request_hash = ? AND status = 'pending'",
+        )
+        .run(scope, idempotencyKey, requestHash);
+      return;
+    }
+
+    await this.requirePostgres().query(
+      "DELETE FROM idempotency_keys WHERE scope = $1 AND idempotency_key = $2 AND request_hash = $3 AND status = 'pending'",
+      [scope, idempotencyKey, requestHash],
+    );
   }
 
   public async insertIdempotencyRecord(input: {
@@ -680,6 +846,7 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
       scope: String(row.scope),
       idempotencyKey: String(row.idempotency_key),
       requestHash: String(row.request_hash),
+      status: row.status === 'pending' ? 'pending' : 'completed',
       statusCode: Number(row.status_code),
       responseBody: String(row.response_body),
       createdAt: String(row.created_at),
