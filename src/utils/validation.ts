@@ -208,6 +208,18 @@ export const SecurityConfigSchema = {
     if (!config.distributionAccountSecret)
       throw new Error('Missing required secret: security.distributionAccountSecret');
     if (
+      config.enableClientAttribution !== undefined &&
+      typeof config.enableClientAttribution !== 'boolean'
+    ) {
+      throw new Error('security.enableClientAttribution must be a boolean');
+    }
+    if (
+      config.verifyWebhookSignatures !== undefined &&
+      typeof config.verifyWebhookSignatures !== 'boolean'
+    ) {
+      throw new Error('security.verifyWebhookSignatures must be a boolean');
+    }
+    if (
       config.authTokenLifetimeSeconds !== undefined &&
       (typeof config.authTokenLifetimeSeconds !== 'number' ||
         !Number.isFinite(config.authTokenLifetimeSeconds) ||
@@ -242,6 +254,14 @@ export const AnchorKitConfigSchema = {
 
     // Network Section
     NetworkConfigSchema.validate(network);
+
+    if (server.interactiveDomain && !ValidationUtils.isValidUrl(server.interactiveDomain)) {
+      throw new Error('Invalid URL format for server.interactiveDomain');
+    }
+    const serverErrors = validateServerConfig(server);
+    if (serverErrors.length > 0) {
+      throw new Error(`Invalid server configuration: ${serverErrors.join(', ')}`);
+    }
 
     // Security Section
     SecurityConfigSchema.validate(security);
@@ -317,9 +337,6 @@ export const AnchorKitConfigSchema = {
     }
 
     // Other URLs
-    if (server.interactiveDomain && !ValidationUtils.isValidUrl(server.interactiveDomain)) {
-      throw new Error('Invalid URL format for server.interactiveDomain');
-    }
     if (metadata?.tomlUrl && !ValidationUtils.isValidUrl(metadata.tomlUrl)) {
       throw new Error('Invalid URL format for metadata.tomlUrl');
     }
@@ -393,7 +410,7 @@ export const ServerConfigSchema: Record<keyof Required<ServerConfig>, SchemaFiel
     type: 'number',
     required: false,
     description: 'Request timeout in milliseconds. Defaults to 30000.',
-    validate: (value) => typeof value === 'number' && Number.isFinite(value) && value > 0,
+    validate: (value) => typeof value === 'number' && Number.isSafeInteger(value) && value > 0,
   },
 };
 
