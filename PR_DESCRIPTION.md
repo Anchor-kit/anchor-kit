@@ -1,21 +1,23 @@
-## What does this PR do?
+# PR Summary
 
-Makes deposit idempotency reservations explicit and atomic. Concurrent replays receive a retry response, failed writes roll back safely, and incomplete cached bodies are never replayed as success. Also defines SEP-10 challenge expiry boundaries and validates native XLM versus issued-asset issuer configuration.
+Adds focused tests for three behaviors:
 
-## How to test?
+- sqlite-backed `getInteractiveTransactionById()` returns `null` for unknown transaction IDs
+- `TransactionWatcher.stop()` before `start()` is a safe no-op
+- webhook route accepts an empty request body and returns a generated `event_id`
 
-Run `bun test`. Focused coverage exercises delayed concurrent deposit requests, SQLite write failures and retries, fixed-clock challenge boundaries, and asset issuer validation.
+## How to test
+
+- Run `bun test tests/runtime/sql-adapter-interactive-tx.test.ts tests/runtime/transaction-watcher.unit.test.ts tests/mvp-express.integration.test.ts`
+- Confirm all tests pass
 
 ## Checklist
 
 - [x] My code follows the code style of this project.
 - [x] I have added tests for my changes.
-- [x] I have updated the documentation accordingly.
-- [ ] I have run `bun run test` and `bun run lint` locally.
+- [ ] I have updated the documentation accordingly.
+- [x] I have run `bun test` locally.
 
 ## Issue Reference
 
-Closes #573
-Closes #574
-Closes #569
-Closes #575
+Closes #243, #240, and #245

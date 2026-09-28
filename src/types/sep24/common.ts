@@ -44,6 +44,12 @@ export interface BaseTransactionResponse {
   /** Unix timestamp when transaction was completed */
   completed_at?: number;
 
+  /** ISO 8601 timestamp when transaction record was created */
+  created_at?: string;
+
+  /** ISO 8601 timestamp when transaction record was last updated */
+  updated_at?: string;
+
   /** Additional transaction data */
   message?: string;
 

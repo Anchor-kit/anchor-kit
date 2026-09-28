@@ -64,7 +64,7 @@ export interface DatabaseAdapter {
     expiresAt: string;
   }): Promise<void>;
   getAuthChallengeByChallenge(challenge: string): Promise<AuthChallengeRecord | null>;
-  markAuthChallengeConsumed(id: string): Promise<void>;
+  markAuthChallengeConsumed(id: string): Promise<boolean>;
 
   insertInteractiveTransaction(input: {
     id: string;
@@ -76,48 +76,25 @@ export interface DatabaseAdapter {
   }): Promise<InteractiveTransactionRecord>;
   getInteractiveTransactionById(id: string): Promise<InteractiveTransactionRecord | null>;
   listPendingTransactionsBefore(cutoffIso: string): Promise<InteractiveTransactionRecord[]>;
-  updateTransactionStatus(id: string, status: TransactionStatus): Promise<void>;
+  updateTransactionStatus(id: string, status: TransactionStatus): Promise<boolean>;
 
   getIdempotencyRecord(scope: string, idempotencyKey: string): Promise<IdempotencyRecord | null>;
-  reserveIdempotencyRecord(input: {
-    id: string;
-    scope: string;
-    idempotencyKey: string;
-    requestHash: string;
-  }): Promise<{ record: IdempotencyRecord; inserted: boolean }>;
-  createDepositWithIdempotency(input: {
-    transaction: {
-      id: string;
-      account: string;
-      kind: 'deposit';
-      assetCode: string;
-      amount: string;
-      status: TransactionStatus;
-      createdAt: string;
-    };
-    idempotency: {
-      scope: string;
-      idempotencyKey: string;
-      requestHash: string;
-      statusCode: number;
-      responseBody: string;
-    };
-  }): Promise<InteractiveTransactionRecord>;
-  deletePendingIdempotencyRecord(
-    scope: string,
-    idempotencyKey: string,
-    requestHash: string,
-  ): Promise<void>;
-  insertIdempotencyRecord(input: {
+  insertOrGetIdempotencyRecord(input: {
     id: string;
     scope: string;
     idempotencyKey: string;
     requestHash: string;
     statusCode: number;
     responseBody: string;
+  }): Promise<IdempotencyRecord>;
+  updateIdempotencyRecord(input: {
+    scope: string;
+    idempotencyKey: string;
+    statusCode: number;
+    responseBody: string;
   }): Promise<void>;
 
-  insertWebhookEvent(input: {
+  insertOrGetWebhookEvent(input: {
     id: string;
     eventId: string;
     provider: string;
@@ -166,7 +143,7 @@ export interface WebhookProcessor {
     eventId: string;
     provider: string;
     payload: Record<string, unknown>;
-    rawBody: string;
+    rawBody: string | Buffer | Uint8Array;
     signature?: string;
-  }): Promise<{ duplicate: boolean; eventId: string }>;
+  }): Promise<{ duplicate: boolean; eventId: string; provider: string }>;
 }

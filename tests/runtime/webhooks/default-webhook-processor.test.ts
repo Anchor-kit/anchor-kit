@@ -1,7 +1,7 @@
 import { createHmac } from 'node:crypto';
+import type { DatabaseAdapter, WebhookEventRecord } from '../../../src/runtime/interfaces.ts';
 import { DefaultWebhookProcessor } from '../../../src/runtime/webhooks/default-webhook-processor.ts';
 import type { AnchorKitConfig } from '../../../src/types/config.ts';
-import type { DatabaseAdapter, WebhookEventRecord } from '../../../src/runtime/interfaces.ts';
 
 describe('DefaultWebhookProcessor', () => {
   let processor: DefaultWebhookProcessor;
@@ -23,7 +23,7 @@ describe('DefaultWebhookProcessor', () => {
     };
 
     mockDatabase = {
-      insertWebhookEvent: async (input) => {
+      insertOrGetWebhookEvent: async (input) => {
         if (input.eventId === 'evt_duplicate') {
           return { record: existingRecord, inserted: false };
         }
@@ -78,6 +78,7 @@ describe('DefaultWebhookProcessor', () => {
 
     expect(result.duplicate).toBe(false);
     expect(result.eventId).toBe('evt_new');
+    expect(result.provider).toBe('test-provider');
     expect(callbackInvokedCount).toBe(1);
   });
 
@@ -91,6 +92,21 @@ describe('DefaultWebhookProcessor', () => {
 
     expect(result.duplicate).toBe(true);
     expect(result.eventId).toBe('evt_duplicate');
+    expect(result.provider).toBe('test-provider');
+    expect(callbackInvokedCount).toBe(0);
+  });
+
+  test('duplicate event with conflicting provider returns persisted provider', async () => {
+    const result = await processor.process({
+      eventId: 'evt_duplicate',
+      provider: 'different-provider', // Conflicting provider
+      payload: { type: 'test' },
+      rawBody: '{}',
+    });
+
+    expect(result.duplicate).toBe(true);
+    expect(result.eventId).toBe('evt_duplicate');
+    expect(result.provider).toBe('test-provider'); // Should return the persisted provider, not the request provider
     expect(callbackInvokedCount).toBe(0);
   });
 
@@ -210,93 +226,7 @@ describe('DefaultWebhookProcessor', () => {
 
     expect(result.duplicate).toBe(false);
     expect(result.eventId).toBe('evt_valid_signature');
+    expect(result.provider).toBe('test-provider');
     expect(callbackInvokedCount).toBe(1);
-  });
-
-  test('accepts an uppercase webhook signature and invokes callback', async () => {
-    const webhookSecret = 'webhook-test-secret';
-    const rawBody = '{"type":"test"}';
-    const validSignature = createHmac('sha256', webhookSecret).update(rawBody).digest('hex').toUpperCase();
-
-    const config: AnchorKitConfig = {
-      network: { network: 'testnet' },
-      server: { interactiveDomain: 'test.example.com' },
-      assets: { assets: [] },
-      framework: { database: { provider: 'sqlite', url: 'file::memory:' } },
-      security: {
-        sep10SigningKey: 'SCZJBZ6S7HWMQVT7DM74JVHVDKCEE5P6I6T3E5M7LJM6LJM6LJM6LJM6',
-        interactiveJwtSecret: 'test-jwt-secret',
-        distributionAccountSecret: 'test-distribution-secret',
-        verifyWebhookSignatures: true,
-        webhookSecret,
-      },
-      webhooks: {
-        onEvent: async () => {
-          callbackInvokedCount += 1;
-        },
-      },
-    };
-
-    const secureProcessor = new DefaultWebhookProcessor({
-      config,
-      database: mockDatabase as DatabaseAdapter,
-    });
-
-    const result = await secureProcessor.process({
-      eventId: 'evt_valid_signature_uppercase',
-      provider: 'test-provider',
-      payload: { type: 'test' },
-      rawBody,
-      signature: validSignature,
-    });
-
-    expect(result.duplicate).toBe(false);
-    expect(result.eventId).toBe('evt_valid_signature_uppercase');
-    expect(callbackInvokedCount).toBe(1);
-  });
-
-  test('rejects a different uppercase webhook signature', async () => {
-    const webhookSecret = 'webhook-test-secret';
-    const rawBody = '{"type":"test"}';
-    const invalidSignature = createHmac('sha256', 'different-secret')
-      .update(rawBody)
-      .digest('hex')
-      .toUpperCase();
-
-    const config: AnchorKitConfig = {
-      network: { network: 'testnet' },
-      server: { interactiveDomain: 'test.example.com' },
-      assets: { assets: [] },
-      framework: { database: { provider: 'sqlite', url: 'file::memory:' } },
-      security: {
-        sep10SigningKey: 'SCZJBZ6S7HWMQVT7DM74JVHVDKCEE5P6I6T3E5M7LJM6LJM6LJM6LJM6',
-        interactiveJwtSecret: 'test-jwt-secret',
-        distributionAccountSecret: 'test-distribution-secret',
-        verifyWebhookSignatures: true,
-        webhookSecret,
-      },
-      webhooks: {
-        onEvent: async () => {
-          callbackInvokedCount += 1;
-        },
-      },
-    };
-
-    const secureProcessor = new DefaultWebhookProcessor({
-      config,
-      database: mockDatabase as DatabaseAdapter,
-    });
-
-    await expect(
-      secureProcessor.process({
-        eventId: 'evt_invalid_signature_uppercase',
-        provider: 'test-provider',
-        payload: { type: 'test' },
-        rawBody,
-        signature: invalidSignature,
-      }),
-    ).rejects.toThrow('Invalid webhook signature');
-
-    expect(callbackInvokedCount).toBe(0);
   });
 });

@@ -63,11 +63,9 @@ export const StellarUtils = {
         type: 'hash',
       };
     }
-    // Text memo is strictly limited to 28 bytes.
-    // If using a UUID string, we must truncate, but 28 chars of a UUID v4
-    // still provides sufficient uniqueness (> 10^30 combinations).
+    // Text memos are limited to 28 UTF-8 bytes, not JavaScript UTF-16 code units.
     return {
-      value: transactionId.substring(0, 28),
+      value: truncateUtf8(transactionId, 28),
       type: 'text',
     };
   },
@@ -114,6 +112,11 @@ export const StellarUtils = {
    */
   async buildPaymentXdr(params: PaymentParams): Promise<string> {
     const { source, destination, amount, assetCode, issuer, memo, network } = params;
+    const normalizedAssetCode = assetCode.trim().toUpperCase();
+
+    if (!isPositiveFiniteDecimal(amount)) {
+      throw new Error('amount must be a positive finite decimal string');
+    }
 
     if (!isValidPaymentAccountAddress(source)) {
       throw new Error('source must be a valid Stellar public or muxed public key');
@@ -124,17 +127,31 @@ export const StellarUtils = {
     }
 
     const networkPassphrase =
-      network === 'public'
-        ? Networks.PUBLIC
-        : network === 'futurenet'
-          ? Networks.FUTURENET
-          : Networks.TESTNET;
+      network === undefined || network === 'testnet'
+        ? Networks.TESTNET
+        : network === 'public'
+          ? Networks.PUBLIC
+          : network === 'futurenet'
+            ? Networks.FUTURENET
+            : (() => {
+                throw new Error(
+                  'Unsupported network: ' +
+                    network +
+                    '. Must be one of: public, testnet, futurenet',
+                );
+              })();
 
-    if (assetCode !== 'XLM' && (!issuer || !ValidationUtils.isValidStellarAddress(issuer))) {
-      throw new Error(`A valid issuer is required for non-native asset payments: ${assetCode}`);
+    if (
+      normalizedAssetCode !== 'XLM' &&
+      (!issuer || !ValidationUtils.isValidStellarAddress(issuer))
+    ) {
+      throw new Error(
+        'A valid issuer is required for non-native asset payments: ' + normalizedAssetCode,
+      );
     }
 
-    const asset = assetCode === 'XLM' ? Asset.native() : new Asset(assetCode, issuer);
+    const asset =
+      normalizedAssetCode === 'XLM' ? Asset.native() : new Asset(normalizedAssetCode, issuer);
 
     // We use a dummy sequence number because the actual submission will be handled later
     // or by a signer that manages sequence numbers.
@@ -165,9 +182,11 @@ export const StellarUtils = {
           stellarMemo = StellarMemo.id(memo.value);
           break;
         case 'hash':
+          validateBinaryMemoValue(memo.value, memo.type);
           stellarMemo = StellarMemo.hash(memo.value);
           break;
         case 'return':
+          validateBinaryMemoValue(memo.value, memo.type);
           stellarMemo = StellarMemo.return(memo.value);
           break;
         default:
@@ -192,4 +211,28 @@ export const StellarUtils = {
 
 function isValidPaymentAccountAddress(address: string): boolean {
   return StrKey.isValidEd25519PublicKey(address) || StrKey.isValidMed25519PublicKey(address);
+}
+
+function isPositiveFiniteDecimal(value: string): boolean {
+  return /^\d+(?:\.\d+)?$/.test(value) && Number.isFinite(Number(value)) && Number(value) > 0;
+}
+
+function validateBinaryMemoValue(value: string, type: 'hash' | 'return'): void {
+  if (!/^[0-9a-fA-F]{64}$/.test(value)) {
+    throw new Error(type + ' memo must be exactly 32 bytes encoded as 64 hexadecimal characters');
+  }
+}
+
+function truncateUtf8(value: string, maxBytes: number): string {
+  let result = '';
+  let byteLength = 0;
+
+  for (const character of value) {
+    const characterBytes = Buffer.byteLength(character, 'utf8');
+    if (byteLength + characterBytes > maxBytes) break;
+    result += character;
+    byteLength += characterBytes;
+  }
+
+  return result;
 }

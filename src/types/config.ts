@@ -205,7 +205,8 @@ export interface AssetsConfig {
   assets: Asset[];
 
   /**
-   * Default fiat currency code (ISO 4217)
+   * Default fiat currency code (ISO 4217).
+   * Only standard three-letter uppercase fiat codes are accepted; custom or non-fiat values are not allowed.
    * @optional
    */
   defaultCurrency?: string;
@@ -300,34 +301,22 @@ export interface OperationalConfig {
   supportEmail?: string;
 
   /**
-   * Operational address
+   * Enable webhook event processing
    * @optional
-   */
-  address?: OperationalAddress;
-
-  /**
-   * Enable transaction webhook notifications
-   * @optional - defaults to true
    */
   webhooksEnabled?: boolean;
 
   /**
-   * Background job queue backend ('memory' | 'redis' | 'postgres')
-   * @optional - defaults to 'memory'
-   */
-  queueBackend?: 'memory' | 'redis' | 'postgres';
-
-  /**
-   * Redis connection URL (required if queueBackend is 'redis')
+   * Enable CORS for HTTP endpoints
    * @optional
    */
-  redisUrl?: string;
+  corsEnabled?: boolean;
 
   /**
-   * Enable cross-origin requests
-   * @optional - defaults to true
+   * Operational address
+   * @optional
    */
-  corsEnabled?: boolean;
+  address?: OperationalAddress;
 
   /**
    * Transaction retention period in days
@@ -498,6 +487,13 @@ export interface FrameworkConfig {
      * @optional - defaults to 60
      */
     depositMax?: number;
+
+    /**
+     * Trust x-forwarded-for header for client IP identification.
+     * Only set this to true if you're behind a trusted proxy.
+     * @optional - defaults to false
+     */
+    trustForwardedFor?: boolean;
   };
 
   /**
@@ -640,3 +636,19 @@ export interface AnchorKitConfig {
     ) => Promise<void> | void;
   };
 }
+
+/**
+ * Deep readonly utility type to reflect runtime deep-freeze behavior.
+ */
+export type DeepReadonly<T> = T extends (...args: never[]) => unknown
+  ? T
+  : T extends Array<infer U>
+    ? ReadonlyArray<DeepReadonly<U>>
+    : T extends object
+      ? { readonly [K in keyof T]: DeepReadonly<T[K]> }
+      : T;
+
+/**
+ * Snapshot type returned by `AnchorConfig.getConfig()` — deeply readonly.
+ */
+export type AnchorKitConfigSnapshot = DeepReadonly<AnchorKitConfig>;

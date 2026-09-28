@@ -5,9 +5,13 @@ import { createAnchor } from '@/index.ts';
 class MockQueueAdapter {
   public started = false;
   public startCalls = 0;
-  public worker: ((job: { type: string; payload: Record<string, unknown> }) => Promise<void>) | null = null;
+  public worker:
+    | ((job: { type: string; payload: Record<string, unknown> }) => Promise<void>)
+    | null = null;
 
-  public async start(worker: (job: { type: string; payload: Record<string, unknown> }) => Promise<void>): Promise<void> {
+  public async start(
+    worker: (job: { type: string; payload: Record<string, unknown> }) => Promise<void>,
+  ): Promise<void> {
     this.started = true;
     this.startCalls += 1;
     this.worker = worker;

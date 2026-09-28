@@ -10,8 +10,23 @@ export interface RateLimitRule {
 
 export class InMemoryRateLimiter {
   private readonly buckets = new Map<string, RateLimitBucket>();
+  private lastCleanupAt: number = Date.now();
+  private readonly cleanupIntervalMs: number = 60000; // 1 minute
+
+  private cleanupExpiredBuckets(): void {
+    const now = Date.now();
+    if (now - this.lastCleanupAt > this.cleanupIntervalMs) {
+      for (const [key, bucket] of this.buckets) {
+        if (now >= bucket.resetAt) {
+          this.buckets.delete(key);
+        }
+      }
+      this.lastCleanupAt = now;
+    }
+  }
 
   public hit(key: string, rule: RateLimitRule): { allowed: boolean; retryAfterSeconds: number } {
+    this.cleanupExpiredBuckets();
     const now = Date.now();
     const bucket = this.buckets.get(key);
 
