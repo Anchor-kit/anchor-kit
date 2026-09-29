@@ -1754,6 +1754,18 @@ describe('MVP Express-mounted integration', () => {
 
     expect(response.status).toBe(404);
     expect(response.body).toEqual({ error: 'not_found', message: 'Transaction not found' });
+    expect(response.headers['cache-control']).toBe('no-store');
+  });
+
+  it('7b) transaction lookup marks successful responses as no-store', async () => {
+    const response = await invoke({
+      method: 'GET',
+      path: `/transactions/${transactionId}`,
+      headers: { authorization: `Bearer ${accessToken}` },
+    });
+
+    expect(response.status).toBe(200);
+    expect(response.headers['cache-control']).toBe('no-store');
   });
 
   it('8) webhook route stores event and invokes configured callback', async () => {
