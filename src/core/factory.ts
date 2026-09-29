@@ -5,6 +5,7 @@ import {
   makeSqliteDbUrlForTests,
 } from '@/runtime/database/sql-database-adapter.ts';
 import { AnchorExpressRouter, type ExpressLikeMiddleware } from '@/runtime/http/express-router.ts';
+import { validatePluginRoutes } from '@/runtime/http/express-router-impl.ts';
 import type {
   DatabaseAdapter,
   InteractiveTransactionRecord,
@@ -67,9 +68,13 @@ export class AnchorInstance {
     if (this.initPromise) return this.initPromise;
 
     this.initPromise = (async () => {
+      const pluginRoutes = Array.from(this.plugins.values()).flatMap((plugin) =>
+        (plugin.routes ?? []).map((route) => ({ pluginId: plugin.id, route })),
+      );
       const frameworkConfig = this.config.get('framework');
 
       try {
+        validatePluginRoutes(pluginRoutes);
         this.database = createSqlDatabaseAdapter(frameworkConfig.database);
         await this.database.connect();
         await this.database.migrate();
@@ -105,6 +110,7 @@ export class AnchorInstance {
           config: this.config,
           database: this.database,
           webhookProcessor: this.webhookProcessor,
+          pluginRoutes,
         }).getMiddleware();
 
         this.initialized = true;
