@@ -1609,6 +1609,76 @@ describe('MVP Express-mounted integration', () => {
     expect(secondResponse.body.idempotency_replay).toBeUndefined();
   });
 
+  it('6e-i) Idempotency-Key exactly at 255-byte limit is accepted', async () => {
+    // A key composed of ASCII characters: byte length equals character length.
+    const keyAtLimit = 'a'.repeat(255);
+    const response = await invoke({
+      method: 'POST',
+      path: '/transactions/deposit/interactive',
+      headers: {
+        'content-type': 'application/json',
+        authorization: `Bearer ${accessToken}`,
+        'idempotency-key': keyAtLimit,
+      },
+      body: { asset_code: 'USDC', amount: '1' },
+    });
+
+    expect(response.status).toBe(201);
+    expect(response.body.id).toBeTruthy();
+  });
+
+  it('6e-ii) Idempotency-Key one byte over the 255-byte limit is rejected with 400', async () => {
+    const keyOverLimit = 'a'.repeat(256);
+    const response = await invoke({
+      method: 'POST',
+      path: '/transactions/deposit/interactive',
+      headers: {
+        'content-type': 'application/json',
+        authorization: `Bearer ${accessToken}`,
+        'idempotency-key': keyOverLimit,
+      },
+      body: { asset_code: 'USDC', amount: '1' },
+    });
+
+    expect(response.status).toBe(400);
+    expect(response.body.error).toBe('invalid_request');
+    expect(response.body.message).toMatch(/255/);
+  });
+
+  it('6e-iii) Idempotency-Key with leading/trailing whitespace is normalized before the size check', async () => {
+    // After trim() a 255-byte key is at the limit and must be accepted.
+    const keyAtLimit = 'a'.repeat(255);
+    const responseAccepted = await invoke({
+      method: 'POST',
+      path: '/transactions/deposit/interactive',
+      headers: {
+        'content-type': 'application/json',
+        authorization: `Bearer ${accessToken}`,
+        'idempotency-key': `  ${keyAtLimit}  `,
+      },
+      body: { asset_code: 'USDC', amount: '2' },
+    });
+
+    // Key at limit after normalization — accepted (may be a replay of 6e-i if same account/key)
+    expect([200, 201]).toContain(responseAccepted.status);
+
+    // After trim() a 256-byte key is still over the limit and must be rejected.
+    const keyOverLimit = 'a'.repeat(256);
+    const responseRejected = await invoke({
+      method: 'POST',
+      path: '/transactions/deposit/interactive',
+      headers: {
+        'content-type': 'application/json',
+        authorization: `Bearer ${accessToken}`,
+        'idempotency-key': `  ${keyOverLimit}  `,
+      },
+      body: { asset_code: 'USDC', amount: '2' },
+    });
+
+    expect(responseRejected.status).toBe(400);
+    expect(responseRejected.body.error).toBe('invalid_request');
+  });
+
   it('6e) deposit with amount as a JSON number creates a transaction', async () => {
     const response = await invoke({
       method: 'POST',

@@ -779,6 +779,19 @@ async function handleDepositInteractive(
   }
 
   const idempotencyKey = IdempotencyUtils.extractIdempotencyHeader(req.headers, 'idempotency-key');
+
+  const IDEMPOTENCY_KEY_MAX_BYTES = 255;
+  if (
+    typeof idempotencyKey === 'string' &&
+    Buffer.byteLength(idempotencyKey, 'utf8') > IDEMPOTENCY_KEY_MAX_BYTES
+  ) {
+    sendJson(res, 400, {
+      error: 'invalid_request',
+      message: `Idempotency-Key must not exceed ${IDEMPOTENCY_KEY_MAX_BYTES} bytes`,
+    });
+    return;
+  }
+
   const scope = `deposit:${auth.account}`;
   const requestHash = sha256(JSON.stringify({ assetCode, amount }));
 
