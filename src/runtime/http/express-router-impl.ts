@@ -198,10 +198,16 @@ async function readRawBody(req: IncomingMessage, maxBodyBytes: number): Promise<
 
   const chunks: Uint8Array[] = [];
   let totalBytes = 0;
-  for await (const chunk of req) {
+  const iterator = req.iterator({ destroyOnReturn: false });
+  while (true) {
+    const { done, value: chunk } = await iterator.next();
+    if (done) break;
+
     const chunkBuffer = typeof chunk === 'string' ? Buffer.from(chunk) : chunk;
     totalBytes += chunkBuffer.byteLength;
     if (totalBytes > maxBodyBytes) {
+      req.pause();
+      await iterator.return?.();
       throw new PayloadTooLargeError(`Request body too large. Max ${maxBodyBytes} bytes`);
     }
     chunks.push(chunkBuffer);
@@ -277,9 +283,14 @@ function sha256(input: string | Buffer | Uint8Array): string {
 
 function readBearerToken(req: IncomingMessage): string | null {
   const authHeader = req.headers.authorization;
-  if (typeof authHeader !== 'string' || authHeader.length === 0) return null;
+  const normalizedHeader = Array.isArray(authHeader)
+    ? authHeader.length === 1
+      ? authHeader[0]
+      : null
+    : authHeader;
+  if (typeof normalizedHeader !== 'string' || normalizedHeader.length === 0) return null;
 
-  const match = authHeader.match(/^(\S+)\s+(\S+)$/);
+  const match = normalizedHeader.match(/^(\S+)\s+(\S+)$/);
   if (!match) return null;
 
   const [, scheme, token] = match;
@@ -312,7 +323,7 @@ function buildInteractiveUrl(interactiveDomain: string, transactionId: string): 
   const normalizedDomain = interactiveDomain.endsWith('/')
     ? interactiveDomain.slice(0, -1)
     : interactiveDomain;
-  return `${normalizedDomain}/deposit/${transactionId}`;
+  return `${normalizedDomain}/deposit/${encodeURIComponent(transactionId)}`;
 }
 
 function endpointPath(req: IncomingMessage): string {
@@ -444,6 +455,10 @@ async function handleInfo(context: ExpressRouterContext, res: ServerResponse): P
     responseBody.interactive_domain = fullConfig.server.interactiveDomain;
   }
 
+  if (fullConfig.assets.defaultCurrency) {
+    responseBody.default_currency = fullConfig.assets.defaultCurrency;
+  }
+
   if (fullConfig.operational?.supportEmail) {
     responseBody.support_email = fullConfig.operational.supportEmail;
   }
@@ -487,7 +502,7 @@ async function handleAuthChallenge(
   const expirationSeconds = context.config.get('security').challengeExpirationSeconds ?? 300;
   const expiresAtUnix = now + expirationSeconds;
 
-  const challengeTx = new TransactionBuilder(
+  const challengeBuilder = new TransactionBuilder(
     new Account(context.sep10ServerKeypair.publicKey(), '0'),
     {
       fee: '100',
@@ -501,8 +516,20 @@ async function handleAuthChallenge(
         source: account,
       }),
     )
-    .setTimebounds(now, expiresAtUnix)
-    .build();
+    .setTimebounds(now, expiresAtUnix);
+
+  const securityConfig = context.config.get('security');
+  if (securityConfig.enableClientAttribution) {
+    challengeBuilder.addOperation(
+      Operation.manageData({
+        name: 'client_domain',
+        value: securityConfig.clientDomain!,
+        source: securityConfig.clientDomainSigningKey!,
+      }),
+    );
+  }
+
+  const challengeTx = challengeBuilder.build();
 
   challengeTx.sign(context.sep10ServerKeypair);
   const challengeXdr = challengeTx.toXDR();
@@ -1022,7 +1049,7 @@ async function handleWebhook(
   }
 }
 
-const TRANSACTION_PATH_RE = /^\/transactions\/([^/]+)$/;
+const TRANSACTION_PATH_RE = /^\/transactions\/([^/]*)$/;
 
 const KNOWN_ROUTES: Record<string, string[]> = {
   '/health': ['GET'],
@@ -1098,6 +1125,14 @@ export async function handleExpressRouterRequest(
           sendJson(res, 400, {
             error: 'invalid_request',
             message: 'Transaction id contains malformed percent-encoding',
+          });
+          return;
+        }
+
+        if (transactionId.trim().length === 0) {
+          sendJson(res, 400, {
+            error: 'invalid_request',
+            message: 'Transaction id must not be empty',
           });
           return;
         }
