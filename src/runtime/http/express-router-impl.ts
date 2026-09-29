@@ -933,6 +933,7 @@ export async function handleExpressRouterRequest(
   }
 
   // Wrap all other requests with timeout
+  let timedOut = false;
   await withTimeout(
     (async () => {
       if (method === 'GET' && path === '/info') {
@@ -995,8 +996,13 @@ export async function handleExpressRouterRequest(
       sendJson(res, 404, { error: 'not_found', message: 'Endpoint not found' });
     })(),
     context.requestTimeout,
-    () => sendJsonTimeout(res),
-  ).catch(() => {
-    // Timeout already handled by onTimeout callback
+    () => {
+      timedOut = true;
+      sendJsonTimeout(res);
+    },
+  ).catch((error: unknown) => {
+    if (!timedOut) {
+      throw error;
+    }
   });
 }
