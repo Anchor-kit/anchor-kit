@@ -484,26 +484,21 @@ describe('Operational Website Validation (#388)', () => {
     expect(() => anchor.validate()).toThrow(/Invalid URL format for operational.website/);
   });
 
-  it('should accept valid support email', () => {
+  it('should accept a valid support email', () => {
     const config: AnchorKitConfig = {
       ...baseConfig,
-      operational: {
-        supportEmail: 'support@example.com',
-      },
+      operational: { supportEmail: 'support@example.com' },
     };
     const anchor = new AnchorConfig(config);
     expect(() => anchor.validate()).not.toThrow();
   });
 
-  it('should reject malformed support email', () => {
+  it('should reject a malformed support email', () => {
     const config: AnchorKitConfig = {
       ...baseConfig,
-      operational: {
-        supportEmail: 'not-an-email',
-      },
+      operational: { supportEmail: 'not-an-email' },
     };
     const anchor = new AnchorConfig(config);
-    expect(() => anchor.validate()).toThrow();
     expect(() => anchor.validate()).toThrow(/Invalid email format for operational.supportEmail/);
   });
 });

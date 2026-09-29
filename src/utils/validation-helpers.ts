@@ -494,11 +494,11 @@ function validateAnchorKitConfig(config: AnchorKitConfig): boolean {
         `Invalid asset at index ${i}${codeStr}: asset.code must be a non-empty string and asset.issuer must be a valid Stellar public key.`,
       );
     }
-    const code = asset.code;
-    if (seenCodes.has(code)) {
-      throw new Error(`Duplicate asset code detected: ${code}`);
+    const assetCode = asset.code;
+    if (seenCodes.has(assetCode)) {
+      throw new Error(`Duplicate asset code detected: ${assetCode}`);
     }
-    seenCodes.add(code);
+    seenCodes.add(assetCode);
   }
 
   validateFrameworkConfig(framework, server, metadata, operational);

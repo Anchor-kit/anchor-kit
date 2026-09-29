@@ -195,6 +195,16 @@ describe('MVP Express-mounted integration', () => {
     expect(response.body.version).toBe(version);
   });
 
+  it('1a) HEAD /health returns 200 with matching headers and no body', async () => {
+    const getResponse = await invoke({ method: 'GET', path: '/health' });
+    const headResponse = await invoke({ method: 'HEAD', path: '/health' });
+
+    expect(headResponse.status).toBe(200);
+    expect(headResponse.headers['content-type']).toBe(getResponse.headers['content-type']);
+    expect(headResponse.headers['content-length']).toBe(getResponse.headers['content-length']);
+    expect(headResponse.body).toEqual({});
+  });
+
   it('1b) unknown endpoint returns 404 not_found', async () => {
     const response = await invoke({ path: '/does-not-exist' });
     expect(response.status).toBe(404);

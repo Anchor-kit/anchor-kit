@@ -61,12 +61,23 @@ function firstNonEmptyString(value: unknown): string | undefined {
   return undefined;
 }
 
-function sendJson(res: ServerResponse, status: number, body: Record<string, unknown>): void {
+function sendJson(
+  res: ServerResponse,
+  status: number,
+  body: Record<string, unknown>,
+  method = 'GET',
+): void {
+  const payload = JSON.stringify(body);
   if (!res.headersSent) {
     res.statusCode = status;
     res.setHeader('content-type', 'application/json');
+    res.setHeader('content-length', String(Buffer.byteLength(payload, 'utf8')));
   }
-  res.end(JSON.stringify(body));
+  if (method === 'HEAD') {
+    res.end();
+  } else {
+    res.end(payload);
+  }
 }
 
 function sendMethodNotAllowed(res: ServerResponse, allowedMethods: string[]): void {
@@ -345,8 +356,8 @@ function checkRateLimit(
   return true;
 }
 
-async function handleHealth(res: ServerResponse): Promise<void> {
-  sendJson(res, 200, { status: 'ok', version });
+async function handleHealth(res: ServerResponse, method = 'GET'): Promise<void> {
+  sendJson(res, 200, { status: 'ok', version }, method);
 }
 
 async function handleInfo(context: ExpressRouterContext, res: ServerResponse): Promise<void> {
@@ -932,8 +943,8 @@ export async function handleExpressRouterRequest(
   const path = endpointPath(req);
   const method = (req.method ?? 'GET').toUpperCase();
 
-  if (method === 'GET' && path === '/health') {
-    await handleHealth(res);
+  if ((method === 'GET' || method === 'HEAD') && path === '/health') {
+    await handleHealth(res, method);
     return;
   }
 
