@@ -40,6 +40,7 @@ export interface ExpressRouterContext {
   sep10ServerKeypair: Keypair;
   networkPassphrase: string;
   maxBodyBytes: number;
+  corsOrigins: string[] | undefined;
   requestTimeout: number;
   rateLimiter: InMemoryRateLimiter;
   rateRules: Record<'auth_challenge' | 'auth_token' | 'webhook' | 'deposit', RateLimitRule>;
@@ -78,6 +79,34 @@ function sendJson(
     res.end();
   } else {
     res.end(payload);
+  }
+}
+
+function setCorsHeaders(
+  res: ServerResponse,
+  origin: string | undefined,
+  corsOrigins: string[] | undefined,
+): void {
+  if (!res.headersSent) {
+    if (corsOrigins) {
+      const existingVary = res.getHeader('Vary');
+      const varyValues = Array.isArray(existingVary)
+        ? existingVary
+        : typeof existingVary === 'string'
+          ? existingVary.split(',').map((value) => value.trim())
+          : [];
+      if (!varyValues.some((value) => value.toLowerCase() === 'origin')) {
+        res.setHeader('Vary', [...varyValues, 'Origin'].filter(Boolean).join(', '));
+      }
+    }
+    if (origin && corsOrigins && corsOrigins.includes(origin)) {
+      res.setHeader('Access-Control-Allow-Origin', origin);
+      res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+      res.setHeader(
+        'Access-Control-Allow-Headers',
+        'Content-Type, Authorization, Idempotency-Key, X-Anchor-Signature, X-Webhook-Provider',
+      );
+    }
   }
 }
 
@@ -999,6 +1028,16 @@ export async function handleExpressRouterRequest(
 ): Promise<void> {
   const path = endpointPath(req);
   const method = (req.method ?? 'GET').toUpperCase();
+  const origin = firstNonEmptyString(req.headers.origin);
+
+  // Set CORS headers for all responses
+  setCorsHeaders(res, origin, context.corsOrigins);
+
+  if (method === 'OPTIONS') {
+    res.statusCode = 204;
+    res.end();
+    return;
+  }
 
   // Skip timeout for health endpoint (should always respond quickly)
   if ((method === 'GET' || method === 'HEAD') && path === '/health') {

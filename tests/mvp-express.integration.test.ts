@@ -72,6 +72,9 @@ function createMountedInvoker(anchor: AnchorInstance) {
         setHeader(name: string, value: string): void {
           responseHeaders[name.toLowerCase()] = value;
         },
+        getHeader(name: string): string | undefined {
+          return responseHeaders[name.toLowerCase()];
+        },
         end(payload?: string): void {
           const contentType = responseHeaders['content-type'] ?? '';
           const bodyText = typeof payload === 'string' ? payload : '';
@@ -3273,6 +3276,188 @@ describe('MVP Express-mounted integration', () => {
     expect(response.body.kind).toBe('deposit');
     expect(response.body.amount).toBe('10');
     expect(response.body).toHaveProperty('id');
+  });
+
+  it('17) CORS headers are set for allowed origins (#556)', async () => {
+    const customDbUrl = makeSqliteDbUrlForTests();
+    const customDbPath = customDbUrl.startsWith('file:')
+      ? customDbUrl.slice('file:'.length)
+      : customDbUrl;
+    const customAnchor = createAnchor({
+      network: { network: 'testnet' },
+      server: { corsOrigins: ['https://example.com', 'https://trusted-site.com'] },
+      security: {
+        sep10SigningKey: sep10ServerKeypair.secret(),
+        interactiveJwtSecret: 'jwt-test-secret-cors',
+        distributionAccountSecret: 'distribution-test-secret',
+      },
+      assets: {
+        assets: [
+          {
+            code: 'USDC',
+            issuer: 'GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5',
+            deposits_enabled: true,
+          },
+        ],
+      },
+      framework: {
+        database: { provider: 'sqlite', url: customDbUrl },
+      },
+    });
+
+    await customAnchor.init();
+    const customInvoke = createMountedInvoker(customAnchor);
+
+    try {
+      // Test allowed origin
+      const allowedResponse = await customInvoke({
+        path: '/info',
+        headers: { origin: 'https://example.com' },
+      });
+
+      expect(allowedResponse.status).toBe(200);
+      expect(allowedResponse.headers['access-control-allow-origin']).toBe('https://example.com');
+      expect(allowedResponse.headers['access-control-allow-methods']).toBe('GET, POST, OPTIONS');
+      expect(allowedResponse.headers['access-control-allow-headers']).toBe(
+        'Content-Type, Authorization, Idempotency-Key, X-Anchor-Signature, X-Webhook-Provider',
+      );
+      expect(allowedResponse.headers.vary).toContain('Origin');
+
+      // Test another allowed origin
+      const allowedResponse2 = await customInvoke({
+        path: '/info',
+        headers: { origin: 'https://trusted-site.com' },
+      });
+
+      expect(allowedResponse2.status).toBe(200);
+      expect(allowedResponse2.headers['access-control-allow-origin']).toBe(
+        'https://trusted-site.com',
+      );
+
+      const preflightResponse = await customInvoke({
+        method: 'OPTIONS',
+        path: '/transactions/deposit/interactive',
+        headers: {
+          origin: 'https://example.com',
+          'access-control-request-method': 'POST',
+          'access-control-request-headers': 'authorization, idempotency-key',
+        },
+      });
+      expect(preflightResponse.status).toBe(204);
+      expect(preflightResponse.headers['access-control-allow-origin']).toBe('https://example.com');
+      expect(preflightResponse.headers['access-control-allow-methods']).toContain('POST');
+      expect(preflightResponse.headers['access-control-allow-headers']).toContain(
+        'Idempotency-Key',
+      );
+    } finally {
+      await customAnchor.shutdown();
+      try {
+        unlinkSync(customDbPath);
+      } catch {
+        // ignore cleanup errors in CI
+      }
+    }
+  });
+
+  it('17b) CORS headers are not set for unlisted origins (#556)', async () => {
+    const customDbUrl = makeSqliteDbUrlForTests();
+    const customDbPath = customDbUrl.startsWith('file:')
+      ? customDbUrl.slice('file:'.length)
+      : customDbUrl;
+    const customAnchor = createAnchor({
+      network: { network: 'testnet' },
+      server: { corsOrigins: ['https://example.com'] },
+      security: {
+        sep10SigningKey: sep10ServerKeypair.secret(),
+        interactiveJwtSecret: 'jwt-test-secret-cors',
+        distributionAccountSecret: 'distribution-test-secret',
+      },
+      assets: {
+        assets: [
+          {
+            code: 'USDC',
+            issuer: 'GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5',
+            deposits_enabled: true,
+          },
+        ],
+      },
+      framework: {
+        database: { provider: 'sqlite', url: customDbUrl },
+      },
+    });
+
+    await customAnchor.init();
+    const customInvoke = createMountedInvoker(customAnchor);
+
+    try {
+      // Test unlisted origin
+      const deniedResponse = await customInvoke({
+        path: '/info',
+        headers: { origin: 'https://malicious-site.com' },
+      });
+
+      expect(deniedResponse.status).toBe(200);
+      expect(deniedResponse.headers['access-control-allow-origin']).toBeUndefined();
+      expect(deniedResponse.headers['access-control-allow-methods']).toBeUndefined();
+      expect(deniedResponse.headers['access-control-allow-headers']).toBeUndefined();
+    } finally {
+      await customAnchor.shutdown();
+      try {
+        unlinkSync(customDbPath);
+      } catch {
+        // ignore cleanup errors in CI
+      }
+    }
+  });
+
+  it('17c) CORS headers are not set when origin header is omitted (#556)', async () => {
+    const customDbUrl = makeSqliteDbUrlForTests();
+    const customDbPath = customDbUrl.startsWith('file:')
+      ? customDbUrl.slice('file:'.length)
+      : customDbUrl;
+    const customAnchor = createAnchor({
+      network: { network: 'testnet' },
+      server: { corsOrigins: ['https://example.com'] },
+      security: {
+        sep10SigningKey: sep10ServerKeypair.secret(),
+        interactiveJwtSecret: 'jwt-test-secret-cors',
+        distributionAccountSecret: 'distribution-test-secret',
+      },
+      assets: {
+        assets: [
+          {
+            code: 'USDC',
+            issuer: 'GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5',
+            deposits_enabled: true,
+          },
+        ],
+      },
+      framework: {
+        database: { provider: 'sqlite', url: customDbUrl },
+      },
+    });
+
+    await customAnchor.init();
+    const customInvoke = createMountedInvoker(customAnchor);
+
+    try {
+      // Test without origin header
+      const noOriginResponse = await customInvoke({
+        path: '/info',
+      });
+
+      expect(noOriginResponse.status).toBe(200);
+      expect(noOriginResponse.headers['access-control-allow-origin']).toBeUndefined();
+      expect(noOriginResponse.headers['access-control-allow-methods']).toBeUndefined();
+      expect(noOriginResponse.headers['access-control-allow-headers']).toBeUndefined();
+    } finally {
+      await customAnchor.shutdown();
+      try {
+        unlinkSync(customDbPath);
+      } catch {
+        // ignore cleanup errors in CI
+      }
+    }
   });
 
   // ── Unsafe numeric deposit amounts ─────────────────────────────────────
