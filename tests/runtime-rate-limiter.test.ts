@@ -50,6 +50,45 @@ describe('InMemoryRateLimiter', () => {
     expect(firstKeyBlocked.allowed).toBe(false);
     expect(secondKey.allowed).toBe(true);
   });
+
+  it('reports limit, remaining requests, and reset time', () => {
+    const limiter = new InMemoryRateLimiter({ now: () => 1000 });
+    const rule = { windowMs: 60000, max: 2 };
+
+    expect(limiter.hit('client', rule)).toMatchObject({
+      allowed: true,
+      limit: 2,
+      remaining: 1,
+      resetSeconds: 60,
+    });
+    expect(limiter.hit('client', rule)).toMatchObject({
+      allowed: true,
+      limit: 2,
+      remaining: 0,
+      resetSeconds: 60,
+    });
+    expect(limiter.hit('client', rule)).toMatchObject({
+      allowed: false,
+      limit: 2,
+      remaining: 0,
+      resetSeconds: 60,
+    });
+  });
+
+  it('bounds active buckets without evicting active keys', () => {
+    let now = 1000;
+    const limiter = new InMemoryRateLimiter({ maxBuckets: 2, now: () => now });
+    const rule = { windowMs: 10000, max: 1 };
+
+    expect(limiter.hit('first', rule).allowed).toBe(true);
+    expect(limiter.hit('second', rule).allowed).toBe(true);
+    expect(limiter.hit('first', rule).allowed).toBe(false);
+    expect(limiter.hit('third', rule)).toMatchObject({ allowed: false, remaining: 0 });
+
+    now += 10001;
+    expect(limiter.hit('third', rule).allowed).toBe(true);
+    expect(limiter.hit('first', rule).allowed).toBe(true);
+  });
 });
 
 describe('extractClientIdentifier', () => {
