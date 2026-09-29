@@ -376,3 +376,22 @@ describe('Stellar Address Checksum Validation (#386)', () => {
     expect(ValidationUtils.isValidStellarAddress(undefined as unknown as string)).toBe(false);
   });
 });
+
+describe('Email Validation (#607)', () => {
+  it.each(['support@example.com', 'first.last+tag@example.co.uk', 'user_name@example-domain.com'])(
+    'accepts valid email %s',
+    (email) => {
+      expect(ValidationUtils.isValidEmail(email)).toBe(true);
+    },
+  );
+
+  it.each([
+    '.support@example.com',
+    'support.@example.com',
+    'support..team@example.com',
+    'support@.example.com',
+    'support@example..com',
+  ])('rejects malformed email %s', (email) => {
+    expect(ValidationUtils.isValidEmail(email)).toBe(false);
+  });
+});
