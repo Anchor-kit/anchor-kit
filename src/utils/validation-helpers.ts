@@ -264,6 +264,24 @@ function validateFrameworkUrls(
     throw new Error('Invalid URL format for metadata.tomlUrl');
   }
 
+  if (
+    metadata?.documentationUrls?.apiDocs &&
+    !isValidUrlString(metadata.documentationUrls.apiDocs)
+  ) {
+    throw new Error('Invalid URL format for metadata.documentationUrls.apiDocs');
+  }
+
+  if (
+    metadata?.documentationUrls?.support &&
+    !isValidUrlString(metadata.documentationUrls.support)
+  ) {
+    throw new Error('Invalid URL format for metadata.documentationUrls.support');
+  }
+
+  if (metadata?.documentationUrls?.terms && !isValidUrlString(metadata.documentationUrls.terms)) {
+    throw new Error('Invalid URL format for metadata.documentationUrls.terms');
+  }
+
   if (operational?.website && !isValidUrlString(operational.website)) {
     throw new Error('Invalid URL format for operational.website');
   }
