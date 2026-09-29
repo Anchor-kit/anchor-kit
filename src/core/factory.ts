@@ -265,7 +265,11 @@ export class AnchorInstance {
         return;
       }
 
-      await database.updateTransactionStatus(transactionIdValue, 'expired');
+      await database.updateTransactionStatus(
+        transactionIdValue,
+        'expired',
+        'pending_user_transfer_start',
+      );
       return;
     }
 

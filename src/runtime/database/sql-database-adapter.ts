@@ -534,19 +534,34 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
     return response.rows.map((row) => this.mapTransactionRow(row));
   }
 
-  public async updateTransactionStatus(id: string, status: TransactionStatus): Promise<boolean> {
+  public async updateTransactionStatus(
+    id: string,
+    status: TransactionStatus,
+    expectedStatus?: TransactionStatus,
+  ): Promise<boolean> {
     const updatedAt = nowIso();
     if (this.sqlite) {
-      const result = this.sqlite
-        .prepare('UPDATE interactive_transactions SET status = ?, updated_at = ? WHERE id = ?')
-        .run(status, updatedAt, id);
+      const result = expectedStatus
+        ? this.sqlite
+            .prepare(
+              'UPDATE interactive_transactions SET status = ?, updated_at = ? WHERE id = ? AND status = ?',
+            )
+            .run(status, updatedAt, id, expectedStatus)
+        : this.sqlite
+            .prepare('UPDATE interactive_transactions SET status = ?, updated_at = ? WHERE id = ?')
+            .run(status, updatedAt, id);
       return result.changes > 0;
     }
 
-    const response = await this.requirePostgres().query<{ id: string }>(
-      'UPDATE interactive_transactions SET status = $1, updated_at = $2 WHERE id = $3 RETURNING id',
-      [status, updatedAt, id],
-    );
+    const response = expectedStatus
+      ? await this.requirePostgres().query<{ id: string }>(
+          'UPDATE interactive_transactions SET status = $1, updated_at = $2 WHERE id = $3 AND status = $4 RETURNING id',
+          [status, updatedAt, id, expectedStatus],
+        )
+      : await this.requirePostgres().query<{ id: string }>(
+          'UPDATE interactive_transactions SET status = $1, updated_at = $2 WHERE id = $3 RETURNING id',
+          [status, updatedAt, id],
+        );
     return response.rows.length > 0;
   }
 
