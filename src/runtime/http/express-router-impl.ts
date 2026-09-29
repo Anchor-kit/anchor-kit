@@ -1005,6 +1005,14 @@ async function handleWebhook(
   req: IncomingMessage,
   res: ServerResponse,
 ): Promise<void> {
+  if (context.config.get('operational')?.webhooksEnabled === false) {
+    sendJson(res, 503, {
+      error: 'webhooks_disabled',
+      message: 'Webhook processing is disabled',
+    });
+    return;
+  }
+
   if (!checkRateLimit(context, req, res, 'webhook')) {
     return;
   }

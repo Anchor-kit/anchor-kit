@@ -154,6 +154,9 @@ describe('MVP Express-mounted integration', () => {
           },
         ],
       },
+      operational: {
+        webhooksEnabled: true,
+      },
       framework: {
         database: {
           provider: 'sqlite',
@@ -1837,6 +1840,72 @@ describe('MVP Express-mounted integration', () => {
     expect(duplicateResponse.body.event_id).toBe('evt_1');
     expect(duplicateResponse.body.provider).toBe('generic');
     expect(webhookCallbackCount).toBe(1);
+  });
+
+  it('8a) disabled webhook route rejects requests without processing or persisting events', async () => {
+    const customDbUrl = makeSqliteDbUrlForTests();
+    const customDbPath = customDbUrl.startsWith('file:')
+      ? customDbUrl.slice('file:'.length)
+      : customDbUrl;
+    const customAnchor = createAnchor({
+      network: { network: 'testnet' },
+      server: { interactiveDomain: 'https://anchor.example.com' },
+      security: {
+        sep10SigningKey: sep10ServerKeypair.secret(),
+        interactiveJwtSecret: 'jwt-test-secret',
+        distributionAccountSecret: 'distribution-test-secret',
+      },
+      assets: {
+        assets: [
+          {
+            code: 'USDC',
+            issuer: 'GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5',
+          },
+        ],
+      },
+      operational: {
+        webhooksEnabled: false,
+      },
+      framework: {
+        database: { provider: 'sqlite', url: customDbUrl },
+      },
+      webhooks: {
+        onEvent: async () => {
+          throw new Error('disabled webhooks must not invoke callbacks');
+        },
+      },
+    });
+
+    await customAnchor.init();
+    const customInvoke = createMountedInvoker(customAnchor);
+    const processor = (
+      customAnchor as unknown as { webhookProcessor: { process: () => Promise<unknown> } }
+    ).webhookProcessor;
+    const database = (customAnchor as unknown as { database: DatabaseAdapter }).database;
+    const processSpy = vi.spyOn(processor, 'process');
+    const insertSpy = vi.spyOn(database, 'insertOrGetWebhookEvent');
+
+    const response = await customInvoke({
+      method: 'POST',
+      path: '/webhooks/events',
+      headers: { 'content-type': 'application/json' },
+      body: { id: 'evt_disabled', type: 'deposit.completed' },
+    });
+
+    expect(response.status).toBe(503);
+    expect(response.body).toEqual({
+      error: 'webhooks_disabled',
+      message: 'Webhook processing is disabled',
+    });
+    expect(processSpy).not.toHaveBeenCalled();
+    expect(insertSpy).not.toHaveBeenCalled();
+
+    await customAnchor.shutdown();
+    try {
+      unlinkSync(customDbPath);
+    } catch {
+      // ignore cleanup errors in CI
+    }
   });
 
   it('8b) unsigned webhook is accepted when signature verification is disabled', async () => {
