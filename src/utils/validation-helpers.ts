@@ -369,6 +369,18 @@ export const SecurityConfigSchema = {
     if (!config.distributionAccountSecret)
       throw new Error('Missing required secret: security.distributionAccountSecret');
     if (
+      config.enableClientAttribution !== undefined &&
+      typeof config.enableClientAttribution !== 'boolean'
+    ) {
+      throw new Error('security.enableClientAttribution must be a boolean');
+    }
+    if (
+      config.verifyWebhookSignatures !== undefined &&
+      typeof config.verifyWebhookSignatures !== 'boolean'
+    ) {
+      throw new Error('security.verifyWebhookSignatures must be a boolean');
+    }
+    if (
       config.challengeExpirationSeconds !== undefined &&
       !isSafePositiveInteger(config.challengeExpirationSeconds)
     ) {
@@ -466,6 +478,10 @@ function validateAnchorKitConfig(config: AnchorKitConfig): boolean {
   }
 
   validateFrameworkConfig(framework, server, metadata, operational);
+  const serverErrors = validateServerConfig(server);
+  if (serverErrors.length > 0) {
+    throw new Error(`Invalid server configuration: ${serverErrors.join(', ')}`);
+  }
   validateKycConfig(kyc);
 
   return true;
@@ -536,7 +552,7 @@ export const ServerConfigSchema: Record<keyof Required<ServerConfig>, SchemaFiel
     type: 'number',
     required: false,
     description: 'Request timeout in milliseconds. Defaults to 30000.',
-    validate: (value) => typeof value === 'number' && Number.isFinite(value) && value > 0,
+    validate: (value) => typeof value === 'number' && Number.isSafeInteger(value) && value > 0,
   },
 };
 
