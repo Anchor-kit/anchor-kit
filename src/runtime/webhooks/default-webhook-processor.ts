@@ -1,4 +1,8 @@
-import type { DatabaseAdapter, WebhookProcessor } from '@/runtime/interfaces.ts';
+import type {
+  DatabaseAdapter,
+  WebhookEventRecord,
+  WebhookProcessor,
+} from '@/runtime/interfaces.ts';
 import type { AnchorKitConfig } from '@/types/config.ts';
 import { createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
 
@@ -37,7 +41,11 @@ export class DefaultWebhookProcessor implements WebhookProcessor {
     payload: Record<string, unknown>;
     rawBody: string | Buffer | Uint8Array;
     signature?: string;
-  }): Promise<{ duplicate: boolean; eventId: string }> {
+  }): Promise<{
+    duplicate: boolean;
+    eventId: string;
+    status?: WebhookEventRecord['status'];
+  }> {
     this.verifySignatureIfEnabled(input);
 
     const insertion = await this.database.insertOrGetWebhookEvent({
@@ -48,7 +56,11 @@ export class DefaultWebhookProcessor implements WebhookProcessor {
     });
 
     if (!insertion.inserted) {
-      return { duplicate: true, eventId: insertion.record.eventId };
+      return {
+        duplicate: true,
+        eventId: insertion.record.eventId,
+        status: insertion.record.status,
+      };
     }
 
     try {

@@ -12,6 +12,41 @@ function deferred<T = void>() {
 }
 
 describe('InMemoryQueueAdapter', () => {
+  it('reports pending and active job counts as jobs move through the queue', async () => {
+    const queue = new InMemoryQueueAdapter({ concurrency: 1 });
+    const firstStarted = deferred();
+    const firstRelease = deferred();
+    const secondStarted = deferred();
+    const secondRelease = deferred();
+
+    expect(queue.status).toEqual({ pending: 0, active: 0 });
+
+    await queue.enqueue({ type: 'process_watcher_task', payload: { id: 1 } });
+    await queue.enqueue({ type: 'process_watcher_task', payload: { id: 2 } });
+    expect(queue.status).toEqual({ pending: 2, active: 0 });
+
+    await queue.start(async (job) => {
+      if (job.payload.id === 1) {
+        firstStarted.resolve();
+        await firstRelease.promise;
+      } else {
+        secondStarted.resolve();
+        await secondRelease.promise;
+      }
+    });
+
+    await firstStarted.promise;
+    expect(queue.status).toEqual({ pending: 1, active: 1 });
+
+    firstRelease.resolve();
+    await secondStarted.promise;
+    expect(queue.status).toEqual({ pending: 0, active: 1 });
+
+    secondRelease.resolve();
+    await queue.stop();
+    expect(queue.status).toEqual({ pending: 0, active: 0 });
+  });
+
   it('should honor concurrency limits when processing jobs', async () => {
     const concurrency = 2;
     const queue = new InMemoryQueueAdapter({ concurrency });

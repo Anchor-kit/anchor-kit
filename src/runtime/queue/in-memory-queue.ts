@@ -1,4 +1,4 @@
-import type { QueueAdapter, QueueJob } from '@/runtime/interfaces.ts';
+import type { QueueAdapter, QueueDrainStatus, QueueJob } from '@/runtime/interfaces.ts';
 
 interface InMemoryQueueOptions {
   concurrency: number;
@@ -15,6 +15,10 @@ export class InMemoryQueueAdapter implements QueueAdapter {
 
   constructor(options: InMemoryQueueOptions) {
     this.concurrency = options.concurrency;
+  }
+
+  public get status(): QueueDrainStatus {
+    return { pending: this.jobs.length, active: this.activeWorkers };
   }
 
   public async enqueue(job: QueueJob): Promise<void> {

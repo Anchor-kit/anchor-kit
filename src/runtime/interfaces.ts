@@ -123,7 +123,13 @@ export interface QueueJob {
   payload: Record<string, unknown>;
 }
 
+export interface QueueDrainStatus {
+  readonly pending: number;
+  readonly active: number;
+}
+
 export interface QueueAdapter {
+  readonly status: QueueDrainStatus;
   enqueue(job: QueueJob): Promise<void>;
   start(worker: (job: QueueJob) => Promise<void>): Promise<void>;
   stop(): Promise<void>;
@@ -142,5 +148,9 @@ export interface WebhookProcessor {
     payload: Record<string, unknown>;
     rawBody: string | Buffer | Uint8Array;
     signature?: string;
-  }): Promise<{ duplicate: boolean; eventId: string }>;
+  }): Promise<{
+    duplicate: boolean;
+    eventId: string;
+    status?: WebhookEventRecord['status'];
+  }>;
 }

@@ -3,6 +3,7 @@ import { createAnchor, type AnchorInstance } from '@/index.ts';
 import { Keypair } from '@stellar/stellar-sdk';
 import { createHmac } from 'node:crypto';
 import { unlinkSync } from 'node:fs';
+import type { DatabaseAdapter } from '@/runtime/interfaces.ts';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { Readable } from 'node:stream';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -198,6 +199,69 @@ describe('Webhook Provider Fallback', () => {
 
     expect(response.status).toBe(200);
     expect(lastProvider).toBe('header-provider');
+  });
+
+  it('matching header and body provider values remain unchanged', async () => {
+    const payload = { id: 'evt_matching', type: 'test', provider: 'same-provider' };
+    const signature = createHmac('sha256', 'webhook-test-secret')
+      .update(JSON.stringify(payload))
+      .digest('hex');
+
+    const response = await invoke({
+      method: 'POST',
+      path: '/webhooks/events',
+      headers: {
+        'content-type': 'application/json',
+        'x-webhook-provider': 'same-provider',
+        'x-anchor-signature': signature,
+      },
+      body: payload,
+    });
+
+    expect(response.status).toBe(200);
+    expect(lastProvider).toBe('same-provider');
+  });
+
+  it('duplicate responses include persisted status without exposing failure details', async () => {
+    const database = (anchor as unknown as { database: DatabaseAdapter }).database;
+    const errorMessage = 'private downstream error';
+
+    for (const status of ['pending', 'processed', 'failed'] as const) {
+      const eventId = `evt_duplicate_${status}`;
+      const seeded = await database.insertOrGetWebhookEvent({
+        id: `${eventId}_internal`,
+        eventId,
+        provider: 'stored-provider',
+        payload: { type: 'test' },
+      });
+      if (status !== 'pending') {
+        await database.updateWebhookEventStatus({
+          id: seeded.record.id,
+          status,
+          ...(status === 'failed' ? { errorMessage } : {}),
+        });
+      }
+
+      const payload = { id: eventId, type: 'test' };
+      const signature = createHmac('sha256', 'webhook-test-secret')
+        .update(JSON.stringify(payload))
+        .digest('hex');
+      const response = await invoke({
+        method: 'POST',
+        path: '/webhooks/events',
+        headers: {
+          'content-type': 'application/json',
+          'x-webhook-provider': 'stored-provider',
+          'x-anchor-signature': signature,
+        },
+        body: payload,
+      });
+
+      expect(response.status).toBe(200);
+      expect(response.body.duplicate).toBe(true);
+      expect(response.body.status).toBe(status);
+      expect(JSON.stringify(response.body)).not.toContain(errorMessage);
+    }
   });
 
   it('Neither present: should fall back to generic', async () => {

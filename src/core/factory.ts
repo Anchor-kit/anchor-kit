@@ -35,6 +35,7 @@ export class AnchorInstance {
   private initialized = false;
   private backgroundJobsRunning = false;
   private backgroundJobsPromise: Promise<void> | null = null;
+  private backgroundJobsStopPromise: Promise<void> | null = null;
 
   constructor(config: Partial<AnchorKitConfig>) {
     this.config = new AnchorConfig(config);
@@ -132,14 +133,23 @@ export class AnchorInstance {
    * Stop watcher services and queue workers.
    */
   public async stopBackgroundJobs(): Promise<void> {
+    if (this.backgroundJobsStopPromise) return this.backgroundJobsStopPromise;
     if (!this.initialized || !this.backgroundJobsRunning) return;
 
-    for (const watcher of this.watchers) {
-      await watcher.stop();
-    }
+    this.backgroundJobsStopPromise = (async () => {
+      try {
+        for (const watcher of this.watchers) {
+          await watcher.stop();
+        }
 
-    await this.requireQueue().stop();
-    this.backgroundJobsRunning = false;
+        await this.requireQueue().stop();
+        this.backgroundJobsRunning = false;
+      } finally {
+        this.backgroundJobsStopPromise = null;
+      }
+    })();
+
+    return this.backgroundJobsStopPromise;
   }
 
   /**

@@ -1451,6 +1451,7 @@ describe('MVP Express-mounted integration', () => {
     expect(firstResponse.body.duplicate).toBe(false);
     expect(firstResponse.body.event_id).toBe('evt_1');
     expect(firstResponse.body.provider).toBe('generic');
+    expect(firstResponse.body.status).toBeUndefined();
     expect(webhookCallbackCount).toBe(1);
 
     const duplicateResponse = await invoke({

@@ -16,6 +16,7 @@ describe('package root exports', () => {
 
     const job: QueueJob = { type: 'cleanup_records', payload: {} };
     const adapter: QueueAdapter = {
+      status: { pending: 0, active: 0 },
       async enqueue(_job) {},
       async start(_worker) {},
       async stop() {},
