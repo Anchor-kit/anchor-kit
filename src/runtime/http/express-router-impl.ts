@@ -480,7 +480,24 @@ async function handleAuthChallenge(
   }
 
   // Accept canonical Stellar public keys and treat surrounding whitespace as non-semantic.
-  const account = parseUrl(req).searchParams.get('account')?.trim() ?? '';
+  const accountParams = parseUrl(req).searchParams.getAll('account');
+  if (accountParams.length === 0) {
+    sendJson(res, 400, {
+      error: 'invalid_request',
+      message: 'Query param account is required',
+    });
+    return;
+  }
+
+  if (accountParams.length !== 1) {
+    sendJson(res, 400, {
+      error: 'invalid_request',
+      message: 'Query param account must be provided exactly once',
+    });
+    return;
+  }
+
+  const account = accountParams[0].trim();
   if (!account) {
     sendJson(res, 400, {
       error: 'invalid_request',

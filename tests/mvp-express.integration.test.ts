@@ -483,6 +483,29 @@ describe('MVP Express-mounted integration', () => {
     expect(response.body.message).toBe('Query param account is required');
   });
 
+  it('3a) /auth/challenge rejects repeated identical account query params', async () => {
+    const account = clientKeypair.publicKey();
+    const response = await invoke({
+      path: `/auth/challenge?account=${account}&account=${account}`,
+      headers: { 'x-forwarded-for': '10.0.0.51' },
+    });
+
+    expect(response.status).toBe(400);
+    expect(response.body.error).toBe('invalid_request');
+    expect(response.body.message).toBe('Query param account must be provided exactly once');
+  });
+
+  it('3a) /auth/challenge rejects repeated conflicting account query params', async () => {
+    const response = await invoke({
+      path: `/auth/challenge?account=${clientKeypair.publicKey()}&account=${Keypair.random().publicKey()}`,
+      headers: { 'x-forwarded-for': '10.0.0.52' },
+    });
+
+    expect(response.status).toBe(400);
+    expect(response.body.error).toBe('invalid_request');
+    expect(response.body.message).toBe('Query param account must be provided exactly once');
+  });
+
   it('3a) /auth/challenge trims padded account identifiers', async () => {
     const paddedAccount = `  ${clientKeypair.publicKey()}  `;
     const response = await invoke({
