@@ -19,6 +19,20 @@ import { extractClientIdentifier } from './client-identifier.ts';
 
 const SEP10_NONCE_OP = 'anchor_auth';
 
+/**
+ * Stable issuer for bearer access tokens minted by the anchor API.
+ * Tokens issued by a different service must not be accepted here, even when
+ * they are signed with the same shared secret.
+ */
+export const ACCESS_TOKEN_ISSUER = 'anchor-kit';
+
+/**
+ * Stable audience for bearer access tokens minted by the anchor API.
+ * Verification requires this exact audience so a valid token minted for an
+ * unintended service is rejected.
+ */
+export const ACCESS_TOKEN_AUDIENCE = 'anchor-api';
+
 export interface ExpressRouterContext {
   config: AnchorConfig;
   database: DatabaseAdapter;
@@ -48,12 +62,23 @@ function firstNonEmptyString(value: unknown): string | undefined {
   return undefined;
 }
 
-function sendJson(res: ServerResponse, status: number, body: Record<string, unknown>): void {
+function sendJson(
+  res: ServerResponse,
+  status: number,
+  body: Record<string, unknown>,
+  method = 'GET',
+): void {
+  const payload = JSON.stringify(body);
   if (!res.headersSent) {
     res.statusCode = status;
     res.setHeader('content-type', 'application/json');
+    res.setHeader('content-length', String(Buffer.byteLength(payload, 'utf8')));
   }
-  res.end(JSON.stringify(body));
+  if (method === 'HEAD') {
+    res.end();
+  } else {
+    res.end(payload);
+  }
 }
 
 function sendMethodNotAllowed(res: ServerResponse, allowedMethods: string[]): void {
@@ -245,6 +270,15 @@ function isPlainDecimalString(value: unknown): value is string {
   return typeof value === 'string' && /^\d+(?:\.\d+)?$/.test(value);
 }
 
+/**
+ * Detects numbers JavaScript cannot represent exactly. Integers above
+ * `Number.MAX_SAFE_INTEGER` and fractions with a magnitude that large are
+ * rounded during JSON parsing, which can silently change the amount.
+ */
+function isUnsafeAmountNumber(value: number): boolean {
+  return !Number.isFinite(value) || !Number.isSafeInteger(Math.trunc(value));
+}
+
 function buildInteractiveUrl(interactiveDomain: string, transactionId: string): string {
   const normalizedDomain = interactiveDomain.endsWith('/')
     ? interactiveDomain.slice(0, -1)
@@ -307,11 +341,15 @@ function authenticate(
     const account = typeof decoded.sub === 'string' ? decoded.sub : null;
     const scope = typeof decoded.scope === 'string' ? decoded.scope : null;
     const typ = typeof decoded.typ === 'string' ? decoded.typ : null;
+    const issuer = typeof decoded.iss === 'string' ? decoded.iss : null;
+    const audience = typeof decoded.aud === 'string' ? decoded.aud : null;
     if (
       !account ||
       !StrKey.isValidEd25519PublicKey(account) ||
       scope !== 'anchor_api' ||
-      typ !== 'access_token'
+      typ !== 'access_token' ||
+      issuer !== ACCESS_TOKEN_ISSUER ||
+      audience !== ACCESS_TOKEN_AUDIENCE
     ) {
       return null;
     }
@@ -337,6 +375,10 @@ function checkRateLimit(
   const key = `${endpoint}:${clientId}`;
   const result = context.rateLimiter.hit(key, context.rateRules[endpoint]);
 
+  res.setHeader('RateLimit-Limit', `${result.limit}`);
+  res.setHeader('RateLimit-Remaining', `${result.remaining}`);
+  res.setHeader('RateLimit-Reset', `${result.resetSeconds}`);
+
   if (!result.allowed) {
     res.setHeader('retry-after', `${result.retryAfterSeconds}`);
     sendJson(res, 429, {
@@ -350,8 +392,8 @@ function checkRateLimit(
   return true;
 }
 
-async function handleHealth(res: ServerResponse): Promise<void> {
-  sendJson(res, 200, { status: 'ok', version });
+async function handleHealth(res: ServerResponse, method = 'GET'): Promise<void> {
+  sendJson(res, 200, { status: 'ok', version }, method);
 }
 
 async function handleInfo(context: ExpressRouterContext, res: ServerResponse): Promise<void> {
@@ -562,6 +604,8 @@ async function handleAuthToken(
   const token = jwt.sign(
     {
       sub: account,
+      iss: ACCESS_TOKEN_ISSUER,
+      aud: ACCESS_TOKEN_AUDIENCE,
       scope: 'anchor_api',
       typ: 'access_token',
     },
@@ -642,6 +686,15 @@ async function handleDepositInteractive(
     sendJson(res, 400, {
       error: 'invalid_amount',
       message: 'Amount must be a positive number',
+    });
+    return;
+  }
+
+  if (typeof amountRaw === 'number' && isUnsafeAmountNumber(numericAmount)) {
+    sendJson(res, 400, {
+      error: 'invalid_amount',
+      message:
+        'Amount must be a positive number. Unsafe numeric amounts must be sent as decimal strings to avoid precision loss',
     });
     return;
   }
@@ -927,8 +980,8 @@ export async function handleExpressRouterRequest(
   const method = (req.method ?? 'GET').toUpperCase();
 
   // Skip timeout for health endpoint (should always respond quickly)
-  if (method === 'GET' && path === '/health') {
-    await handleHealth(res);
+  if ((method === 'GET' || method === 'HEAD') && path === '/health') {
+    await handleHealth(res, method);
     return;
   }
 
