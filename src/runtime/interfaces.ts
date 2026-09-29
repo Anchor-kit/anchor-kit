@@ -93,6 +93,35 @@ export interface DatabaseAdapter {
     statusCode: number;
     responseBody: string;
   }): Promise<void>;
+  reserveIdempotencyRecord(input: {
+    id: string;
+    scope: string;
+    idempotencyKey: string;
+    requestHash: string;
+  }): Promise<{ record: IdempotencyRecord; inserted: boolean }>;
+  createDepositWithIdempotency(input: {
+    transaction: {
+      id: string;
+      account: string;
+      kind: 'deposit';
+      assetCode: string;
+      amount: string;
+      status: TransactionStatus;
+      createdAt: string;
+    };
+    idempotency: {
+      scope: string;
+      idempotencyKey: string;
+      requestHash: string;
+      statusCode: number;
+      responseBody: string;
+    };
+  }): Promise<InteractiveTransactionRecord>;
+  deletePendingIdempotencyRecord(
+    scope: string,
+    idempotencyKey: string,
+    requestHash: string,
+  ): Promise<void>;
 
   insertOrGetWebhookEvent(input: {
     id: string;

@@ -19,6 +19,20 @@ import { extractClientIdentifier } from './client-identifier.ts';
 
 const SEP10_NONCE_OP = 'anchor_auth';
 
+/**
+ * Stable issuer for bearer access tokens minted by the anchor API.
+ * Tokens issued by a different service must not be accepted here, even when
+ * they are signed with the same shared secret.
+ */
+export const ACCESS_TOKEN_ISSUER = 'anchor-kit';
+
+/**
+ * Stable audience for bearer access tokens minted by the anchor API.
+ * Verification requires this exact audience so a valid token minted for an
+ * unintended service is rejected.
+ */
+export const ACCESS_TOKEN_AUDIENCE = 'anchor-api';
+
 export interface ExpressRouterContext {
   config: AnchorConfig;
   database: DatabaseAdapter;
@@ -26,6 +40,7 @@ export interface ExpressRouterContext {
   sep10ServerKeypair: Keypair;
   networkPassphrase: string;
   maxBodyBytes: number;
+  requestTimeout: number;
   rateLimiter: InMemoryRateLimiter;
   rateRules: Record<'auth_challenge' | 'auth_token' | 'webhook' | 'deposit', RateLimitRule>;
 }
@@ -47,12 +62,23 @@ function firstNonEmptyString(value: unknown): string | undefined {
   return undefined;
 }
 
-function sendJson(res: ServerResponse, status: number, body: Record<string, unknown>): void {
+function sendJson(
+  res: ServerResponse,
+  status: number,
+  body: Record<string, unknown>,
+  method = 'GET',
+): void {
+  const payload = JSON.stringify(body);
   if (!res.headersSent) {
     res.statusCode = status;
     res.setHeader('content-type', 'application/json');
+    res.setHeader('content-length', String(Buffer.byteLength(payload, 'utf8')));
   }
-  res.end(JSON.stringify(body));
+  if (method === 'HEAD') {
+    res.end();
+  } else {
+    res.end(payload);
+  }
 }
 
 function sendMethodNotAllowed(res: ServerResponse, allowedMethods: string[]): void {
@@ -72,6 +98,41 @@ function sendJsonUnauthorized(res: ServerResponse, body: Record<string, unknown>
     res.setHeader('WWW-Authenticate', 'Bearer');
   }
   res.end(JSON.stringify(body));
+}
+
+function sendJsonTimeout(res: ServerResponse): void {
+  if (!res.headersSent) {
+    res.statusCode = 504;
+    res.setHeader('content-type', 'application/json');
+  }
+  res.end(
+    JSON.stringify({
+      error: 'gateway_timeout',
+      message: 'Request timeout',
+    }),
+  );
+}
+
+async function withTimeout<T>(
+  promise: Promise<T>,
+  timeoutMs: number,
+  onTimeout: () => void,
+): Promise<T> {
+  let timeoutHandle: NodeJS.Timeout | undefined;
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    timeoutHandle = setTimeout(() => {
+      onTimeout();
+      reject(new Error('Request timeout'));
+    }, timeoutMs);
+  });
+
+  try {
+    return await Promise.race([promise, timeoutPromise]);
+  } finally {
+    if (timeoutHandle) {
+      clearTimeout(timeoutHandle);
+    }
+  }
 }
 
 function parseUrl(req: IncomingMessage): URL {
@@ -209,6 +270,15 @@ function isPlainDecimalString(value: unknown): value is string {
   return typeof value === 'string' && /^\d+(?:\.\d+)?$/.test(value);
 }
 
+/**
+ * Detects numbers JavaScript cannot represent exactly. Integers above
+ * `Number.MAX_SAFE_INTEGER` and fractions with a magnitude that large are
+ * rounded during JSON parsing, which can silently change the amount.
+ */
+function isUnsafeAmountNumber(value: number): boolean {
+  return !Number.isFinite(value) || !Number.isSafeInteger(Math.trunc(value));
+}
+
 function buildInteractiveUrl(interactiveDomain: string, transactionId: string): string {
   const normalizedDomain = interactiveDomain.endsWith('/')
     ? interactiveDomain.slice(0, -1)
@@ -218,6 +288,11 @@ function buildInteractiveUrl(interactiveDomain: string, transactionId: string): 
 
 function endpointPath(req: IncomingMessage): string {
   return parseUrl(req).pathname;
+}
+
+export function isAuthChallengeExpired(expiresAt: string, nowMs = Date.now()): boolean {
+  const expirationMs = Date.parse(expiresAt);
+  return !Number.isFinite(expirationMs) || nowMs >= expirationMs;
 }
 
 function hasValidSignature(transaction: Transaction, publicKey: string): boolean {
@@ -271,11 +346,15 @@ function authenticate(
     const account = typeof decoded.sub === 'string' ? decoded.sub : null;
     const scope = typeof decoded.scope === 'string' ? decoded.scope : null;
     const typ = typeof decoded.typ === 'string' ? decoded.typ : null;
+    const issuer = typeof decoded.iss === 'string' ? decoded.iss : null;
+    const audience = typeof decoded.aud === 'string' ? decoded.aud : null;
     if (
       !account ||
       !StrKey.isValidEd25519PublicKey(account) ||
       scope !== 'anchor_api' ||
-      typ !== 'access_token'
+      typ !== 'access_token' ||
+      issuer !== ACCESS_TOKEN_ISSUER ||
+      audience !== ACCESS_TOKEN_AUDIENCE
     ) {
       return null;
     }
@@ -301,6 +380,10 @@ function checkRateLimit(
   const key = `${endpoint}:${clientId}`;
   const result = context.rateLimiter.hit(key, context.rateRules[endpoint]);
 
+  res.setHeader('RateLimit-Limit', `${result.limit}`);
+  res.setHeader('RateLimit-Remaining', `${result.remaining}`);
+  res.setHeader('RateLimit-Reset', `${result.resetSeconds}`);
+
   if (!result.allowed) {
     res.setHeader('retry-after', `${result.retryAfterSeconds}`);
     sendJson(res, 429, {
@@ -314,8 +397,8 @@ function checkRateLimit(
   return true;
 }
 
-async function handleHealth(res: ServerResponse): Promise<void> {
-  sendJson(res, 200, { status: 'ok', version });
+async function handleHealth(res: ServerResponse, method = 'GET'): Promise<void> {
+  sendJson(res, 200, { status: 'ok', version }, method);
 }
 
 async function handleInfo(context: ExpressRouterContext, res: ServerResponse): Promise<void> {
@@ -500,7 +583,7 @@ async function handleAuthToken(
     return;
   }
 
-  if (new Date(stored.expiresAt).getTime() < Date.now()) {
+  if (isAuthChallengeExpired(stored.expiresAt)) {
     sendJson(res, 401, { error: 'invalid_challenge', message: 'Challenge expired' });
     return;
   }
@@ -526,6 +609,8 @@ async function handleAuthToken(
   const token = jwt.sign(
     {
       sub: account,
+      iss: ACCESS_TOKEN_ISSUER,
+      aud: ACCESS_TOKEN_AUDIENCE,
       scope: 'anchor_api',
       typ: 'access_token',
     },
@@ -610,6 +695,15 @@ async function handleDepositInteractive(
     return;
   }
 
+  if (typeof amountRaw === 'number' && isUnsafeAmountNumber(numericAmount)) {
+    sendJson(res, 400, {
+      error: 'invalid_amount',
+      message:
+        'Amount must be a positive number. Unsafe numeric amounts must be sent as decimal strings to avoid precision loss',
+    });
+    return;
+  }
+
   if (selectedAsset.max_amount !== undefined && numericAmount > selectedAsset.max_amount) {
     sendJson(res, 400, {
       error: 'invalid_amount',
@@ -634,61 +728,96 @@ async function handleDepositInteractive(
 
   if (typeof idempotencyKey === 'string' && idempotencyKey.length > 0) {
     const idempotencyId = randomUUID();
-    const idempotencyRecord = await context.database.insertOrGetIdempotencyRecord({
+    const reservation = await context.database.reserveIdempotencyRecord({
       id: idempotencyId,
       scope,
       idempotencyKey,
       requestHash,
-      statusCode: 201,
-      responseBody: '{}',
     });
+    const idempotencyRecord = reservation.record;
 
-    if (idempotencyRecord.id === idempotencyId) {
-      const transactionId = randomUUID();
-      const created = await context.database.insertInteractiveTransaction({
-        id: transactionId,
-        account: auth.account,
-        kind: 'deposit',
-        assetCode,
-        amount,
-        status: 'pending_user_transfer_start',
+    if (!reservation.inserted) {
+      if (idempotencyRecord.requestHash !== requestHash) {
+        sendJson(res, 409, {
+          error: 'idempotency_conflict',
+          message: 'Idempotency key was already used with a different request body',
+        });
+        return;
+      }
+
+      if (idempotencyRecord.status === 'pending') {
+        res.setHeader('Retry-After', '1');
+        sendJson(res, 409, {
+          error: 'idempotency_in_progress',
+          message: 'A request with this idempotency key is still being processed',
+        });
+        return;
+      }
+
+      let responseBody: Record<string, unknown>;
+      try {
+        const parsed = JSON.parse(idempotencyRecord.responseBody) as unknown;
+        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+          throw new Error('Invalid idempotency response body');
+        }
+        responseBody = parsed as Record<string, unknown>;
+      } catch {
+        res.setHeader('Retry-After', '1');
+        sendJson(res, 503, {
+          error: 'idempotency_response_unavailable',
+          message: 'The saved response is unavailable; retry this request',
+        });
+        return;
+      }
+
+      sendJson(res, idempotencyRecord.statusCode, {
+        ...responseBody,
+        idempotency_replay: true,
       });
-
-      const responseBody = {
-        id: created.id,
-        kind: created.kind,
-        status: created.status,
-        amount: created.amount,
-        asset_code: created.assetCode,
-        asset_issuer: selectedAsset.issuer,
-        account: created.account,
-        interactive_url: buildInteractiveUrl(serverConfig.interactiveDomain, created.id),
-        created_at: created.createdAt,
-      };
-
-      await context.database.updateIdempotencyRecord({
-        scope,
-        idempotencyKey,
-        statusCode: 201,
-        responseBody: JSON.stringify(responseBody),
-      });
-
-      sendJson(res, 201, responseBody);
       return;
     }
 
-    if (idempotencyRecord.requestHash !== requestHash) {
-      sendJson(res, 409, {
-        error: 'idempotency_conflict',
-        message: 'Idempotency key was already used with a different request body',
+    const transactionId = randomUUID();
+    const createdAt = new Date().toISOString();
+    const responseBody = {
+      id: transactionId,
+      kind: 'deposit',
+      status: 'pending_user_transfer_start',
+      amount,
+      asset_code: assetCode,
+      asset_issuer: selectedAsset.issuer,
+      account: auth.account,
+      interactive_url: buildInteractiveUrl(serverConfig.interactiveDomain, transactionId),
+      created_at: createdAt,
+    };
+
+    try {
+      await context.database.createDepositWithIdempotency({
+        transaction: {
+          id: transactionId,
+          account: auth.account,
+          kind: 'deposit',
+          assetCode,
+          amount,
+          status: 'pending_user_transfer_start',
+          createdAt,
+        },
+        idempotency: {
+          scope,
+          idempotencyKey,
+          requestHash,
+          statusCode: 201,
+          responseBody: JSON.stringify(responseBody),
+        },
       });
-      return;
+    } catch (error) {
+      await context.database
+        .deletePendingIdempotencyRecord(scope, idempotencyKey, requestHash)
+        .catch(() => undefined);
+      throw error;
     }
 
-    sendJson(res, idempotencyRecord.statusCode, {
-      ...(JSON.parse(idempotencyRecord.responseBody) as Record<string, unknown>),
-      idempotency_replay: true,
-    });
+    sendJson(res, 201, responseBody);
     return;
   }
 
@@ -890,67 +1019,83 @@ export async function handleExpressRouterRequest(
   const path = endpointPath(req);
   const method = (req.method ?? 'GET').toUpperCase();
 
-  if (method === 'GET' && path === '/health') {
-    await handleHealth(res);
+  // Skip timeout for health endpoint (should always respond quickly)
+  if ((method === 'GET' || method === 'HEAD') && path === '/health') {
+    await handleHealth(res, method);
     return;
   }
 
-  if (method === 'GET' && path === '/info') {
-    await handleInfo(context, res);
-    return;
-  }
+  // Wrap all other requests with timeout
+  let timedOut = false;
+  await withTimeout(
+    (async () => {
+      if (method === 'GET' && path === '/info') {
+        await handleInfo(context, res);
+        return;
+      }
 
-  if (method === 'GET' && path === '/auth/challenge') {
-    await handleAuthChallenge(context, req, res);
-    return;
-  }
+      if (method === 'GET' && path === '/auth/challenge') {
+        await handleAuthChallenge(context, req, res);
+        return;
+      }
 
-  if (method === 'POST' && path === '/auth/token') {
-    await handleAuthToken(context, req, res);
-    return;
-  }
+      if (method === 'POST' && path === '/auth/token') {
+        await handleAuthToken(context, req, res);
+        return;
+      }
 
-  if (method === 'POST' && path === '/transactions/deposit/interactive') {
-    await handleDepositInteractive(context, req, res);
-    return;
-  }
+      if (method === 'POST' && path === '/transactions/deposit/interactive') {
+        await handleDepositInteractive(context, req, res);
+        return;
+      }
 
-  const transactionMatch = TRANSACTION_PATH_RE.exec(path);
-  if (method === 'GET' && transactionMatch) {
-    const transactionIdRaw = transactionMatch[1];
-    let transactionId: string;
-    try {
-      transactionId = decodeURIComponent(transactionIdRaw);
-    } catch {
-      sendJson(res, 400, {
-        error: 'invalid_request',
-        message: 'Transaction id contains malformed percent-encoding',
-      });
-      return;
+      const transactionMatch = TRANSACTION_PATH_RE.exec(path);
+      if (method === 'GET' && transactionMatch) {
+        const transactionIdRaw = transactionMatch[1];
+        let transactionId: string;
+        try {
+          transactionId = decodeURIComponent(transactionIdRaw);
+        } catch {
+          sendJson(res, 400, {
+            error: 'invalid_request',
+            message: 'Transaction id contains malformed percent-encoding',
+          });
+          return;
+        }
+
+        if (hasPathSeparator(transactionId)) {
+          sendJson(res, 400, {
+            error: 'invalid_request',
+            message: 'Transaction id must not contain path separators',
+          });
+          return;
+        }
+
+        await handleTransaction(context, req, res, transactionId);
+        return;
+      }
+
+      if (method === 'POST' && path === '/webhooks/events') {
+        await handleWebhook(context, req, res);
+        return;
+      }
+
+      const allowedMethods = getAllowedMethods(path);
+      if (allowedMethods) {
+        sendMethodNotAllowed(res, allowedMethods);
+        return;
+      }
+
+      sendJson(res, 404, { error: 'not_found', message: 'Endpoint not found' });
+    })(),
+    context.requestTimeout,
+    () => {
+      timedOut = true;
+      sendJsonTimeout(res);
+    },
+  ).catch((error: unknown) => {
+    if (!timedOut) {
+      throw error;
     }
-
-    if (hasPathSeparator(transactionId)) {
-      sendJson(res, 400, {
-        error: 'invalid_request',
-        message: 'Transaction id must not contain path separators',
-      });
-      return;
-    }
-
-    await handleTransaction(context, req, res, transactionId);
-    return;
-  }
-
-  if (method === 'POST' && path === '/webhooks/events') {
-    await handleWebhook(context, req, res);
-    return;
-  }
-
-  const allowedMethods = getAllowedMethods(path);
-  if (allowedMethods) {
-    sendMethodNotAllowed(res, allowedMethods);
-    return;
-  }
-
-  sendJson(res, 404, { error: 'not_found', message: 'Endpoint not found' });
+  });
 }

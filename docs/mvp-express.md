@@ -44,17 +44,38 @@ Anchor-Kit auto-creates MVP tables during `anchor.init()`:
 
 PostgreSQL is the preferred production path.
 
-Deposit idempotency is scoped to the authenticated account. Reusing a key with a different
-request body returns `409 idempotency_conflict`. A matching request that is still being processed
-returns `409 idempotency_in_progress` with `Retry-After: 1`; retry after that interval. Once
-complete, matching requests receive the cached response. Deposit creation and response caching are
-atomic. If either write fails, the request returns `500`, the transaction is rolled back, and the
-reservation is removed so the same key can be retried safely. An incomplete cached response returns
-`503 idempotency_response_unavailable` with `Retry-After` rather than replaying a placeholder.
+### SQLite concurrency settings
 
-For SEP-10 challenges, the signed XDR time bounds are valid from `minTime` through the instant
-before `maxTime`; a challenge is expired exactly at `maxTime`. Native XLM configuration omits
-`issuer`; every issued asset requires a valid Stellar public key issuer.
+When `database.provider` is `sqlite`, Anchor-Kit tunes each connection for the
+overlapping webhook, watcher, and idempotency writes described in
+[SQLite concurrency](sqlite-concurrency.md):
+
+- `PRAGMA journal_mode = WAL` for file-backed databases, so readers keep working
+  while a single writer commits.
+- `PRAGMA busy_timeout = 5000`, so a blocked writer retries instead of failing
+  immediately with `SQLITE_BUSY`.
+
+In-memory URLs such as `:memory:` or `file::memory:` keep SQLite's `memory`
+journal mode (and still get the busy timeout), so test databases are unaffected.
+
+### Deposit idempotency
+
+Idempotency keys are scoped to the authenticated account. Reusing a key with a different request
+body returns `409 idempotency_conflict`. A matching request that is still running returns
+`409 idempotency_in_progress` with `Retry-After: 1`; retry after that interval. Completed requests
+with the same key and body receive the cached response. The transaction and cached response are
+written atomically. If either write fails, the request returns `500`, both writes roll back, and
+the reservation is removed so the key can be retried. An incomplete cached response returns
+`503 idempotency_response_unavailable` with `Retry-After`.
+
+### SEP-10 challenge expiry
+
+The signed XDR time bounds allow a challenge from `minTime` up to, but not including, `maxTime`.
+The API treats a challenge as expired at `maxTime`.
+
+### Asset issuers
+
+Native XLM configuration omits `issuer`. Issued assets require a valid Stellar public key issuer.
 
 ## 4) Express integration
 
