@@ -1,3 +1,4 @@
+import { ConfigError } from '@/core/errors.ts';
 import type { QueueAdapter, QueueJob } from '@/runtime/interfaces.ts';
 
 interface InMemoryQueueOptions {
@@ -18,6 +19,10 @@ export class InMemoryQueueAdapter implements QueueAdapter {
   private resolveStop: (() => void) | null = null;
 
   constructor(options: InMemoryQueueOptions) {
+    if (!Number.isSafeInteger(options.concurrency) || options.concurrency < 1) {
+      throw new ConfigError('InMemoryQueueAdapter concurrency must be a positive safe integer');
+    }
+
     this.concurrency = options.concurrency;
     this.maxPendingJobs = options.maxPendingJobs;
     this.onError = options.onError;
@@ -38,6 +43,13 @@ export class InMemoryQueueAdapter implements QueueAdapter {
   }
 
   public async start(worker: (job: QueueJob) => Promise<void>): Promise<void> {
+    if (this.running) {
+      if (this.worker === worker) {
+        return;
+      }
+      throw new Error('Queue is already running with a different worker callback.');
+    }
+
     this.worker = worker;
     this.running = true;
     this.kick();

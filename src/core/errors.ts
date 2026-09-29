@@ -46,6 +46,18 @@ export class ValidationError extends AnchorKitError {
 }
 
 /**
+ * Error raised when a request body exceeds the configured size limit.
+ */
+export class PayloadTooLargeError extends AnchorKitError {
+  public readonly statusCode = 413;
+  public readonly errorCode = 'PAYLOAD_TOO_LARGE';
+
+  constructor(message: string, context?: Record<string, unknown>) {
+    super(message, context);
+  }
+}
+
+/**
  * Error representing a standard SEP protocol error.
  */
 export class SepProtocolError extends AnchorKitError {
@@ -118,6 +130,18 @@ export class NetworkError extends AnchorKitError {
 export class CryptoError extends AnchorKitError {
   public readonly statusCode = 500;
   public readonly errorCode = 'CRYPTO_ERROR';
+
+  constructor(message: string, context?: Record<string, unknown>) {
+    super(message, context);
+  }
+}
+
+/**
+ * Error raised when persisted JSON payloads are malformed or cannot be decoded into the expected object shape.
+ */
+export class MalformedPersistedDataError extends AnchorKitError {
+  public readonly statusCode = 500;
+  public readonly errorCode = 'MALFORMED_PERSISTED_DATA';
 
   constructor(message: string, context?: Record<string, unknown>) {
     super(message, context);

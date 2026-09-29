@@ -2,7 +2,7 @@
 
 ![CI](https://github.com/0xNgoo/anchor-kit/actions/workflows/ci.yml/badge.svg)
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
-![Version](https://img.shields.io/badge/version-0.1.0-orange.svg)
+![Version](https://img.shields.io/badge/version-0.0.4--beta-orange.svg)
 
 **Anchor-Kit** is a developer-friendly, type-safe SDK for building Stellar Anchors. It abstracts the complexity of Stellar Ecosystem Proposals (SEPs)—specifically SEP-6, SEP-24, and SEP-31—allowing you to focus on your business logic while ensuring compliance and security.
 
@@ -32,6 +32,9 @@ This repository now ships a usable MVP with:
 - In-process queue + watcher lifecycle (`startBackgroundJobs` / `stopBackgroundJobs`)
 
 The SDK does not own `listen()` and does not bind network ports.
+
+See [the trusted proxy rate-limit guidance](docs/trusted-proxy-rate-limits.md)
+before enabling trustForwardedFor.
 
 ## Install
 
@@ -73,6 +76,10 @@ const anchor = createAnchor({
       },
     ],
   },
+  operational: {
+    // Controls cleanup retention. This overrides framework.watchers.retentionDays.
+    transactionRetentionDays: 90,
+  },
   framework: {
     database: {
       provider: 'postgres',
@@ -95,6 +102,10 @@ const anchor = createAnchor({
   },
 });
 
+`operational.transactionRetentionDays` controls the retention value included in cleanup jobs.
+For compatibility, existing configurations that only set `framework.watchers.retentionDays` continue
+to use that value; when both are set, the operational setting takes precedence.
+
 await anchor.init();
 await anchor.startBackgroundJobs();
 
@@ -109,7 +120,55 @@ Webhook signature verification signs the exact request body bytes, so Anchor-Kit
 
 When mounting Anchor-Kit behind Express, configure `express.json()` with a `verify` hook before `anchor.getExpressRouter()` and store `req.rawBody`, as shown in the Quick Start. Verify the webhook signature before parsing, transforming, or rebuilding the body for any custom middleware.
 
+### Webhook event contract
+
+The mounted webhook endpoint accepts JSON only:
+
+- `POST /webhooks/events`
+- Required `Content-Type: application/json`
+- Request body is a JSON object, for example `{ "id": "evt_123", "provider": "stellar", "amount": "10" }`
+- Optional `x-webhook-provider` header overrides the provider value from the JSON body
+- When `security.verifyWebhookSignatures` is enabled (the default), the request must include `x-anchor-signature` and the value must match the HMAC-SHA256 of the raw request body using `security.webhookSecret`
+- If the provider does not sign payloads, set `verifyWebhookSignatures: false` in the config to accept unsigned JSON requests
+
+Example success response:
+
+```json
+{
+  "received": true,
+  "duplicate": false,
+  "event_id": "evt_123",
+  "received_at": "2026-01-01T00:00:00.000Z",
+  "provider": "stellar"
+}
+```
+
+Example duplicate response:
+
+```json
+{
+  "received": true,
+  "duplicate": true,
+  "event_id": "evt_123",
+  "received_at": "2026-01-01T00:00:00.000Z",
+  "provider": "stellar"
+}
+```
+
+Example failure response when verification or processing fails:
+
+```json
+{
+  "error": "webhook_error",
+  "message": "Webhook processing failed",
+  "event_id": "evt_123"
+}
+```
+
 ## Background Job Lifecycle
+
+Plugin registration and initialization timing are documented in
+[the plugin lifecycle guide](docs/plugin-lifecycle.md).
 
 Background processing is explicit and host-controlled.
 
@@ -118,6 +177,12 @@ Background processing is explicit and host-controlled.
 3. Call `await anchor.shutdown()` during graceful shutdown (which automatically stops background jobs).
 
 `startBackgroundJobs()` and `stopBackgroundJobs()` are idempotent and safe to call more than once.
+
+### Retention cutoff semantics
+
+Cleanup uses a strict retention cutoff. Rows with timestamps exactly equal to the cutoff are kept, and only records strictly older than the cutoff are deleted. This applies consistently across auth challenges, idempotency keys, processed webhook events, and completed watcher tasks.
+
+Persisted JSON payloads are also validated strictly. If a stored `payload` column is malformed, the adapter throws a `MalformedPersistedDataError` instead of silently replacing it with an empty object.
 
 ## Testing
 
@@ -131,9 +196,12 @@ const databaseUrl = makeSqliteDbUrlForTests();
 
 ## Endpoints
 
+See [the auth token response contract](docs/auth-token-response.md) for expiry
+fields, bearer semantics, and cache behavior.
+
 Mounted under your chosen base path (for example `/anchor`):
 
-- `GET /health`
+- `GET, HEAD /health`
 - `GET /info`
 - `GET /auth/challenge`
 - `POST /auth/token` (expects wallet-signed SEP-10 challenge XDR)
@@ -141,9 +209,23 @@ Mounted under your chosen base path (for example `/anchor`):
 - `GET /transactions/:id` (Bearer auth)
 - `POST /webhooks/events`
 
+## Rate limits
+
+Rate-limited routes return `RateLimit-Limit`, `RateLimit-Remaining`, and `RateLimit-Reset` headers on both allowed and rejected requests. Values are specific to the route's configured rule; `RateLimit-Reset` is the number of seconds until the active window resets. A rejected request also retains the `Retry-After` header and existing JSON response body.
+
+The in-memory limiter retains at most 10,000 client-and-route buckets. Expired buckets are cleaned up as needed. If the limit is reached while all buckets are active, requests from new client identifiers receive a rate-limited response until an active bucket expires; active buckets are not evicted, so their clients do not unexpectedly regain requests.
+
 ## curl Examples
 
 Assume your host app mounts the router at `/anchor` on `http://localhost:3000`.
+
+### Advertised anchor info
+
+Get the anchor's advertised config (network, passphrase, supported assets, version, and public metadata). The `metadata` object is always present; its `tomlUrl`, `protocols`, `features`, and `documentationUrls` sections are included only when configured. The optional `interactive_domain`, `support_email`, and `website` fields are also omitted when not configured. Secrets are never included.
+
+```bash
+curl -s http://localhost:3000/anchor/info
+```
 
 ### SEP-10 challenge/token flow
 
@@ -166,6 +248,15 @@ curl -s \
   -d "{\"account\":\"${ACCOUNT}\",\"challenge\":\"${SIGNED_CHALLENGE_XDR}\"}"
 ```
 
+If the challenge consumption step fails while persisting the token exchange state, the route responds with a generic `500` error instead of issuing a token. The stable response is:
+
+```json
+{
+  "error": "internal_server_error",
+  "message": "Internal server error"
+}
+```
+
 ### Interactive deposit and transaction lookup
 
 Create a deposit transaction:
@@ -177,8 +268,14 @@ curl -s \
   -X POST http://localhost:3000/anchor/transactions/deposit/interactive \
   -H "authorization: Bearer ${TOKEN}" \
   -H 'content-type: application/json' \
+  -H 'Idempotency-Key: your-unique-key-here' \
   -d '{"asset_code":"USDC","amount":"25"}'
 ```
+
+Use the same `Idempotency-Key` value when retrying requests to safely prevent duplicate deposits.
+
+See [the deposit idempotency contract](docs/idempotency.md) for account scoping,
+replay responses, and request conflicts.
 
 Look up a transaction by id:
 
@@ -191,11 +288,31 @@ curl -s \
   "http://localhost:3000/anchor/transactions/${TX_ID}"
 ```
 
+### Webhook events
+
+Post a webhook event to `/webhooks/events`. When signature verification is enabled, send the raw body exactly as authored and pass its HMAC-SHA256 signature in `x-anchor-signature`; set the provider in `x-webhook-provider`.
+
+```bash
+WEBHOOK_SECRET="your-configured-webhook-secret"
+BODY='{"id":"evt_123456","provider":"flutterwave","event":"deposit.completed","amount":"25"}'
+
+SIGNATURE=$(printf '%s' "${BODY}" | openssl dgst -sha256 -hmac "${WEBHOOK_SECRET}" -hex | awk '{print $NF}')
+
+curl -s \
+  -X POST http://localhost:3000/anchor/webhooks/events \
+  -H 'content-type: application/json' \
+  -H "x-webhook-provider: flutterwave" \
+  -H "x-anchor-signature: ${SIGNATURE}" \
+  -d "${BODY}"
+```
+
 ## Docs
 
+- [Configuration Reference](./docs/configuration-reference.md) – Complete guide to all configuration options, their status, and usage
 - [Architecture Overview](./ARCHITECTURE.md)
 - [Contributing Guide](./CONTRIBUTING.md)
 - [Roadmap](./ROADMAP.md)
+- [Releasing & Publishing](./docs/releasing.md)
 
 The root package also exports public TypeScript transaction helpers, including `Transaction`, `TransactionKind`, and `TransactionStatus`.
 

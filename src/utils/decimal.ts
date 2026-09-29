@@ -1,5 +1,6 @@
 import Big from 'big.js';
 import { ValidationUtils } from './validation';
+import { ValidationError } from '@/core/errors.ts';
 
 /**
  * DecimalUtils helper object
@@ -62,6 +63,15 @@ export const DecimalUtils = {
    * @returns Quotient as string.
    */
   divide(a: string, b: string, precision: number = 7): string {
+    if (
+      typeof precision !== 'number' ||
+      !Number.isFinite(precision) ||
+      !Number.isSafeInteger(precision) ||
+      precision < 0
+    ) {
+      throw new ValidationError('precision must be a non-negative safe integer');
+    }
+
     return this.fromString(a).div(this.fromString(b)).toFixed(precision);
   },
 
@@ -74,6 +84,18 @@ export const DecimalUtils = {
    * @returns Total amount including fee as string.
    */
   applyFee(amount: string, feePercentage: number): string {
+    if (
+      typeof feePercentage !== 'number' ||
+      !Number.isFinite(feePercentage) ||
+      Number.isNaN(feePercentage)
+    ) {
+      throw new ValidationError('feePercentage must be a finite number');
+    }
+
+    if (feePercentage < 0 || feePercentage > 100) {
+      throw new ValidationError('feePercentage must be between 0 and 100 inclusive');
+    }
+
     const bigAmount = this.fromString(amount);
     const bigFee = new Big(feePercentage).div(100);
     return bigAmount.times(new Big(1).plus(bigFee)).toFixed();

@@ -4,6 +4,7 @@ import {
   RailError,
   ConfigError,
   ValidationError,
+  PayloadTooLargeError,
   SepProtocolError,
   NetworkError,
   CryptoError,
@@ -88,6 +89,14 @@ describe('ValidationError', () => {
     const err = new ValidationError('invalid parameter');
     expect(err.statusCode).toBe(400);
     expect(err.errorCode).toBe('INVALID_REQUEST');
+  });
+});
+
+describe('PayloadTooLargeError', () => {
+  it('maps statusCode and errorCode', () => {
+    const err = new PayloadTooLargeError('request body too large');
+    expect(err.statusCode).toBe(413);
+    expect(err.errorCode).toBe('PAYLOAD_TOO_LARGE');
   });
 });
 

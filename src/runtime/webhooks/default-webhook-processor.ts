@@ -1,9 +1,9 @@
-import { createHmac, timingSafeEqual, randomUUID } from 'node:crypto';
-import type { AnchorKitConfig } from '@/types/config.ts';
 import type { DatabaseAdapter, WebhookProcessor } from '@/runtime/interfaces.ts';
+import type { AnchorKitConfigSnapshot } from '@/types/config.ts';
+import { createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
 
 interface DefaultWebhookProcessorOptions {
-  config: AnchorKitConfig;
+  config: AnchorKitConfigSnapshot;
   database: DatabaseAdapter;
 }
 
@@ -27,7 +27,7 @@ function safeEquals(left: string, right: string): boolean {
 }
 
 export class DefaultWebhookProcessor implements WebhookProcessor {
-  private readonly config: AnchorKitConfig;
+  private readonly config: AnchorKitConfigSnapshot;
   private readonly database: DatabaseAdapter;
 
   constructor(options: DefaultWebhookProcessorOptions) {
@@ -39,12 +39,12 @@ export class DefaultWebhookProcessor implements WebhookProcessor {
     eventId: string;
     provider: string;
     payload: Record<string, unknown>;
-    rawBody: string;
+    rawBody: string | Buffer | Uint8Array;
     signature?: string;
-  }): Promise<{ duplicate: boolean; eventId: string }> {
+  }): Promise<{ duplicate: boolean; eventId: string; provider: string }> {
     this.verifySignatureIfEnabled(input);
 
-    const insertion = await this.database.insertWebhookEvent({
+    const insertion = await this.database.insertOrGetWebhookEvent({
       id: randomUUID(),
       eventId: input.eventId,
       provider: input.provider,
@@ -52,7 +52,11 @@ export class DefaultWebhookProcessor implements WebhookProcessor {
     });
 
     if (!insertion.inserted) {
-      return { duplicate: true, eventId: insertion.record.eventId };
+      return {
+        duplicate: true,
+        eventId: insertion.record.eventId,
+        provider: insertion.record.provider,
+      };
     }
 
     try {
@@ -104,12 +108,16 @@ export class DefaultWebhookProcessor implements WebhookProcessor {
       throw new Error('Webhook processing failed');
     }
 
-    return { duplicate: false, eventId: insertion.record.eventId };
+    return {
+      duplicate: false,
+      eventId: insertion.record.eventId,
+      provider: insertion.record.provider,
+    };
   }
 
   private verifySignatureIfEnabled(input: {
     payload: Record<string, unknown>;
-    rawBody: string;
+    rawBody: string | Buffer | Uint8Array;
     signature?: string;
   }): void {
     const verifyEnabled = this.config.security.verifyWebhookSignatures ?? true;
@@ -130,8 +138,10 @@ export class DefaultWebhookProcessor implements WebhookProcessor {
     }
 
     const expected = createHmac('sha256', webhookSecret).update(input.rawBody).digest('hex');
+    const normalizedSignature = input.signature.toLowerCase();
+    const normalizedExpected = expected.toLowerCase();
 
-    if (!safeEquals(expected, input.signature)) {
+    if (!safeEquals(normalizedExpected, normalizedSignature)) {
       throw new Error('Invalid webhook signature');
     }
   }

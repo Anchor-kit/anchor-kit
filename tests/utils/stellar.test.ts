@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { Account, Keypair, MuxedAccount } from '@stellar/stellar-sdk';
+import { Account, Keypair, MuxedAccount, Transaction, Networks } from '@stellar/stellar-sdk';
 import { StellarUtils } from '@/utils/stellar.ts';
 
 interface ParsedPaymentOperation {
@@ -45,8 +45,22 @@ describe('StellarUtils', () => {
       const txId = 'this_is_a_very_long_transaction_id_that_exceeds_28_bytes';
       const memo = StellarUtils.generateMemo(txId, 'text');
       expect(memo.type).toBe('text');
-      expect(memo.value.length).toBeLessThanOrEqual(28);
+      expect(Buffer.byteLength(memo.value, 'utf8')).toBeLessThanOrEqual(28);
       expect(memo.value).toBe(txId.substring(0, 28));
+    });
+
+    it('should truncate text memos at a UTF-8 byte boundary', () => {
+      const memo = StellarUtils.generateMemo('😀'.repeat(10), 'text');
+
+      expect(memo.value).toBe('😀'.repeat(7));
+      expect(Buffer.byteLength(memo.value, 'utf8')).toBe(28);
+    });
+
+    it('should preserve combining characters without exceeding the byte limit', () => {
+      const memo = StellarUtils.generateMemo('e\u0301'.repeat(10), 'text');
+
+      expect(Buffer.byteLength(memo.value, 'utf8')).toBeLessThanOrEqual(28);
+      expect(memo.value).not.toMatch(/\uD800|\uDC00/);
     });
   });
 
@@ -92,6 +106,145 @@ describe('StellarUtils', () => {
       expect(operation.asset?.isNative()).toBe(true);
       expect(parseFloat(operation.amount)).toBe(parseFloat(params.amount));
     });
+
+    it.each(['0', '-1', '1e3', 'not-a-number', '9'.repeat(400)])(
+      'should reject invalid payment amount %s',
+      async (amount) => {
+        await expect(
+          StellarUtils.buildPaymentXdr({
+            source: validAccountId,
+            destination: validAccountId,
+            amount,
+            assetCode: 'XLM',
+            network: 'testnet',
+          }),
+        ).rejects.toThrow('amount must be a positive finite decimal string');
+      },
+    );
+
+    it.each(['0.00000001', '1.12345678'])(
+      'should reject payment amounts with excessive precision: %s',
+      async (amount) => {
+        await expect(
+          StellarUtils.buildPaymentXdr({
+            source: validAccountId,
+            destination: validAccountId,
+            amount,
+            assetCode: 'XLM',
+            network: 'testnet',
+          }),
+        ).rejects.toThrow('amount must have at most 7 decimal places');
+      },
+    );
+
+    it('should accept seven fractional places', async () => {
+      const xdr = await StellarUtils.buildPaymentXdr({
+        source: validAccountId,
+        destination: validAccountId,
+        amount: '1.1234567',
+        assetCode: 'XLM',
+        network: 'testnet',
+      });
+      expect(xdr).toBeTruthy();
+    });
+
+    it('should preserve a valid positive decimal amount', async () => {
+      await expect(
+        StellarUtils.buildPaymentXdr({
+          source: validAccountId,
+          destination: validAccountId,
+          amount: '0.000001',
+          assetCode: 'XLM',
+          network: 'testnet',
+        }),
+      ).resolves.toBeTypeOf('string');
+    });
+
+    it.each(['xlm', 'Xlm', ' XLM '])('should treat %s as the native asset', async (assetCode) => {
+      const xdr = await StellarUtils.buildPaymentXdr({
+        source: validAccountId,
+        destination: validAccountId,
+        amount: '1.5',
+        assetCode,
+        network: 'testnet',
+      });
+
+      const operation = asPaymentOperation(StellarUtils.parseXdrTransaction(xdr).operations[0]);
+      expect(operation.asset?.isNative()).toBe(true);
+    });
+
+    it('should preserve an id memo', async () => {
+      const params = {
+        source: validAccountId,
+        destination: validAccountId,
+        amount: '5',
+        assetCode: 'USDC',
+        issuer: validAccountId,
+        memo: { value: '123456', type: 'id' as const },
+        network: 'testnet',
+      };
+
+      const xdr = await StellarUtils.buildPaymentXdr(params);
+      const parsed = StellarUtils.parseXdrTransaction(xdr);
+      expect(parsed.memo?.type).toBe('id');
+      expect(parsed.memo?.value).toBe(params.memo.value);
+    });
+
+    it('should preserve a hash memo', async () => {
+      const hashValue = '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
+      const params = {
+        source: validAccountId,
+        destination: validAccountId,
+        amount: '5',
+        assetCode: 'USDC',
+        issuer: validAccountId,
+        memo: { value: hashValue, type: 'hash' as const },
+        network: 'testnet',
+      };
+
+      const xdr = await StellarUtils.buildPaymentXdr(params);
+      const tx = new Transaction(xdr, Networks.TESTNET);
+      expect(tx.memo.type).toBe('hash');
+      const parsedHex = Buffer.from(tx.memo.value as Buffer).toString('hex');
+      expect(parsedHex).toBe(hashValue);
+    });
+
+    it('should preserve a return memo', async () => {
+      // Use a 32-byte (64-hex) value for return memo as required by Stellar SDK
+      const returnValue = 'fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210';
+      const params = {
+        source: validAccountId,
+        destination: validAccountId,
+        amount: '5',
+        assetCode: 'USDC',
+        issuer: validAccountId,
+        memo: { value: returnValue, type: 'return' as const },
+        network: 'testnet',
+      };
+
+      const xdr = await StellarUtils.buildPaymentXdr(params);
+      const tx = new Transaction(xdr, Networks.TESTNET);
+      expect(tx.memo.type).toBe('return');
+      const parsedHex = Buffer.from(tx.memo.value as Buffer).toString('hex');
+      expect(parsedHex).toBe(returnValue);
+    });
+
+    it.each(['hash', 'return'] as const)(
+      'should reject malformed %s memo payloads before building',
+      async (type) => {
+        await expect(
+          StellarUtils.buildPaymentXdr({
+            source: validAccountId,
+            destination: validAccountId,
+            amount: '5',
+            assetCode: 'USDC',
+            issuer: validAccountId,
+            memo: { value: 'not-a-32-byte-hex-value', type },
+            network: 'testnet',
+          }),
+        ).rejects.toThrow(type + ' memo must be exactly 32 bytes');
+      },
+    );
 
     it('should fail early for an invalid source public key', async () => {
       await expect(
@@ -175,6 +328,56 @@ describe('StellarUtils', () => {
 
     it('should throw when parsing invalid XDR', () => {
       expect(() => StellarUtils.parseXdrTransaction('invalid-xdr')).toThrow(/Failed to parse XDR/);
+    });
+
+    it('should build a payment using the public network passphrase', async () => {
+      const params = {
+        source: validAccountId,
+        destination: validAccountId,
+        amount: '2.5',
+        assetCode: 'XLM',
+        network: 'public' as const,
+      };
+
+      const xdr = await StellarUtils.buildPaymentXdr(params);
+      expect(typeof xdr).toBe('string');
+
+      const tx = new Transaction(xdr, Networks.PUBLIC);
+      expect(tx.networkPassphrase).toBe(Networks.PUBLIC);
+      expect(tx.source).toBe(params.source);
+      expect(tx.operations.length).toBe(1);
+    });
+
+    it.each(['testnet', 'public', 'futurenet'] as const)(
+      'should parse XDR with explicit %s network context',
+      async (network) => {
+        const xdr = await StellarUtils.buildPaymentXdr({
+          source: validAccountId,
+          destination: validAccountId,
+          amount: '1',
+          assetCode: 'XLM',
+          network,
+        });
+        expect(StellarUtils.parseXdrTransaction(xdr, network).source).toBe(validAccountId);
+      },
+    );
+
+    it('should reject unsupported parse network input', () => {
+      expect(() => StellarUtils.parseXdrTransaction('AAAA', 'invalid' as 'testnet')).toThrow(
+        'Unsupported network: invalid. Must be one of: public, testnet, futurenet',
+      );
+    });
+
+    it('should reject unsupported network values instead of falling back to testnet', async () => {
+      await expect(
+        StellarUtils.buildPaymentXdr({
+          source: validAccountId,
+          destination: validAccountId,
+          amount: '1',
+          assetCode: 'XLM',
+          network: 'unknown-network',
+        }),
+      ).rejects.toThrow('Unsupported network: unknown-network');
     });
   });
 });

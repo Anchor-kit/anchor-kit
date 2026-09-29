@@ -1,23 +1,23 @@
-# Normalize webhook provider values and add webhook rate-limit coverage
+# PR Summary
 
-## What does this PR do?
-- Trims whitespace-only webhook provider values before evaluating fallback logic.
-- Falls back from a blank header to the body provider, then to `generic`.
-- Accepts array-style `x-webhook-provider` and `x-anchor-signature` headers by reading the first non-empty value.
-- Adds focused regression coverage for webhook provider fallback behavior and webhook route rate limiting.
+Adds focused tests for three behaviors:
 
-## How to test?
-- Run `bun test tests/webhook-fallback.test.ts tests/mvp-express.integration.test.ts`
-- Confirm the new webhook fallback and webhook rate-limit cases pass.
+- sqlite-backed `getInteractiveTransactionById()` returns `null` for unknown transaction IDs
+- `TransactionWatcher.stop()` before `start()` is a safe no-op
+- webhook route accepts an empty request body and returns a generated `event_id`
+
+## How to test
+
+- Run `bun test tests/runtime/sql-adapter-interactive-tx.test.ts tests/runtime/transaction-watcher.unit.test.ts tests/mvp-express.integration.test.ts`
+- Confirm all tests pass
 
 ## Checklist
-- [ ] My code follows the code style of this project.
+
+- [x] My code follows the code style of this project.
 - [x] I have added tests for my changes.
 - [ ] I have updated the documentation accordingly.
 - [x] I have run `bun test` locally.
 
 ## Issue Reference
-Closes #355
-Closes #356
-Closes #359
-Closes #357
+
+Closes #243, #240, and #245
