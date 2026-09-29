@@ -120,7 +120,10 @@ describe('MVP Express-mounted integration', () => {
   beforeAll(async () => {
     anchor = createAnchor({
       network: { network: 'testnet' },
-      server: { interactiveDomain: 'https://anchor.example.com' },
+      server: {
+        interactiveDomain: 'https://anchor.example.com',
+        corsOrigins: ['https://app.example.com'],
+      },
       security: {
         sep10SigningKey: sep10ServerKeypair.secret(),
         interactiveJwtSecret: 'jwt-test-secret',
@@ -216,6 +219,144 @@ describe('MVP Express-mounted integration', () => {
     expect(response.body.version).toBe(version);
     expect(response.body.version).not.toBe('mvp');
     expect(response.body.interactive_domain).toBe('https://anchor.example.com');
+    expect(response.body.metadata).toEqual({});
+    expect(response.body).not.toHaveProperty('security');
+  });
+
+  it('returns configured public metadata and omits unconfigured metadata sections', async () => {
+    const customDbUrl = makeSqliteDbUrlForTests();
+    const customAnchor = createAnchor({
+      network: { network: 'testnet' },
+      server: {},
+      security: {
+        sep10SigningKey: sep10ServerKeypair.secret(),
+        interactiveJwtSecret: 'metadata-jwt-secret',
+        distributionAccountSecret: 'metadata-distribution-secret',
+      },
+      assets: {
+        assets: [
+          { code: 'USDC', issuer: 'GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5' },
+        ],
+      },
+      metadata: {
+        tomlUrl: 'https://anchor.example.com/.well-known/stellar.toml',
+        protocols: { sep10: true, sep24: true, sep6: false, sep31: true },
+        features: { supportsInteractiveDeposits: true },
+        documentationUrls: {
+          apiDocs: 'https://anchor.example.com/docs',
+          terms: 'https://anchor.example.com/terms',
+        },
+      },
+      framework: { database: { provider: 'sqlite', url: customDbUrl } },
+    });
+
+    await customAnchor.init();
+    const customInvoke = createMountedInvoker(customAnchor);
+    const response = await customInvoke({ path: '/info' });
+    expect(response.status).toBe(200);
+    expect(response.body.metadata).toEqual({
+      tomlUrl: 'https://anchor.example.com/.well-known/stellar.toml',
+      protocols: { sep10: true, sep24: true, sep6: false, sep31: true },
+      features: { supportsInteractiveDeposits: true },
+      documentationUrls: {
+        apiDocs: 'https://anchor.example.com/docs',
+        terms: 'https://anchor.example.com/terms',
+      },
+    });
+    expect(response.body).not.toHaveProperty('security');
+    expect(JSON.stringify(response.body)).not.toContain('metadata-jwt-secret');
+    expect(JSON.stringify(response.body)).not.toContain('metadata-distribution-secret');
+
+    await customAnchor.shutdown();
+    const customDbPath = customDbUrl.startsWith('file:')
+      ? customDbUrl.slice('file:'.length)
+      : customDbUrl;
+    try {
+      unlinkSync(customDbPath);
+    } catch {
+      // ignore
+    }
+  });
+
+  it('handles configured CORS preflights only for known routes, methods, and headers', async () => {
+    const allowed = await invoke({
+      method: 'OPTIONS',
+      path: '/info',
+      headers: {
+        origin: 'https://app.example.com',
+        'access-control-request-method': 'GET',
+        'access-control-request-headers': 'authorization, content-type',
+      },
+    });
+    expect(allowed.status).toBe(204);
+    expect(allowed.headers['access-control-allow-origin']).toBe('https://app.example.com');
+    expect(allowed.headers['access-control-allow-methods']).toBe('GET');
+    expect(allowed.headers['access-control-allow-headers']).toBe('authorization, content-type');
+    expect(allowed.headers.vary).toContain('Origin');
+
+    const allowedPost = await invoke({
+      method: 'OPTIONS',
+      path: '/auth/token',
+      headers: {
+        origin: 'https://app.example.com',
+        'access-control-request-method': 'POST',
+        'access-control-request-headers': 'authorization, content-type',
+      },
+    });
+    expect(allowedPost.status).toBe(204);
+    expect(allowedPost.headers['access-control-allow-methods']).toBe('POST');
+
+    const blockedOrigin = await invoke({
+      method: 'OPTIONS',
+      path: '/info',
+      headers: {
+        origin: 'https://other.example.com',
+        'access-control-request-method': 'GET',
+      },
+    });
+    expect(blockedOrigin.status).toBe(403);
+    expect(blockedOrigin.headers).not.toHaveProperty('access-control-allow-origin');
+
+    const blockedMethod = await invoke({
+      method: 'OPTIONS',
+      path: '/info',
+      headers: {
+        origin: 'https://app.example.com',
+        'access-control-request-method': 'DELETE',
+      },
+    });
+    expect(blockedMethod.status).toBe(403);
+
+    const wrongRouteMethod = await invoke({
+      method: 'OPTIONS',
+      path: '/auth/token',
+      headers: {
+        origin: 'https://app.example.com',
+        'access-control-request-method': 'GET',
+      },
+    });
+    expect(wrongRouteMethod.status).toBe(403);
+
+    const blockedHeader = await invoke({
+      method: 'OPTIONS',
+      path: '/info',
+      headers: {
+        origin: 'https://app.example.com',
+        'access-control-request-method': 'GET',
+        'access-control-request-headers': 'x-unapproved-header',
+      },
+    });
+    expect(blockedHeader.status).toBe(403);
+
+    const unknownRoute = await invoke({
+      method: 'OPTIONS',
+      path: '/not-a-route',
+      headers: {
+        origin: 'https://app.example.com',
+        'access-control-request-method': 'GET',
+      },
+    });
+    expect(unknownRoute.status).toBe(404);
   });
 
   it('2e) /info includes network_passphrase matching the configured network', async () => {
@@ -886,7 +1027,9 @@ describe('MVP Express-mounted integration', () => {
 
     expect(createResponse.status).toBe(201);
     const createdId = String(createResponse.body.id ?? '');
-    expect(createResponse.body.interactive_url).toBe(`https://anchor.example.com/deposit/${createdId}`);
+    expect(createResponse.body.interactive_url).toBe(
+      `https://anchor.example.com/deposit/${createdId}`,
+    );
 
     const lookupResponse = await customInvoke({
       method: 'GET',
@@ -897,11 +1040,17 @@ describe('MVP Express-mounted integration', () => {
     });
 
     expect(lookupResponse.status).toBe(200);
-    expect(lookupResponse.body.interactive_url).toBe(`https://anchor.example.com/deposit/${createdId}`);
-    expect(lookupResponse.body.more_info_url).toBe(`https://anchor.example.com/deposit/${createdId}`);
+    expect(lookupResponse.body.interactive_url).toBe(
+      `https://anchor.example.com/deposit/${createdId}`,
+    );
+    expect(lookupResponse.body.more_info_url).toBe(
+      `https://anchor.example.com/deposit/${createdId}`,
+    );
 
     await customAnchor.shutdown();
-    const customDbPath = customDbUrl.startsWith('file:') ? customDbUrl.slice('file:'.length) : customDbUrl;
+    const customDbPath = customDbUrl.startsWith('file:')
+      ? customDbUrl.slice('file:'.length)
+      : customDbUrl;
     try {
       unlinkSync(customDbPath);
     } catch {

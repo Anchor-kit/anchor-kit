@@ -325,6 +325,19 @@ function validateAnchorKitConfig(config: AnchorKitConfig): boolean {
   NetworkConfigSchema.validate(network);
   SecurityConfigSchema.validate(security);
 
+  for (const key of ['host', 'corsOrigins'] as const) {
+    const value = server[key];
+    if (value !== undefined && value !== null && !ServerConfigSchema[key].validate(value)) {
+      throw new Error(`server.${key}: invalid value`);
+    }
+  }
+
+  for (const [protocol, value] of Object.entries(metadata?.protocols ?? {})) {
+    if (value !== undefined && typeof value !== 'boolean') {
+      throw new Error(`metadata.protocols.${protocol} must be a boolean`);
+    }
+  }
+
   if (!assets.assets || !Array.isArray(assets.assets) || assets.assets.length === 0) {
     throw new Error('At least one asset must be configured in assets.assets');
   }

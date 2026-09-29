@@ -147,7 +147,7 @@ Assume your host app mounts the router at `/anchor` on `http://localhost:3000`.
 
 ### Advertised anchor info
 
-Get the anchor's advertised config (network, passphrase, supported assets, version):
+Get the anchor's advertised config (network, passphrase, supported assets, version, and public metadata). The `metadata` object is always present; its `tomlUrl`, `protocols`, `features`, and `documentationUrls` sections are included only when configured. The optional `interactive_domain`, `support_email`, and `website` fields are also omitted when not configured. Secrets are never included.
 
 ```bash
 curl -s http://localhost:3000/anchor/info
