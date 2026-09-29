@@ -81,7 +81,7 @@ function validateFrameworkDatabase(framework: AnchorKitConfig['framework']): boo
     throw new Error('Missing required database configuration in framework.database');
   }
 
-  if (framework.database.provider === 'mysql') {
+  if (String(framework.database.provider) === 'mysql') {
     throw new Error(
       'MySQL is not currently supported in this MVP. Please use "postgres" or "sqlite".',
     );
@@ -335,7 +335,11 @@ function validateAsset(asset: unknown): asset is Asset {
   const a = asset as Record<string, unknown>;
 
   if (!isNonEmptyString(a.code) || !isValidStellarAssetCode(a.code)) return false;
-  if (!isString(a.issuer) || !ValidationUtils.isValidStellarAddress(a.issuer)) return false;
+  if (a.code === 'XLM') {
+    if (a.issuer !== undefined) return false;
+  } else if (!isString(a.issuer) || !StrKey.isValidEd25519PublicKey(a.issuer)) {
+    return false;
+  }
 
   if (a.name !== undefined && !isString(a.name)) return false;
   if (a.deposits_enabled !== undefined && typeof a.deposits_enabled !== 'boolean') return false;
@@ -551,7 +555,7 @@ function validateAnchorKitConfig(config: AnchorKitConfig): boolean {
       const code = (asset as unknown as Record<string, unknown>)?.code;
       const codeStr = typeof code === 'string' && code ? ` (code: "${code}")` : '';
       throw new Error(
-        `Invalid asset at index ${i}${codeStr}: asset.code must be a non-empty string and asset.issuer must be a valid Stellar public key.`,
+        `Invalid asset at index ${i}${codeStr}: native XLM must omit asset.issuer and issued assets must provide a valid Stellar public key issuer.`,
       );
     }
     const assetCode = asset.code;
