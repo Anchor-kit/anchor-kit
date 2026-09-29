@@ -728,6 +728,10 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
   }
 
   public async listPendingWatcherTasks(limit: number): Promise<WatcherTaskRecord[]> {
+    if (!Number.isSafeInteger(limit) || limit <= 0) {
+      throw new RangeError('Watcher task limit must be a positive safe integer');
+    }
+
     if (this.sqlite) {
       const rows = this.sqlite
         .prepare('SELECT * FROM watcher_tasks WHERE status = ? ORDER BY created_at ASC LIMIT ?')
