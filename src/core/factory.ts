@@ -7,6 +7,7 @@ import {
 import { AnchorExpressRouter, type ExpressLikeMiddleware } from '@/runtime/http/express-router.ts';
 import type {
   DatabaseAdapter,
+  InteractiveTransactionRecord,
   QueueAdapter,
   QueueJob,
   Watcher,
@@ -265,7 +266,23 @@ export class AnchorInstance {
         return;
       }
 
-      await database.updateTransactionStatus(transactionIdValue, 'expired');
+      const transaction = await database.getInteractiveTransactionById(transactionIdValue);
+      if (!transaction || transaction.status !== 'pending_user_transfer_start') {
+        return;
+      }
+
+      const updated = await database.updateTransactionStatus(
+        transactionIdValue,
+        'expired',
+        'pending_user_transfer_start',
+      );
+      if (!updated) return;
+
+      await this.notifyTransactionStatusChange(
+        { ...transaction, status: 'expired' },
+        transaction.status,
+        'expired',
+      );
       return;
     }
 
@@ -295,6 +312,25 @@ export class AnchorInstance {
     }
 
     throw new Error(`Unknown queue job type: ${String(job.type)}`);
+  }
+
+  private async notifyTransactionStatusChange(
+    transaction: InteractiveTransactionRecord,
+    oldStatus: InteractiveTransactionRecord['status'],
+    newStatus: InteractiveTransactionRecord['status'],
+  ): Promise<void> {
+    for (const plugin of this.plugins.values()) {
+      const hook = plugin.hooks?.onTransactionStatusChange;
+      if (!hook) continue;
+
+      try {
+        await hook(transaction, oldStatus, newStatus);
+      } catch (error) {
+        // The in-memory queue is best-effort and drops failed jobs without retry.
+        // Log hook failures and continue so one plugin cannot block other hooks.
+        console.error(`[AnchorKit] Plugin "${plugin.id}" transaction status hook failed`, error);
+      }
+    }
   }
 }
 

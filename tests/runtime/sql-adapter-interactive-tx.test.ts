@@ -70,4 +70,26 @@ describe('SqlDatabaseAdapter – interactive transaction status updates', () => 
     const fetched = await db.getInteractiveTransactionById(randomUUID());
     expect(fetched).toBeNull();
   });
+
+  it('updates only when the current status matches the expected status', async () => {
+    const txId = randomUUID();
+    await db.insertInteractiveTransaction({
+      id: txId,
+      account: 'GTEST1234',
+      kind: 'deposit',
+      assetCode: 'USDC',
+      amount: '50.00',
+      status: 'pending_user_transfer_start',
+    });
+
+    await expect(
+      db.updateTransactionStatus(txId, 'expired', 'pending_user_transfer_start'),
+    ).resolves.toBe(true);
+    await expect(
+      db.updateTransactionStatus(txId, 'expired', 'pending_user_transfer_start'),
+    ).resolves.toBe(false);
+    await expect(db.getInteractiveTransactionById(txId)).resolves.toMatchObject({
+      status: 'expired',
+    });
+  });
 });
