@@ -13,6 +13,14 @@ function deferred<T = void>() {
   return { promise, resolve };
 }
 
+function watcherTaskId(job: QueueJob): number {
+  if (job.type !== 'process_watcher_task') {
+    throw new Error('Expected process_watcher_task job');
+  }
+
+  return Number(job.payload.watcherTaskId);
+}
+
 describe('InMemoryQueueAdapter', () => {
   it('rejects invalid constructor concurrency values', () => {
     for (const value of [0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY]) {
@@ -35,7 +43,7 @@ describe('InMemoryQueueAdapter', () => {
     const twoStarted = deferred();
 
     const worker = async (job: QueueJob): Promise<void> => {
-      const jobId = job.payload.jobId as number;
+      const jobId = watcherTaskId(job);
       currentConcurrentJobs += 1;
       startedJobs += 1;
       maxConcurrentJobs = Math.max(maxConcurrentJobs, currentConcurrentJobs);
@@ -53,7 +61,7 @@ describe('InMemoryQueueAdapter', () => {
     for (let i = 0; i < 6; i++) {
       await queue.enqueue({
         type: 'process_watcher_task',
-        payload: { jobId: i },
+        payload: { watcherTaskId: String(i) },
       });
     }
 
@@ -92,7 +100,7 @@ describe('InMemoryQueueAdapter', () => {
     }
 
     const worker = async (job: QueueJob): Promise<void> => {
-      const jobId = job.payload.jobId as number;
+      const jobId = watcherTaskId(job);
       executionOrder.push(jobId);
       startedResolvers[jobId]?.();
       await releasePromises[jobId];
@@ -103,7 +111,7 @@ describe('InMemoryQueueAdapter', () => {
     for (let i = 0; i < 4; i++) {
       await queue.enqueue({
         type: 'process_watcher_task',
-        payload: { jobId: i },
+        payload: { watcherTaskId: String(i) },
       });
     }
 
@@ -124,7 +132,7 @@ describe('InMemoryQueueAdapter', () => {
     const secondJobFinished = deferred();
 
     const worker = async (job: QueueJob): Promise<void> => {
-      const id = job.payload.jobId as number;
+      const id = watcherTaskId(job);
       if (id === 0) {
         firstJobStarted.resolve();
         await firstJobRelease.promise;
@@ -136,8 +144,8 @@ describe('InMemoryQueueAdapter', () => {
     };
 
     await queue.start(worker);
-    await queue.enqueue({ type: 'process_watcher_task', payload: { jobId: 0 } });
-    await queue.enqueue({ type: 'process_watcher_task', payload: { jobId: 1 } });
+    await queue.enqueue({ type: 'process_watcher_task', payload: { watcherTaskId: '0' } });
+    await queue.enqueue({ type: 'process_watcher_task', payload: { watcherTaskId: '1' } });
 
     await firstJobStarted.promise;
     firstJobRelease.resolve();
@@ -158,7 +166,7 @@ describe('InMemoryQueueAdapter', () => {
     const releases = Array.from({ length: 5 }, () => deferred());
 
     const worker = async (job: QueueJob): Promise<void> => {
-      const jobId = job.payload.jobId as number;
+      const jobId = watcherTaskId(job);
       currentConcurrentJobs += 1;
       maxConcurrentJobs = Math.max(maxConcurrentJobs, currentConcurrentJobs);
 
@@ -175,7 +183,7 @@ describe('InMemoryQueueAdapter', () => {
     for (let i = 0; i < 5; i++) {
       await queue.enqueue({
         type: 'process_watcher_task',
-        payload: { jobId: i },
+        payload: { watcherTaskId: String(i) },
       });
     }
 
@@ -196,7 +204,7 @@ describe('InMemoryQueueAdapter', () => {
     const done = deferred();
 
     const worker = async (job: QueueJob): Promise<void> => {
-      processedJobs.push(job.payload.jobId as number);
+      processedJobs.push(watcherTaskId(job));
       if (processedJobs.length === 3) {
         done.resolve();
       }
@@ -205,7 +213,7 @@ describe('InMemoryQueueAdapter', () => {
     for (const jobId of [1, 2, 3]) {
       await queue.enqueue({
         type: 'process_watcher_task',
-        payload: { jobId },
+        payload: { watcherTaskId: String(jobId) },
       });
     }
 
@@ -226,7 +234,7 @@ describe('InMemoryQueueAdapter', () => {
     const releases = Array.from({ length: 4 }, () => deferred());
 
     const worker = async (job: QueueJob): Promise<void> => {
-      const jobId = job.payload.i as number;
+      const jobId = watcherTaskId(job);
       startedJobs += 1;
       if (startedJobs === 2) {
         twoStarted.resolve();
@@ -241,7 +249,7 @@ describe('InMemoryQueueAdapter', () => {
     for (let i = 0; i < 4; i++) {
       await queue.enqueue({
         type: 'process_watcher_task',
-        payload: { i },
+        payload: { watcherTaskId: String(i) },
       });
     }
 
@@ -263,7 +271,7 @@ describe('InMemoryQueueAdapter', () => {
     const firstJobRelease = deferred();
 
     const worker = async (job: QueueJob): Promise<void> => {
-      const id = job.payload.i as number;
+      const id = watcherTaskId(job);
       startedJobs.push(id);
       if (id === 0) {
         firstJobStarted.resolve();
@@ -278,7 +286,7 @@ describe('InMemoryQueueAdapter', () => {
     for (let i = 0; i < 3; i++) {
       await queue.enqueue({
         type: 'process_watcher_task',
-        payload: { i },
+        payload: { watcherTaskId: String(i) },
       });
     }
 
@@ -305,7 +313,7 @@ describe('InMemoryQueueAdapter', () => {
     };
 
     await queue.start(worker);
-    await queue.enqueue({ type: 'process_watcher_task', payload: {} });
+    await queue.enqueue({ type: 'process_watcher_task', payload: {} } as QueueJob);
 
     await jobStarted.promise;
     const p1 = queue.stop();
@@ -324,7 +332,7 @@ describe('InMemoryQueueAdapter', () => {
     const releases = Array.from({ length: 3 }, () => deferred());
 
     const worker = async (job: QueueJob): Promise<void> => {
-      const id = job.payload.i as number;
+      const id = watcherTaskId(job);
       startedJobs.push(id);
       if (startedJobs.length === 2) {
         firstTwoStarted.resolve();
@@ -338,7 +346,7 @@ describe('InMemoryQueueAdapter', () => {
     for (let i = 0; i < 3; i++) {
       await queue.enqueue({
         type: 'process_watcher_task',
-        payload: { i },
+        payload: { watcherTaskId: String(i) },
       });
     }
 
@@ -356,7 +364,7 @@ describe('InMemoryQueueAdapter', () => {
     const processedJobs: number[] = [];
 
     const worker = async (job: QueueJob): Promise<void> => {
-      processedJobs.push(job.payload.jobId as number);
+      processedJobs.push(watcherTaskId(job));
     };
 
     await queue.start(worker);
@@ -364,7 +372,7 @@ describe('InMemoryQueueAdapter', () => {
 
     await queue.enqueue({
       type: 'process_watcher_task',
-      payload: { jobId: 99 },
+      payload: { watcherTaskId: '99' },
     });
 
     await new Promise((resolve) => setTimeout(resolve, 100));
@@ -385,7 +393,7 @@ describe('InMemoryQueueAdapter', () => {
     };
 
     await queue.start(worker);
-    await queue.enqueue({ type: 'process_watcher_task', payload: {} });
+    await queue.enqueue({ type: 'process_watcher_task', payload: {} } as QueueJob);
 
     await jobStarted.promise;
     const stopPromise = queue.stop();
@@ -414,7 +422,7 @@ describe('InMemoryQueueAdapter', () => {
     const complete = deferred();
 
     const worker = async (job: QueueJob): Promise<void> => {
-      const id = job.payload.jobId as number;
+      const id = watcherTaskId(job);
       processed.push(id);
       if (processed.length === 3) {
         started.resolve();
@@ -424,11 +432,11 @@ describe('InMemoryQueueAdapter', () => {
       }
     };
 
-    await queue.enqueue({ type: 'process_watcher_task', payload: { jobId: 1 } });
-    await queue.enqueue({ type: 'process_watcher_task', payload: { jobId: 2 } });
+    await queue.enqueue({ type: 'process_watcher_task', payload: { watcherTaskId: '1' } });
+    await queue.enqueue({ type: 'process_watcher_task', payload: { watcherTaskId: '2' } });
     await queue.start(worker);
     await queue.stop();
-    await queue.enqueue({ type: 'process_watcher_task', payload: { jobId: 3 } });
+    await queue.enqueue({ type: 'process_watcher_task', payload: { watcherTaskId: '3' } });
     await queue.start(worker);
 
     await complete.promise;
@@ -461,9 +469,12 @@ describe('InMemoryQueueAdapter', () => {
     await anchor.init();
     const processQueueJob = (
       Object.getPrototypeOf(anchor) as {
-        processQueueJob: (job: { type: string; payload: Record<string, unknown> }) => Promise<void>;
+        processQueueJob: (job: unknown) => Promise<void>;
       }
     ).processQueueJob.bind(anchor);
+    await expect(
+      processQueueJob({ type: 'expire_transaction', payload: {} }),
+    ).resolves.toBeUndefined();
     await expect(
       processQueueJob({
         type: 'unknown_job',

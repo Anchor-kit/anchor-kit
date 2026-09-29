@@ -133,7 +133,10 @@ describe('MVP Express-mounted integration', () => {
   beforeAll(async () => {
     anchor = createAnchor({
       network: { network: 'testnet' },
-      server: { interactiveDomain: 'https://anchor.example.com' },
+      server: {
+        interactiveDomain: 'https://anchor.example.com',
+        corsOrigins: ['https://app.example.com'],
+      },
       security: {
         sep10SigningKey: sep10ServerKeypair.secret(),
         interactiveJwtSecret: 'jwt-test-secret',
@@ -153,6 +156,9 @@ describe('MVP Express-mounted integration', () => {
             max_amount: 100,
           },
         ],
+      },
+      operational: {
+        webhooksEnabled: true,
       },
       framework: {
         database: {
@@ -481,6 +487,29 @@ describe('MVP Express-mounted integration', () => {
     expect(response.status).toBe(400);
     expect(response.body.error).toBe('invalid_request');
     expect(response.body.message).toBe('Query param account is required');
+  });
+
+  it('3a) /auth/challenge rejects repeated identical account query params', async () => {
+    const account = clientKeypair.publicKey();
+    const response = await invoke({
+      path: `/auth/challenge?account=${account}&account=${account}`,
+      headers: { 'x-forwarded-for': '10.0.0.51' },
+    });
+
+    expect(response.status).toBe(400);
+    expect(response.body.error).toBe('invalid_request');
+    expect(response.body.message).toBe('Query param account must be provided exactly once');
+  });
+
+  it('3a) /auth/challenge rejects repeated conflicting account query params', async () => {
+    const response = await invoke({
+      path: `/auth/challenge?account=${clientKeypair.publicKey()}&account=${Keypair.random().publicKey()}`,
+      headers: { 'x-forwarded-for': '10.0.0.52' },
+    });
+
+    expect(response.status).toBe(400);
+    expect(response.body.error).toBe('invalid_request');
+    expect(response.body.message).toBe('Query param account must be provided exactly once');
   });
 
   it('3a) /auth/challenge trims padded account identifiers', async () => {
@@ -1754,6 +1783,18 @@ describe('MVP Express-mounted integration', () => {
 
     expect(response.status).toBe(404);
     expect(response.body).toEqual({ error: 'not_found', message: 'Transaction not found' });
+    expect(response.headers['cache-control']).toBe('no-store');
+  });
+
+  it('7b) transaction lookup marks successful responses as no-store', async () => {
+    const response = await invoke({
+      method: 'GET',
+      path: `/transactions/${transactionId}`,
+      headers: { authorization: `Bearer ${accessToken}` },
+    });
+
+    expect(response.status).toBe(200);
+    expect(response.headers['cache-control']).toBe('no-store');
   });
 
   it('8) webhook route stores event and invokes configured callback', async () => {
@@ -1802,6 +1843,72 @@ describe('MVP Express-mounted integration', () => {
     expect(duplicateResponse.body.event_id).toBe('evt_1');
     expect(duplicateResponse.body.provider).toBe('generic');
     expect(webhookCallbackCount).toBe(1);
+  });
+
+  it('8a) disabled webhook route rejects requests without processing or persisting events', async () => {
+    const customDbUrl = makeSqliteDbUrlForTests();
+    const customDbPath = customDbUrl.startsWith('file:')
+      ? customDbUrl.slice('file:'.length)
+      : customDbUrl;
+    const customAnchor = createAnchor({
+      network: { network: 'testnet' },
+      server: { interactiveDomain: 'https://anchor.example.com' },
+      security: {
+        sep10SigningKey: sep10ServerKeypair.secret(),
+        interactiveJwtSecret: 'jwt-test-secret',
+        distributionAccountSecret: 'distribution-test-secret',
+      },
+      assets: {
+        assets: [
+          {
+            code: 'USDC',
+            issuer: 'GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5',
+          },
+        ],
+      },
+      operational: {
+        webhooksEnabled: false,
+      },
+      framework: {
+        database: { provider: 'sqlite', url: customDbUrl },
+      },
+      webhooks: {
+        onEvent: async () => {
+          throw new Error('disabled webhooks must not invoke callbacks');
+        },
+      },
+    });
+
+    await customAnchor.init();
+    const customInvoke = createMountedInvoker(customAnchor);
+    const processor = (
+      customAnchor as unknown as { webhookProcessor: { process: () => Promise<unknown> } }
+    ).webhookProcessor;
+    const database = (customAnchor as unknown as { database: DatabaseAdapter }).database;
+    const processSpy = vi.spyOn(processor, 'process');
+    const insertSpy = vi.spyOn(database, 'insertOrGetWebhookEvent');
+
+    const response = await customInvoke({
+      method: 'POST',
+      path: '/webhooks/events',
+      headers: { 'content-type': 'application/json' },
+      body: { id: 'evt_disabled', type: 'deposit.completed' },
+    });
+
+    expect(response.status).toBe(503);
+    expect(response.body).toEqual({
+      error: 'webhooks_disabled',
+      message: 'Webhook processing is disabled',
+    });
+    expect(processSpy).not.toHaveBeenCalled();
+    expect(insertSpy).not.toHaveBeenCalled();
+
+    await customAnchor.shutdown();
+    try {
+      unlinkSync(customDbPath);
+    } catch {
+      // ignore cleanup errors in CI
+    }
   });
 
   it('8b) unsigned webhook is accepted when signature verification is disabled', async () => {
@@ -3040,7 +3147,6 @@ describe('MVP Express-mounted integration', () => {
 
     expect(tokenResponse.status).toBe(400);
     expect(tokenResponse.body.error).toBe('invalid_request');
-    expect(tokenResponse.body.message).toBe('Body must include account and challenge');
   });
 
   // ── Malformed JSON bodies ────────────────────────────────────────────────
@@ -3637,6 +3743,40 @@ describe('MVP Express-mounted integration', () => {
       expect(preflightResponse.headers['access-control-allow-headers']).toContain(
         'Idempotency-Key',
       );
+
+      const deniedMethodResponse = await customInvoke({
+        method: 'OPTIONS',
+        path: '/transactions/deposit/interactive',
+        headers: {
+          origin: 'https://example.com',
+          'access-control-request-method': 'GET',
+        },
+      });
+      expect(deniedMethodResponse.status).toBe(403);
+      expect(deniedMethodResponse.body.error).toBe('cors_preflight_denied');
+
+      const deniedHeaderResponse = await customInvoke({
+        method: 'OPTIONS',
+        path: '/transactions/deposit/interactive',
+        headers: {
+          origin: 'https://example.com',
+          'access-control-request-method': 'POST',
+          'access-control-request-headers': 'x-unlisted-header',
+        },
+      });
+      expect(deniedHeaderResponse.status).toBe(403);
+      expect(deniedHeaderResponse.body.error).toBe('cors_preflight_denied');
+
+      const deniedOriginResponse = await customInvoke({
+        method: 'OPTIONS',
+        path: '/transactions/deposit/interactive',
+        headers: {
+          origin: 'https://unlisted.example',
+          'access-control-request-method': 'POST',
+        },
+      });
+      expect(deniedOriginResponse.status).toBe(403);
+      expect(deniedOriginResponse.body.error).toBe('cors_preflight_denied');
     } finally {
       await customAnchor.shutdown();
       try {

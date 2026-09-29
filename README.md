@@ -76,6 +76,10 @@ const anchor = createAnchor({
       },
     ],
   },
+  operational: {
+    // Controls cleanup retention. This overrides framework.watchers.retentionDays.
+    transactionRetentionDays: 90,
+  },
   framework: {
     database: {
       provider: 'postgres',
@@ -97,6 +101,10 @@ const anchor = createAnchor({
     },
   },
 });
+
+`operational.transactionRetentionDays` controls the retention value included in cleanup jobs.
+For compatibility, existing configurations that only set `framework.watchers.retentionDays` continue
+to use that value; when both are set, the operational setting takes precedence.
 
 await anchor.init();
 await anchor.startBackgroundJobs();
@@ -213,7 +221,7 @@ Assume your host app mounts the router at `/anchor` on `http://localhost:3000`.
 
 ### Advertised anchor info
 
-Get the anchor's advertised config (network, passphrase, supported assets, version):
+Get the anchor's advertised config (network, passphrase, supported assets, version, and public metadata). The `metadata` object is always present; its `tomlUrl`, `protocols`, `features`, and `documentationUrls` sections are included only when configured. The optional `interactive_domain`, `support_email`, and `website` fields are also omitted when not configured. Secrets are never included.
 
 ```bash
 curl -s http://localhost:3000/anchor/info
