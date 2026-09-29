@@ -364,7 +364,9 @@ export const SecurityConfigSchema = {
       throw new Error('security.enableClientAttribution must be a boolean');
     }
     if (config.clientDomain !== undefined && !isValidClientDomain(config.clientDomain)) {
-      throw new Error('security.clientDomain must be a valid DNS hostname of at most 64 characters');
+      throw new Error(
+        'security.clientDomain must be a valid DNS hostname of at most 64 characters',
+      );
     }
     if (
       config.clientDomainSigningKey !== undefined &&

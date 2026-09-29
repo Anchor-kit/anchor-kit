@@ -594,9 +594,7 @@ describe('MVP Express-mounted integration', () => {
         source: clientDomainKeypair.publicKey(),
       });
       expect(
-        Buffer.from(
-          (challengeTx.operations[1] as { value: string | Uint8Array }).value,
-        ).toString(),
+        Buffer.from((challengeTx.operations[1] as { value: string | Uint8Array }).value).toString(),
       ).toBe('wallet.example.com');
     } finally {
       await clientAnchor.shutdown();

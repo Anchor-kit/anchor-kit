@@ -124,7 +124,7 @@ export interface SecurityConfig {
 
   /**
    * Enable client attribution for SEP-10
-    * Requires clientDomain, clientDomainSigningKey, and a matching HTTPS origin in server.corsOrigins
+   * Requires clientDomain, clientDomainSigningKey, and a matching HTTPS origin in server.corsOrigins
    * @optional - defaults to false
    */
   enableClientAttribution?: boolean;

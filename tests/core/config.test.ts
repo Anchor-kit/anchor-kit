@@ -142,9 +142,10 @@ describe('AnchorConfig', () => {
         /server\.corsOrigins/,
       ],
     ])('rejects %s prerequisite values', (_label, securityOverrides, error) => {
-      const corsOrigins = _label === 'malformed origin policy'
-        ? ('https://wallet.example.com' as unknown as string[])
-        : ['https://other.example.com'];
+      const corsOrigins =
+        _label === 'malformed origin policy'
+          ? ('https://wallet.example.com' as unknown as string[])
+          : ['https://other.example.com'];
       const config = new AnchorConfig({
         ...validBaseConfig,
         server: { ...validBaseConfig.server, corsOrigins },
