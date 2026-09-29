@@ -94,7 +94,10 @@ app.use(
 
 const anchor = createAnchor({
   network: { network: 'testnet' },
-  server: { interactiveDomain: 'https://anchor.example.com' },
+  server: {
+    interactiveDomain: 'https://anchor.example.com',
+    corsOrigins: ['https://app.example.test'],
+  },
   security: {
     sep10SigningKey: process.env.SEP10_SIGNING_KEY!,
     interactiveJwtSecret: process.env.INTERACTIVE_JWT_SECRET!,
@@ -149,6 +152,22 @@ process.on('SIGTERM', async () => {
 ```
 
 Webhook signature verification depends on the exact raw request body bytes. Configure the JSON parser `verify` hook before mounting `anchor.getExpressRouter()` so Anchor-Kit can compare the incoming `x-anchor-signature` against the unmodified payload.
+
+### Browser requests and CORS
+
+Set `server.corsOrigins` to the exact browser origins allowed to call the API. Include the scheme and port when present, with no path or trailing slash. For example, `https://app.example.test` does not allow `https://admin.example.test` or `http://app.example.test`.
+
+When the router receives an `OPTIONS` request, it responds with `204`. For an allowed `Origin`, it also returns that origin in `Access-Control-Allow-Origin`, allows `GET`, `POST`, and `OPTIONS`, and permits `Content-Type`, `Authorization`, `Idempotency-Key`, `X-Anchor-Signature`, and `X-Webhook-Provider`. Requests with a missing or unlisted origin receive no `Access-Control-Allow-Origin` header. Browsers then prevent page code from reading the response. CORS does not prevent other clients from sending requests.
+
+The router does not enable credentialed browser requests: it does not return `Access-Control-Allow-Credentials`. Use bearer tokens in the `Authorization` header. The host application must let `OPTIONS` reach the Anchor-Kit router and preserve its CORS response headers. If another middleware handles CORS, configure it to use the same origin and header policy.
+
+For example, a browser request with a bearer token triggers a preflight because it uses `Authorization`:
+
+```ts
+const response = await fetch('https://anchor.example.com/anchor/info', {
+  headers: { Authorization: `Bearer ${token}` },
+});
+```
 
 ## 5) Webhook callback behavior
 
