@@ -65,7 +65,12 @@ function isValidStellarAssetCode(code: string): boolean {
 }
 
 function isValidAssetAmount(value: unknown): value is number {
-  return typeof value === 'number' && Number.isFinite(value) && value >= 0;
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) return false;
+  if (Number.isSafeInteger(value)) return true;
+  if (value > Number.MAX_SAFE_INTEGER) return false;
+
+  // Accept decimal bounds only when 15 significant digits reproduce the same number.
+  return Number(value.toPrecision(15)) === value;
 }
 
 function validateAssetAmountRange(asset: { min_amount?: number; max_amount?: number }): boolean {
