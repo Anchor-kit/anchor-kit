@@ -198,10 +198,10 @@ function makeContext(db: DatabaseAdapter): ExpressRouterContext {
     requestTimeout: 30000,
     rateLimiter: new InMemoryRateLimiter(),
     rateRules: {
-      auth_challenge: { windowMs: 60000, maxRequests: 1000 },
-      auth_token: { windowMs: 60000, maxRequests: 1000 },
-      webhook: { windowMs: 60000, maxRequests: 1000 },
-      deposit: { windowMs: 60000, maxRequests: 1000 },
+      auth_challenge: { windowMs: 60000, max: 1000 },
+      auth_token: { windowMs: 60000, max: 1000 },
+      webhook: { windowMs: 60000, max: 1000 },
+      deposit: { windowMs: 60000, max: 1000 },
     },
   };
 }
