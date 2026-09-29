@@ -4,10 +4,10 @@ This document provides a comprehensive reference for all Anchor-Kit configuratio
 
 **Status Legend:**
 
-- ✅ **Implemented** – Fully functional and production-ready
+- ✅ **Implemented** – Used by the runtime as described
 - 🚧 **Partially Implemented** – Some features work; others are deferred
 - 📋 **Planned** – Defined in types but not yet implemented; no validation applied
-- ⚠️ **Dead Code** – Validated but not used at runtime; awaiting dependent features
+- ⚠️ **Validated only** – Accepted by config validation but not used by runtime behavior
 
 ---
 
@@ -80,14 +80,14 @@ server: {
 
 ### Fields
 
-| Field               | Type       | Default     | Status      | Notes                                                                                                           |
-| ------------------- | ---------- | ----------- | ----------- | --------------------------------------------------------------------------------------------------------------- |
-| `interactiveDomain` | `string`   | —           | ✅ Required | Domain/URL for SEP-24 interactive flows (e.g., `https://anchor.example.com`); used in `/info` endpoint response |
-| `corsOrigins`       | `string[]` | —           | ✅ Optional | Allowed origins for CORS; required for SEP-10 client attribution if `enableClientAttribution` is true           |
-| `host`              | `string`   | `'0.0.0.0'` | ✅ Optional | Server bind address; for reference only (Anchor-Kit does not call `listen()`)                                   |
-| `port`              | `number`   | `3000`      | ✅ Optional | Server port; for reference only (your Express app controls this)                                                |
-| `debug`             | `boolean`  | `false`     | 📋 Planned  | Debug mode flag; currently unused; will enable verbose logging when implemented                                 |
-| `requestTimeout`    | `number`   | `30000`     | 📋 Planned  | Request timeout in milliseconds; currently unused                                                               |
+| Field               | Type       | Default     | Status         | Notes                                                                                                           |
+| ------------------- | ---------- | ----------- | -------------- | --------------------------------------------------------------------------------------------------------------- |
+| `interactiveDomain` | `string`   | —           | ✅ Required    | Domain/URL for SEP-24 interactive flows (e.g., `https://anchor.example.com`); used in `/info` endpoint response |
+| `corsOrigins`       | `string[]` | —           | ✅ Optional    | Allowed origins for CORS; required for SEP-10 client attribution if `enableClientAttribution` is true           |
+| `host`              | `string`   | `'0.0.0.0'` | ✅ Optional    | Server bind address; for reference only (Anchor-Kit does not call `listen()`)                                   |
+| `port`              | `number`   | `3000`      | ✅ Optional    | Server port; for reference only (your Express app controls this)                                                |
+| `debug`             | `boolean`  | `false`     | 📋 Planned     | Debug mode flag; currently unused; will enable verbose logging when implemented                                 |
+| `requestTimeout`    | `number`   | `30000`     | ✅ Implemented | Maximum request duration in milliseconds                                                                        |
 
 ### Example
 
@@ -158,7 +158,7 @@ const anchor = createAnchor({
 ### See Also
 
 - [SEP-10 Authentication](https://github.com/stellar/stellar-protocol/blob/master/core/cap-0010.md)
-- [Auth Token Response Contract](docs/auth-token-response.md)
+- [Auth Token Response Contract](auth-token-response.md)
 
 ---
 
@@ -189,13 +189,13 @@ assets: {
 | Field                          | Type                     | Default | Status                   | Notes                                                                                             |
 | ------------------------------ | ------------------------ | ------- | ------------------------ | ------------------------------------------------------------------------------------------------- |
 | `assets`                       | `Asset[]`                | —       | ✅ Required              | Array of supported assets; at least one must be configured                                        |
-| `assets[].code`                | `string`                 | —       | ✅ Required              | Asset code (e.g., `'USDC'`, `'USDT'`, `'native'` or `'XLM'` for native Stellar Lumens)            |
+| `assets[].code`                | `string`                 | —       | ✅ Required              | Asset code (for native Stellar Lumens, use `'XLM'`)                                               |
 | `assets[].issuer`              | `string`                 | —       | ✅ Conditional           | Stellar public key issuer; required for issued assets, omitted for native XLM                     |
 | `assets[].name`                | `string`                 | —       | ✅ Optional              | Human-readable asset name (e.g., `'USD Coin'`); used in `/info` responses                         |
 | `assets[].deposits_enabled`    | `boolean`                | `true`  | ✅ Implemented           | Enable/disable deposits for this asset; controls `/transactions/deposit/interactive` availability |
 | `assets[].withdrawals_enabled` | `boolean`                | `true`  | 📋 Planned               | Enable/disable withdrawals; awaiting SEP-24 withdrawal flow implementation                        |
-| `assets[].min_amount`          | `number`                 | —       | 🚧 Partially Implemented | Minimum deposit/withdrawal amount; validated but not fully enforced in all endpoints              |
-| `assets[].max_amount`          | `number`                 | —       | 🚧 Partially Implemented | Maximum deposit/withdrawal amount; validated but not fully enforced in all endpoints              |
+| `assets[].min_amount`          | `number`                 | —       | 🚧 Partially Implemented | Enforced for interactive deposits; withdrawal flow is not implemented                             |
+| `assets[].max_amount`          | `number`                 | —       | 🚧 Partially Implemented | Enforced for interactive deposits; withdrawal flow is not implemented                             |
 | `defaultCurrency`              | `string`                 | —       | ✅ Optional              | ISO 4217 fiat currency code (e.g., `'USD'`, `'EUR'`); used in `/info` responses                   |
 | `assetMapping`                 | `Record<string, string>` | —       | 📋 Planned               | Maps fiat currency codes to Stellar asset codes; defined for future rail integrations             |
 
@@ -215,7 +215,7 @@ const anchor = createAnchor({
         max_amount: 100000,
       },
       {
-        code: 'native', // or 'XLM' for native Stellar Lumens
+        code: 'XLM',
         name: 'Lumens',
         deposits_enabled: true,
         // issuer omitted for native assets
@@ -331,7 +331,7 @@ framework: {
 | `watchers.enabled`              | `boolean` | `true`   | ✅ Implemented | Enable/disable transaction polling and lifecycle checks                                                           |
 | `watchers.pollIntervalMs`       | `number`  | `15000`  | ✅ Implemented | Poll interval (milliseconds) for pending transactions; 15 seconds default                                         |
 | `watchers.transactionTimeoutMs` | `number`  | `300000` | ✅ Implemented | Pending transaction timeout (milliseconds); 5 minutes default; transactions older than this are considered failed |
-| `watchers.retentionDays`        | `number`  | `90`     | ✅ Implemented | Retention window (days) for watcher logs and operational records; cleanup uses strict retention cutoff            |
+| `watchers.retentionDays`        | `number`  | `90`     | ✅ Implemented | Legacy fallback cleanup retention; `operational.transactionRetentionDays` takes precedence                        |
 
 **Example:**
 
@@ -347,7 +347,7 @@ framework: {
 }
 ```
 
-**See Also:** [Plugin Lifecycle Guide](docs/plugin-lifecycle.md)
+**See Also:** [Plugin Lifecycle Guide](plugin-lifecycle.md)
 
 ---
 
@@ -420,7 +420,7 @@ framework: {
 }
 ```
 
-**See Also:** [Trusted Proxy Rate-Limit Guidance](docs/trusted-proxy-rate-limits.md)
+**See Also:** [Trusted Proxy Rate-Limit Guidance](trusted-proxy-rate-limits.md)
 
 ---
 
@@ -436,9 +436,9 @@ framework: {
 }
 ```
 
-| Field     | Type                                      | Default | Status         | Notes                                                        |
-| --------- | ----------------------------------------- | ------- | -------------- | ------------------------------------------------------------ |
-| `plugins` | `Array<{ id: string; config?: unknown }>` | —       | ✅ Implemented | Plugin array; plugins are initialized during `anchor.init()` |
+| Field     | Type                                                      | Default | Status         | Notes                                                        |
+| --------- | --------------------------------------------------------- | ------- | -------------- | ------------------------------------------------------------ |
+| `plugins` | `Array<{ id: string; config?: Record<string, unknown> }>` | —       | ✅ Implemented | Plugin array; plugins are initialized during `anchor.init()` |
 
 **Example:**
 
@@ -458,7 +458,7 @@ framework: {
 }
 ```
 
-**See Also:** [Plugin Lifecycle Guide](docs/plugin-lifecycle.md)
+**See Also:** [Plugin Lifecycle Guide](plugin-lifecycle.md)
 
 ---
 
@@ -553,9 +553,9 @@ const anchor = createAnchor({
 
 ## KYC Configuration
 
-**Status:** ⚠️ **Dead Code** (Validated but not enforced; awaiting SEP-24/SEP-6/SEP-31 protocol implementations)
+**Status:** ⚠️ **Validated only** (KYC requirements are not enforced by runtime flows)
 
-KYC (Know-Your-Customer) level enforcement. This configuration is fully validated at initialization but **not enforced at runtime** because protocol flows (SEP-24 deposits, SEP-6, SEP-31) are not yet implemented. KYC enforcement will be activated when protocol modules reach Alpha.
+KYC (Know-Your-Customer) settings are validated at initialization but are not connected to the current authentication or deposit flows. Your host application must enforce any KYC requirements it needs.
 
 ```typescript
 kyc?: {
@@ -574,35 +574,29 @@ kycRequired?: Record<string, string[]>,   // optional: asset-specific KYC field 
 
 ### Fields
 
-| Field                | Type                            | Default   | Status       | Notes                                                                           |
-| -------------------- | ------------------------------- | --------- | ------------ | ------------------------------------------------------------------------------- |
-| `level`              | `'none' \| 'basic' \| 'strict'` | `'basic'` | ⚠️ Dead Code | KYC level classification; not enforced until SEP protocol flows are implemented |
-| `requireDocuments`   | `boolean`                       | `true`    | ⚠️ Dead Code | Require identity document collection                                            |
-| `requireName`        | `boolean`                       | `true`    | ⚠️ Dead Code | Require verified name                                                           |
-| `requireAddress`     | `boolean`                       | `false`   | ⚠️ Dead Code | Require verified address                                                        |
-| `requireEmail`       | `boolean`                       | `true`    | ⚠️ Dead Code | Require verified email                                                          |
-| `requirePhoneNumber` | `boolean`                       | `false`   | ⚠️ Dead Code | Require verified phone number                                                   |
-| `requireBirthDate`   | `boolean`                       | `false`   | ⚠️ Dead Code | Require birth date verification                                                 |
-| `minAge`             | `number`                        | `18`      | ⚠️ Dead Code | Minimum applicant age                                                           |
-| `maxAge`             | `number`                        | —         | ⚠️ Dead Code | Maximum applicant age                                                           |
-| `kycRequired`        | `Record<string, string[]>`      | —         | ⚠️ Dead Code | Asset-specific KYC field requirements (e.g., `{ "USDC": ["name", "email"] }`)   |
+| Field                | Type                            | Default   | Status            | Notes                                                                         |
+| -------------------- | ------------------------------- | --------- | ----------------- | ----------------------------------------------------------------------------- |
+| `level`              | `'none' \| 'basic' \| 'strict'` | `'basic'` | ⚠️ Validated only | KYC level classification; not enforced by SDK flows                           |
+| `requireDocuments`   | `boolean`                       | `true`    | ⚠️ Validated only | Require identity document collection                                          |
+| `requireName`        | `boolean`                       | `true`    | ⚠️ Validated only | Require verified name                                                         |
+| `requireAddress`     | `boolean`                       | `false`   | ⚠️ Validated only | Require verified address                                                      |
+| `requireEmail`       | `boolean`                       | `true`    | ⚠️ Validated only | Require verified email                                                        |
+| `requirePhoneNumber` | `boolean`                       | `false`   | ⚠️ Validated only | Require verified phone number                                                 |
+| `requireBirthDate`   | `boolean`                       | `false`   | ⚠️ Validated only | Require birth date verification                                               |
+| `minAge`             | `number`                        | `18`      | ⚠️ Validated only | Minimum applicant age                                                         |
+| `maxAge`             | `number`                        | —         | ⚠️ Validated only | Maximum applicant age                                                         |
+| `kycRequired`        | `Record<string, string[]>`      | —         | ⚠️ Validated only | Asset-specific KYC field requirements (e.g., `{ "USDC": ["name", "email"] }`) |
 
-### Why It's Dead Code
+### Runtime Behavior
 
-The `KycConfig` and `kycRequired` fields are validated by `AnchorKitConfigSchema` but are **never used** at runtime because:
+The `KycConfig` and `kycRequired` fields are validated by `AnchorKitConfigSchema` but are not consumed by runtime flows:
 
-1. SEP-24 (interactive deposits), SEP-6 (API-based transfers), and SEP-31 (remittances) are not yet implemented
-2. Customer verification workflows belong to the Alpha phase (Phase 2 per [ROADMAP.md](../ROADMAP.md))
-3. The configuration accessor `AnchorConfig.getKycRequiredFields()` exists but is never called anywhere in the codebase
+1. The current authentication and interactive-deposit handlers do not apply these requirements.
+2. The configuration accessor `AnchorConfig.getKycRequiredFields()` is not called by runtime code.
 
-### When This Will Be Used
+### Implementation Note
 
-KYC enforcement will activate when:
-
-- SEP-24 withdrawal flow is implemented (Phase 2)
-- SEP-6 API flows are implemented (Phase 3+)
-- SEP-31 remittance flows are implemented (Phase 3+)
-- SEP-12 (Customer) protocol integration is added
+The host application must enforce any configured KYC requirements. SDK enforcement is not currently available.
 
 ### Example (Future Reference)
 
@@ -628,7 +622,7 @@ const anchor = createAnchor({
 
 ## Operational Configuration
 
-**Status:** 🚧 **Partially Implemented** (Used only in `/info` endpoint; other fields unused)
+**Status:** 🚧 **Partially Implemented** (`name`, `website`, and `supportEmail` appear in `/info`; other fields have separate behavior below)
 
 Deployment and operational metadata for your anchor.
 
@@ -637,24 +631,24 @@ operational?: {
   name?: string,                 // optional: anchor's legal entity name
   website?: string,              // optional: official website URL
   supportEmail?: string,         // optional: support contact email
-  webhooksEnabled?: boolean,     // optional: unused
+  webhooksEnabled?: boolean,     // optional, defaults to enabled
   corsEnabled?: boolean,         // optional: unused
   address?: OperationalAddress,  // optional: unused
-  transactionRetentionDays?: number, // optional, defaults to 90; unused
+  transactionRetentionDays?: number, // optional; overrides framework.watchers.retentionDays
 }
 ```
 
 ### Fields
 
-| Field                      | Type                 | Default | Status            | Usage                                                                                                |
-| -------------------------- | -------------------- | ------- | ----------------- | ---------------------------------------------------------------------------------------------------- |
-| `name`                     | `string`             | —       | ✅ Implemented    | Returned in `/info` endpoint under `name` field                                                      |
-| `website`                  | `string`             | —       | ✅ Implemented    | Returned in `/info` endpoint under `website` field                                                   |
-| `supportEmail`             | `string`             | —       | ✅ Implemented    | Returned in `/info` endpoint under `support_email` field                                             |
-| `webhooksEnabled`          | `boolean`            | —       | ❌ Unused         | Validated but not used; webhooks are always enabled when config is provided                          |
-| `corsEnabled`              | `boolean`            | —       | ❌ Unused         | Validated but not used; CORS configuration is handled via `server.corsOrigins`                       |
-| `address`                  | `OperationalAddress` | —       | ❌ Unused         | Validated but not returned by any endpoint or used at runtime                                        |
-| `transactionRetentionDays` | `number`             | `90`    | ⚠️ Partially Used | Default is set; currently not used for automatic cleanup (cleanup uses explicit SQL retention logic) |
+| Field                      | Type                 | Default | Status         | Usage                                                                          |
+| -------------------------- | -------------------- | ------- | -------------- | ------------------------------------------------------------------------------ |
+| `name`                     | `string`             | —       | ✅ Implemented | Returned in `/info` endpoint under `name` field                                |
+| `website`                  | `string`             | —       | ✅ Implemented | Returned in `/info` endpoint under `website` field                             |
+| `supportEmail`             | `string`             | —       | ✅ Implemented | Returned in `/info` endpoint under `support_email` field                       |
+| `webhooksEnabled`          | `boolean`            | `true`  | ✅ Implemented | Set to `false` to reject webhook requests without processing or storing events |
+| `corsEnabled`              | `boolean`            | —       | ❌ Unused      | Validated but not used; CORS configuration is handled via `server.corsOrigins` |
+| `address`                  | `OperationalAddress` | —       | ❌ Unused      | Validated but not returned by any endpoint or used at runtime                  |
+| `transactionRetentionDays` | `number`             | `90`    | ✅ Implemented | Retention used for cleanup jobs; overrides `framework.watchers.retentionDays`  |
 
 ### Where `name`, `website`, and `supportEmail` Are Used
 
@@ -677,7 +671,7 @@ const anchor = createAnchor({
     name: 'My Stellar Anchor',
     website: 'https://myanchor.example.com',
     supportEmail: 'support@myanchor.example.com',
-    // webhooksEnabled, corsEnabled, address, and transactionRetentionDays are currently unused
+    // corsEnabled and address are currently unused; server.corsOrigins configures CORS
   },
   // ... other config
 });
@@ -687,9 +681,10 @@ const anchor = createAnchor({
 
 ## Metadata Configuration
 
-**Status:** ⚠️ **Dead Code** (Validated but not used; not returned by any endpoint)
+**Status:** 🚧 **Partially Implemented** (Public metadata is returned by `/info`; `tomlUrl` is not published as a SEP-1 file)
 
-SEP info and protocol metadata. This configuration is fully validated but **never used** at runtime.
+SEP info and protocol metadata. Configured metadata is returned by the public `/info` endpoint. This does not publish a SEP-1 TOML file or establish that a protocol flow is implemented.
+The `/info` response always includes a `metadata` object; each section within it is included only when configured.
 
 ```typescript
 metadata?: {
@@ -715,23 +710,22 @@ metadata?: {
 
 ### Fields
 
-| Field               | Type                                                       | Status       | Notes                                                                  |
-| ------------------- | ---------------------------------------------------------- | ------------ | ---------------------------------------------------------------------- |
-| `tomlUrl`           | `string`                                                   | ⚠️ Dead Code | SEP-1 TOML URL; validated but not returned by `/info` or used anywhere |
-| `protocols`         | `Record<'sep10' \| 'sep24' \| 'sep6' \| 'sep31', boolean>` | ⚠️ Dead Code | Protocol feature flags; validated but not consumed                     |
-| `features`          | `Record<string, boolean>`                                  | ⚠️ Dead Code | Capability flags; validated but not used                               |
-| `documentationUrls` | `Record<string, string>`                                   | ⚠️ Dead Code | Doc links; validated but not returned by endpoints                     |
+| Field               | Type                                                                                                                            | Status         | Notes                                                                   |
+| ------------------- | ------------------------------------------------------------------------------------------------------------------------------- | -------------- | ----------------------------------------------------------------------- |
+| `tomlUrl`           | `string`                                                                                                                        | 🚧 Partial     | Returned in `/info`; the SDK does not host or publish a SEP-1 TOML file |
+| `protocols`         | Object with optional `sep10`, `sep24`, `sep6`, `sep31` booleans                                                                 | ✅ Implemented | Returned in `/info`; declarations do not verify protocol capability     |
+| `features`          | Object with optional `supportsInteractiveDeposits`, `supportsInteractiveWithdrawals`, `supportsAsyncTransactionStatus` booleans | ✅ Implemented | Returned in `/info` as configured declarations                          |
+| `documentationUrls` | Object with optional `apiDocs`, `support`, and `terms` URLs                                                                     | ✅ Implemented | Validated and returned in `/info`                                       |
 
-### Why It's Dead Code
+### Runtime Behavior
 
-1. No `/info` endpoint response field maps to metadata config
-2. No runtime logic consumes these fields
-3. Protocol availability is determined by implementation status, not configuration
-4. SEP-1 TOML publishing is a future responsibility for the host application
+1. `/info` exposes configured metadata to clients.
+2. Protocol flags and feature values are declarations; they do not enable unimplemented protocol flows.
+3. SEP-1 TOML hosting and publishing remain the host application's responsibility.
 
 ### Future Use
 
-Metadata fields are intended for:
+Metadata can support future capabilities such as:
 
 - Host-controlled protocol capability advertisement (once SEP-6, SEP-31 are implemented)
 - SEP-1 TOML content generation or validation (future feature)
@@ -739,11 +733,11 @@ Metadata fields are intended for:
 
 ### Current Guidance
 
-Do not rely on metadata config for anything; pass `null` or omit this section entirely for now.
+Use metadata to advertise public information in `/info`. Do not treat the declared protocol flags as proof that a protocol flow is available.
 
 ```typescript
 const anchor = createAnchor({
-  // omit metadata config entirely; it is not currently used
+  // metadata is optional
   // ... other config
 });
 ```
@@ -862,7 +856,7 @@ All configuration is validated at initialization via `AnchorKitConfigSchema`. Va
 - `kyc` – Customer verification requirements (currently unused)
 - `kycRequired` – Asset-specific KYC fields (currently unused)
 - `operational` – Anchor metadata (partially used)
-- `metadata` – Protocol capabilities (currently unused)
+- `metadata` – Public metadata returned by `/info`
 - `webhooks` – Event callbacks (implemented)
 
 ### Example: Validation Error
@@ -913,31 +907,31 @@ USDC_ISSUER=GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5
 
 ## Summary: Implementation Status by Section
 
-| Section                                                  | Status | Implementation               | Use Case                                                  |
-| -------------------------------------------------------- | ------ | ---------------------------- | --------------------------------------------------------- |
-| **Network**                                              | ✅     | Full                         | Production-ready; configure Stellar network connectivity  |
-| **Server**                                               | ✅     | Full                         | Production-ready; set interactive domain and CORS origins |
-| **Security**                                             | ✅     | Full                         | Production-ready; configure all auth and secret keys      |
-| **Assets**                                               | ✅     | Full                         | Production-ready; list supported assets and limits        |
-| **Framework (DB/Queue/Watchers/HTTP/RateLimit/Plugins)** | ✅     | Full                         | Production-ready; core SDK behavior                       |
-| **KYC**                                                  | ⚠️     | Validated, not used          | Hold for Phase 2+; SEP protocol implementations pending   |
-| **Operational**                                          | 🚧     | Partial (info endpoint only) | Use for anchor metadata; other fields unused              |
-| **Metadata**                                             | ⚠️     | Validated, not used          | Not implemented; skip for now                             |
-| **Webhooks**                                             | ✅     | Full                         | Production-ready; configure event callbacks               |
-| **Logging**                                              | 📋     | Not implemented              | Planned; do not use yet                                   |
-| **Monitoring**                                           | 📋     | Not implemented              | Planned; do not use yet                                   |
+| Section                                                  | Status | Implementation        | Use Case                                                       |
+| -------------------------------------------------------- | ------ | --------------------- | -------------------------------------------------------------- |
+| **Network**                                              | ✅     | Implemented           | Configure Stellar network connectivity                         |
+| **Server**                                               | ✅     | Implemented           | Set the interactive domain, timeout, and CORS origins          |
+| **Security**                                             | ✅     | Implemented           | Configure auth and secret keys                                 |
+| **Assets**                                               | ✅     | Implemented           | List supported assets and deposit limits                       |
+| **Framework (DB/Queue/Watchers/HTTP/RateLimit/Plugins)** | ✅     | Implemented           | Configure core SDK behavior                                    |
+| **KYC**                                                  | ⚠️     | Validated only        | The host app must enforce configured requirements              |
+| **Operational**                                          | 🚧     | Partially implemented | Configure public info, webhook handling, and cleanup retention |
+| **Metadata**                                             | 🚧     | Partially implemented | Advertise metadata through `/info`                             |
+| **Webhooks**                                             | ✅     | Implemented           | Configure event callbacks and enablement                       |
+| **Logging**                                              | 📋     | Not implemented       | Planned; do not use yet                                        |
+| **Monitoring**                                           | 📋     | Not implemented       | Planned; do not use yet                                        |
 
 ---
 
 ## Related Documentation
 
 - [ROADMAP.md](../ROADMAP.md) – Phase 1–4 implementation timeline and feature roadmap
-- [Implementation Status](docs/implementation-status.md) – Detailed drift matrix and Phase 1 completeness
-- [Plugin Lifecycle Guide](docs/plugin-lifecycle.md) – Plugin registration, initialization, and hook timing
-- [Auth Token Response Contract](docs/auth-token-response.md) – SEP-10 token response format and expiry semantics
+- [Implementation Status](implementation-status.md) – Detailed drift matrix and Phase 1 completeness
+- [Plugin Lifecycle Guide](plugin-lifecycle.md) – Plugin registration, initialization, and hook timing
+- [Auth Token Response Contract](auth-token-response.md) – SEP-10 token response format and expiry semantics
 - [Webhook Event Contract](../README.md#webhook-event-contract) – Webhook request/response format
-- [Trusted Proxy Rate-Limit Guidance](docs/trusted-proxy-rate-limits.md) – Security best practices for `trustForwardedFor`
-- [MVP Express Integration](docs/mvp-express.md) – Quick-start guide and example app
+- [Trusted Proxy Rate-Limit Guidance](trusted-proxy-rate-limits.md) – Security best practices for `trustForwardedFor`
+- [MVP Express Integration](mvp-express.md) – Quick-start guide and example app
 
 ---
 
@@ -949,6 +943,6 @@ Configuration documentation is part of the SDK's public API contract. When addin
 2. Update [src/utils/validation-helpers.ts](../src/utils/validation-helpers.ts) to validate the field
 3. Update this reference with implementation status and usage guidance
 4. Add tests covering config validation and runtime behavior
-5. Open a PR with the changes and update [docs/implementation-status.md](docs/implementation-status.md)
+5. Open a PR with the changes and update [implementation-status.md](implementation-status.md)
 
 See [CONTRIBUTING.md](../CONTRIBUTING.md) for full contribution guidelines.
