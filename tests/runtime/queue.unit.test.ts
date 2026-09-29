@@ -309,4 +309,101 @@ describe('InMemoryQueueAdapter', () => {
     await stopPromise;
     expect(jobFinished).toBe(true); // stop() should only resolve after job is finished
   });
+
+  it('reports a failed job and continues processing later jobs', async () => {
+    const failures: Array<{ job: QueueJob; error: unknown }> = [];
+    const completed: string[] = [];
+    let resolveCompleted: (() => void) | undefined;
+    const completedPromise = new Promise<void>((resolve) => {
+      resolveCompleted = resolve;
+    });
+    const queue = new InMemoryQueueAdapter({
+      concurrency: 1,
+      onError: (job, error) => {
+        failures.push({ job, error });
+      },
+    });
+
+    await queue.start(async (job) => {
+      const id = job.payload.id as string;
+      if (id === 'fail') throw new Error('worker failed');
+      completed.push(id);
+      resolveCompleted?.();
+    });
+    await queue.enqueue({ type: 'process_watcher_task', payload: { id: 'fail' } });
+    await queue.enqueue({ type: 'cleanup_records', payload: { id: 'succeed' } });
+    await completedPromise;
+    await queue.stop();
+
+    expect(failures).toHaveLength(1);
+    expect(failures[0]?.job.type).toBe('process_watcher_task');
+    expect(failures[0]?.error).toEqual(new Error('worker failed'));
+    expect(completed).toEqual(['succeed']);
+  });
+
+  it('limits pending jobs and accepts more after the queue drains', async () => {
+    const queue = new InMemoryQueueAdapter({ concurrency: 1, maxPendingJobs: 1 });
+    let completedCount = 0;
+    let resolveDrained: (() => void) | undefined;
+    const drained = new Promise<void>((resolve) => {
+      resolveDrained = resolve;
+    });
+
+    await queue.enqueue({ type: 'cleanup_records', payload: { id: 1 } });
+    await expect(
+      queue.enqueue({ type: 'cleanup_records', payload: { id: 2 } }),
+    ).rejects.toThrow('In-memory queue is full');
+
+    await queue.start(async () => {
+      completedCount += 1;
+      if (completedCount === 2) resolveDrained?.();
+    });
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    await queue.enqueue({ type: 'cleanup_records', payload: { id: 3 } });
+    await drained;
+    await queue.stop();
+
+    expect(completedCount).toBe(2);
+  });
+
+  it('excludes in-flight work from capacity and rejects concurrent overflow', async () => {
+    const queue = new InMemoryQueueAdapter({ concurrency: 1, maxPendingJobs: 1 });
+    let signalWorkerStarted: (() => void) | undefined;
+    const workerStarted = new Promise<void>((resolve) => {
+      signalWorkerStarted = resolve;
+    });
+    let releaseWorker: (() => void) | undefined;
+    const workerGate = new Promise<void>((resolve) => {
+      releaseWorker = resolve;
+    });
+    let signalPendingComplete: (() => void) | undefined;
+    const pendingComplete = new Promise<void>((resolve) => {
+      signalPendingComplete = resolve;
+    });
+    const completed: string[] = [];
+
+    await queue.start(async (job) => {
+      const id = job.payload.id as string;
+      if (id === 'in-flight') {
+        signalWorkerStarted?.();
+        await workerGate;
+      }
+      completed.push(id);
+      if (id === 'pending-1') signalPendingComplete?.();
+    });
+    await queue.enqueue({ type: 'cleanup_records', payload: { id: 'in-flight' } });
+    await workerStarted;
+
+    const enqueueResults = await Promise.allSettled([
+      queue.enqueue({ type: 'cleanup_records', payload: { id: 'pending-1' } }),
+      queue.enqueue({ type: 'cleanup_records', payload: { id: 'pending-2' } }),
+    ]);
+    expect(enqueueResults.map((result) => result.status)).toEqual(['fulfilled', 'rejected']);
+
+    releaseWorker?.();
+  await pendingComplete;
+    await queue.stop();
+
+    expect(completed).toEqual(['in-flight', 'pending-1']);
+  });
 });

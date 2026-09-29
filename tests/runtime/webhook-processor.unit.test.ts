@@ -40,14 +40,13 @@ describe('DefaultWebhookProcessor Unit Tests', () => {
       rawBody: '{}',
     };
 
-    // Should rethrow the error
-    await expect(processor.process(input)).rejects.toThrow('Callback failed');
+    await expect(processor.process(input)).rejects.toThrow('Webhook processing failed');
 
     // Should have updated status to failed with error message
     expect(mockDatabase.updateWebhookEventStatus).toHaveBeenCalledWith({
       id: 'internal-id',
       status: 'failed',
-      errorMessage: 'Callback failed',
+      errorMessage: 'Webhook callback failed',
     });
   });
 
@@ -94,6 +93,48 @@ describe('DefaultWebhookProcessor Unit Tests', () => {
     expect(mockDatabase.updateWebhookEventStatus).toHaveBeenCalledWith({
       id: 'internal-id-2',
       status: 'processed',
+    });
+  });
+
+  it('marks a stalled callback failed when its configured timeout elapses', async () => {
+    const mockDatabase = {
+      insertWebhookEvent: vi.fn().mockResolvedValue({
+        inserted: true,
+        record: {
+          id: 'timed-out-id',
+          eventId: 'stalled-event',
+          provider: 'generic',
+          payload: {},
+          createdAt: new Date().toISOString(),
+        },
+      }),
+      updateWebhookEventStatus: vi.fn().mockResolvedValue(undefined),
+    } as unknown as DatabaseAdapter;
+    const mockConfig = {
+      security: { verifyWebhookSignatures: false },
+      webhooks: {
+        callbackTimeoutMs: 5,
+        onEvent: vi.fn(() => new Promise<void>(() => undefined)),
+      },
+    } as unknown as AnchorKitConfig;
+    const processor = new DefaultWebhookProcessor({
+      config: mockConfig,
+      database: mockDatabase,
+    });
+
+    await expect(
+      processor.process({
+        eventId: 'stalled-event',
+        provider: 'generic',
+        payload: {},
+        rawBody: '{}',
+      }),
+    ).rejects.toThrow('Webhook processing failed');
+
+    expect(mockDatabase.updateWebhookEventStatus).toHaveBeenCalledWith({
+      id: 'timed-out-id',
+      status: 'failed',
+      errorMessage: 'Webhook callback timed out',
     });
   });
 });

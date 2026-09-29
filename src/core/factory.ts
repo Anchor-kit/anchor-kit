@@ -34,6 +34,8 @@ export class AnchorInstance {
 
   private initialized = false;
   private backgroundJobsRunning = false;
+  private initPromise: Promise<void> | null = null;
+  private shutdownPromise: Promise<void> | null = null;
 
   constructor(config: Partial<AnchorKitConfig>) {
     this.config = new AnchorConfig(config);
@@ -52,49 +54,82 @@ export class AnchorInstance {
   }
 
   /**
-   * Initialize registered plugins and all runtime services.
+   * Initialize registered plugins and runtime services. Concurrent calls share
+   * one initialization attempt; calls made during shutdown run afterward.
    */
   public async init(): Promise<void> {
+    if (this.shutdownPromise) {
+      await this.shutdownPromise;
+      return this.init();
+    }
     if (this.initialized) return;
+    if (this.initPromise) return this.initPromise;
 
+    const initPromise = this.initializeResources();
+    this.initPromise = initPromise;
+    try {
+      await initPromise;
+    } finally {
+      if (this.initPromise === initPromise) this.initPromise = null;
+    }
+  }
+
+  private async initializeResources(): Promise<void> {
     const frameworkConfig = this.config.get('framework');
 
-    this.database = createSqlDatabaseAdapter(frameworkConfig.database);
-    await this.database.connect();
-    await this.database.migrate();
+    try {
+      this.database = this.createDatabaseAdapter();
+      await this.database.connect();
+      await this.database.migrate();
 
-    const queueConcurrency = frameworkConfig.queue?.concurrency ?? 1;
-    this.queue = new InMemoryQueueAdapter({ concurrency: queueConcurrency });
+      const queueConcurrency = frameworkConfig.queue?.concurrency ?? 1;
+      this.queue = new InMemoryQueueAdapter({
+        concurrency: queueConcurrency,
+        maxPendingJobs: frameworkConfig.queue?.maxPendingJobs,
+        onError: frameworkConfig.queue?.onError,
+      });
 
-    this.webhookProcessor = new DefaultWebhookProcessor({
-      config: this.config.getConfig(),
-      database: this.database,
-    });
+      this.webhookProcessor = new DefaultWebhookProcessor({
+        config: this.config.getConfig(),
+        database: this.database,
+      });
 
-    const watchersEnabled = frameworkConfig.watchers?.enabled ?? true;
-    if (watchersEnabled) {
-      this.watchers = [
-        new TransactionWatcher(this.database, this.queue, {
-          pollIntervalMs: frameworkConfig.watchers?.pollIntervalMs ?? 15000,
-          transactionTimeoutMs: frameworkConfig.watchers?.transactionTimeoutMs ?? 300000,
-          retentionDays: frameworkConfig.watchers?.retentionDays ?? 90,
-        }),
-      ];
-    }
-
-    this.expressRouter = new AnchorExpressRouter({
-      config: this.config,
-      database: this.database,
-      webhookProcessor: this.webhookProcessor,
-    }).getMiddleware();
-
-    for (const plugin of this.plugins.values()) {
-      if (plugin.init) {
-        await plugin.init(this);
+      const watchersEnabled = frameworkConfig.watchers?.enabled ?? true;
+      if (watchersEnabled) {
+        this.watchers = [
+          new TransactionWatcher(this.database, this.queue, {
+            pollIntervalMs: frameworkConfig.watchers?.pollIntervalMs ?? 15000,
+            transactionTimeoutMs: frameworkConfig.watchers?.transactionTimeoutMs ?? 300000,
+            retentionDays: frameworkConfig.watchers?.retentionDays ?? 90,
+          }),
+        ];
       }
-    }
 
-    this.initialized = true;
+      this.expressRouter = new AnchorExpressRouter({
+        config: this.config,
+        database: this.database,
+        webhookProcessor: this.webhookProcessor,
+      }).getMiddleware();
+
+      for (const plugin of this.plugins.values()) {
+        if (plugin.init) {
+          await plugin.init(this);
+        }
+      }
+
+      this.initialized = true;
+    } catch (error) {
+      try {
+        await this.releaseResources();
+      } catch {
+        // Preserve the initialization error; shutdown can retry resource cleanup.
+      }
+      throw error;
+    }
+  }
+
+  protected createDatabaseAdapter(): DatabaseAdapter {
+    return createSqlDatabaseAdapter(this.config.get('framework').database);
   }
 
   /**
@@ -128,12 +163,53 @@ export class AnchorInstance {
   }
 
   /**
-   * Cleanly shutdown all services.
+  * Cleanly shut down all services. If initialization is pending, shutdown waits
+  * for it to settle before releasing resources. The instance can then be initialized again.
    */
   public async shutdown(): Promise<void> {
-    if (!this.initialized) return;
-    await this.stopBackgroundJobs();
-    await this.requireDatabase().disconnect();
+    if (this.shutdownPromise) return this.shutdownPromise;
+    if (
+      !this.initialized &&
+      !this.initPromise &&
+      !this.database &&
+      !this.queue &&
+      this.watchers.length === 0
+    ) {
+      return;
+    }
+
+    const shutdownPromise = this.shutdownResources();
+    this.shutdownPromise = shutdownPromise;
+    try {
+      await shutdownPromise;
+    } finally {
+      if (this.shutdownPromise === shutdownPromise) this.shutdownPromise = null;
+    }
+  }
+
+  private async shutdownResources(): Promise<void> {
+    await this.initPromise?.catch(() => undefined);
+    await this.releaseResources();
+  }
+
+  private async releaseResources(): Promise<void> {
+    if (this.backgroundJobsRunning) {
+      for (const watcher of this.watchers) {
+        await watcher.stop();
+      }
+      await this.queue?.stop();
+      this.backgroundJobsRunning = false;
+    }
+
+    if (this.database) {
+      await this.database.disconnect();
+    }
+
+    this.database = null;
+    this.queue = null;
+    this.webhookProcessor = null;
+    this.watchers = [];
+    this.expressRouter = null;
     this.initialized = false;
   }
 

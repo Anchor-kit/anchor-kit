@@ -1,3 +1,5 @@
+import type { QueueJob } from '@/runtime/interfaces.ts';
+
 /**
  * Configuration Types for Anchor-Kit
  * Defines the complete configuration interface required to initialize an Anchor-Kit instance
@@ -420,6 +422,12 @@ export interface FrameworkConfig {
      * @optional - defaults to 1
      */
     concurrency?: number;
+
+    /** Maximum number of jobs waiting for a worker; in-flight jobs are excluded. Defaults to unlimited. */
+    maxPendingJobs?: number;
+
+    /** Called when a queue worker fails. Errors from this callback are ignored. */
+    onError?: (job: QueueJob, error: unknown) => void | Promise<void>;
   };
 
   /**
@@ -623,6 +631,9 @@ export interface AnchorKitConfig {
    * Webhook integration configuration.
    */
   webhooks?: {
+    /** Maximum time to wait for onEvent, in milliseconds. Defaults to 30000. */
+    callbackTimeoutMs?: number;
+
     /**
      * Called after webhook event verification and persistence.
      */

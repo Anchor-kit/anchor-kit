@@ -7,6 +7,10 @@ interface DefaultWebhookProcessorOptions {
   database: DatabaseAdapter;
 }
 
+const DEFAULT_CALLBACK_TIMEOUT_MS = 30_000;
+const CALLBACK_FAILURE_MESSAGE = 'Webhook callback failed';
+const CALLBACK_TIMEOUT_MESSAGE = 'Webhook callback timed out';
+
 function toComparableBuffer(value: string): Buffer {
   return Buffer.from(value, 'utf8');
 }
@@ -52,31 +56,52 @@ export class DefaultWebhookProcessor implements WebhookProcessor {
     }
 
     try {
-      await this.config.webhooks?.onEvent?.(
-        {
-          id: insertion.record.id,
-          eventId: insertion.record.eventId,
-          provider: insertion.record.provider,
-          payload: insertion.record.payload,
-        },
-        {
-          receivedAt: insertion.record.createdAt,
-          signature: input.signature,
-        },
-      );
+      const callback = this.config.webhooks?.onEvent;
+      if (callback) {
+        let timeout: ReturnType<typeof setTimeout> | undefined;
+        try {
+          await Promise.race([
+            Promise.resolve().then(() =>
+              callback(
+                {
+                  id: insertion.record.id,
+                  eventId: insertion.record.eventId,
+                  provider: insertion.record.provider,
+                  payload: insertion.record.payload,
+                },
+                {
+                  receivedAt: insertion.record.createdAt,
+                  signature: input.signature,
+                },
+              ),
+            ),
+            new Promise<never>((_, reject) => {
+              timeout = setTimeout(
+                () => reject(new Error(CALLBACK_TIMEOUT_MESSAGE)),
+                this.config.webhooks?.callbackTimeoutMs ?? DEFAULT_CALLBACK_TIMEOUT_MS,
+              );
+            }),
+          ]);
+        } finally {
+          if (timeout) clearTimeout(timeout);
+        }
+      }
 
       await this.database.updateWebhookEventStatus({
         id: insertion.record.id,
         status: 'processed',
       });
     } catch (error) {
-      const message = error instanceof Error ? error.message : 'Unknown webhook callback error';
+      const message =
+        error instanceof Error && error.message === CALLBACK_TIMEOUT_MESSAGE
+          ? CALLBACK_TIMEOUT_MESSAGE
+          : CALLBACK_FAILURE_MESSAGE;
       await this.database.updateWebhookEventStatus({
         id: insertion.record.id,
         status: 'failed',
         errorMessage: message,
       });
-      throw error;
+      throw new Error('Webhook processing failed');
     }
 
     return { duplicate: false, eventId: insertion.record.eventId };

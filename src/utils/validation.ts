@@ -251,6 +251,18 @@ export const AnchorKitConfigSchema = {
       throw new Error('framework.queue.concurrency must be >= 1');
     }
     if (
+      framework.queue?.maxPendingJobs !== undefined &&
+      (!Number.isInteger(framework.queue.maxPendingJobs) || framework.queue.maxPendingJobs < 0)
+    ) {
+      throw new Error('framework.queue.maxPendingJobs must be a non-negative integer');
+    }
+    if (
+      config.webhooks?.callbackTimeoutMs !== undefined &&
+      (!Number.isFinite(config.webhooks.callbackTimeoutMs) || config.webhooks.callbackTimeoutMs <= 0)
+    ) {
+      throw new Error('webhooks.callbackTimeoutMs must be > 0');
+    }
+    if (
       framework.watchers?.pollIntervalMs !== undefined &&
       framework.watchers.pollIntervalMs < 10
     ) {
