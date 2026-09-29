@@ -64,42 +64,22 @@ export class TransactionWatcher implements Watcher {
   }
 
   public async stop(): Promise<void> {
-    if (this.stopPromise) {
-      await this.stopPromise;
-      return;
-    }
-
-    const stopping = this.performStop();
-    this.stopPromise = stopping;
-    try {
-      await stopping;
-    } finally {
-      this.stopPromise = null;
-    }
-  }
-
-  private async performStop(): Promise<void> {
-    if (this.startPromise) {
-      try {
-        await this.startPromise;
-      } catch {
-        // A failed initial tick must not prevent shutdown.
-      }
-    }
-
     if (this.timer) {
       clearInterval(this.timer);
       this.timer = null;
     }
 
-    // Wait for any active tick to complete
-    if (this.tickPromise) {
+    const activeTick = this.tickPromise;
+    if (activeTick) {
       try {
-        await this.tickPromise;
+        await activeTick;
       } catch {
-        // Transient tick failures must not make shutdown fail.
+        // Ignore transient tick failures during shutdown so timers and lifecycle state can settle.
       }
     }
+
+    this.isTickInProgress = false;
+    this.tickPromise = null;
   }
 
   private async tick(): Promise<void> {

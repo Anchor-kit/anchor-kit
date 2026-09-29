@@ -1,10 +1,15 @@
 import type { AnchorConfig } from '@/core/config.ts';
+import { errorHandler } from '@/utils/error-handler.ts';
 import { InMemoryRateLimiter, type RateLimitRule } from '@/runtime/http/rate-limiter.ts';
 import type { DatabaseAdapter, WebhookProcessor } from '@/runtime/interfaces.ts';
-import type { AnchorPluginHooks } from '@/types/plugin.ts';
+import type { RouteDefinition } from '@/types/foundation.ts';
 import { Keypair } from '@stellar/stellar-sdk';
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import { handleExpressRouterRequest, type ExpressRouterContext } from './express-router-impl.ts';
+import {
+  handleExpressRouterRequest,
+  type ExpressRouterContext,
+  validatePluginRoutes,
+} from './express-router-impl.ts';
 
 export type ExpressLikeMiddleware = (
   req: IncomingMessage,
@@ -16,18 +21,21 @@ interface RouterDependencies {
   config: AnchorConfig;
   database: DatabaseAdapter;
   webhookProcessor: WebhookProcessor;
-  depositRequestHooks: NonNullable<AnchorPluginHooks['onDepositRequest']>[];
-  sep10ChallengeHooks: NonNullable<AnchorPluginHooks['onSep10Challenge']>[];
+  pluginRoutes?: Array<{ pluginId: string; route: RouteDefinition }>;
 }
 
 export class AnchorExpressRouter {
   private readonly context: ExpressRouterContext;
 
   constructor(dependencies: RouterDependencies) {
+    const pluginRoutes = dependencies.pluginRoutes ?? [];
+    validatePluginRoutes(pluginRoutes);
     const config = dependencies.config;
     const sep10ServerKeypair = Keypair.fromSecret(config.get('security').sep10SigningKey);
     const networkPassphrase = config.get('network').networkPassphrase ?? '';
     const maxBodyBytes = config.get('framework').http?.maxBodyBytes ?? 1024 * 1024;
+    const corsOrigins = config.get('server').corsOrigins;
+    const requestTimeout = config.get('server').requestTimeout ?? 30000;
     const rateLimitConfig = config.get('framework').rateLimit;
     const windowMs = rateLimitConfig?.windowMs ?? 60000;
     const rateRules: Record<
@@ -49,8 +57,11 @@ export class AnchorExpressRouter {
       sep10ServerKeypair,
       networkPassphrase,
       maxBodyBytes,
+      corsOrigins,
+      requestTimeout,
       rateLimiter: new InMemoryRateLimiter(),
       rateRules,
+      pluginRoutes,
     };
   }
 
@@ -62,16 +73,12 @@ export class AnchorExpressRouter {
           return;
         }
 
+        const { status, payload } = errorHandler(error);
         if (!res.headersSent) {
-          res.statusCode = 500;
+          res.statusCode = status;
           res.setHeader('content-type', 'application/json');
         }
-        res.end(
-          JSON.stringify({
-            error: 'internal_server_error',
-            message: 'Internal server error',
-          }),
-        );
+        res.end(JSON.stringify(payload));
       });
     };
   }

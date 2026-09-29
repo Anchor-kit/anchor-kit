@@ -1,3 +1,4 @@
+import { ConfigError } from '@/core/errors.ts';
 import type { QueueAdapter, QueueJob } from '@/runtime/interfaces.ts';
 
 interface InMemoryQueueOptions {
@@ -14,6 +15,10 @@ export class InMemoryQueueAdapter implements QueueAdapter {
   private resolveStop: (() => void) | null = null;
 
   constructor(options: InMemoryQueueOptions) {
+    if (!Number.isSafeInteger(options.concurrency) || options.concurrency < 1) {
+      throw new ConfigError('InMemoryQueueAdapter concurrency must be a positive safe integer');
+    }
+
     this.concurrency = options.concurrency;
   }
 

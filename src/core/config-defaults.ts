@@ -26,13 +26,17 @@ function buildNetworkConfig(input: Partial<AnchorKitConfig>): NetworkConfig | un
 
 function buildOperationalConfig(input: Partial<AnchorKitConfig>): AnchorKitConfig['operational'] {
   const operationalInput = input.operational;
+  const transactionRetentionDays =
+    operationalInput?.transactionRetentionDays ?? input.framework?.watchers?.retentionDays ?? 90;
 
   return {
     name: operationalInput?.name,
     website: operationalInput?.website,
     supportEmail: operationalInput?.supportEmail,
+    webhooksEnabled: operationalInput?.webhooksEnabled,
+    corsEnabled: operationalInput?.corsEnabled,
     address: operationalInput?.address,
-    transactionRetentionDays: operationalInput?.transactionRetentionDays ?? 90,
+    transactionRetentionDays,
   } as AnchorKitConfig['operational'];
 }
 

@@ -55,7 +55,7 @@ describe('SqlDatabaseAdapter – interactive transaction status updates', () => 
       expect(inserted.status).toBe('pending_user_transfer_start');
 
       currentTime = new RealDate('2026-01-01T00:00:01.000Z').getTime();
-      await db.updateTransactionStatus(txId, 'completed');
+      await expect(db.updateTransactionStatus(txId, 'completed')).resolves.toBe(true);
 
       const fetched = await db.getInteractiveTransactionById(txId);
       expect(fetched).not.toBeNull();
@@ -69,5 +69,27 @@ describe('SqlDatabaseAdapter – interactive transaction status updates', () => 
   it('returns null for getInteractiveTransactionById when the transaction does not exist', async () => {
     const fetched = await db.getInteractiveTransactionById(randomUUID());
     expect(fetched).toBeNull();
+  });
+
+  it('updates a transaction only when its current status matches the expected status', async () => {
+    const txId = randomUUID();
+    await db.insertInteractiveTransaction({
+      id: txId,
+      account: 'GTEST1234',
+      kind: 'deposit',
+      assetCode: 'USDC',
+      amount: '50.00',
+      status: 'pending_user_transfer_start',
+    });
+
+    await expect(
+      db.updateTransactionStatus(txId, 'expired', 'pending_user_transfer_start'),
+    ).resolves.toBe(true);
+    await expect(
+      db.updateTransactionStatus(txId, 'expired', 'pending_user_transfer_start'),
+    ).resolves.toBe(false);
+    await expect(db.getInteractiveTransactionById(txId)).resolves.toMatchObject({
+      status: 'expired',
+    });
   });
 });

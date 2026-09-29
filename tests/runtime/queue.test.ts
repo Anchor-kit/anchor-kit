@@ -1,6 +1,5 @@
 import { describe, expect, it } from 'vitest';
 import { InMemoryQueueAdapter } from '@/runtime/queue/in-memory-queue.ts';
-import type { QueueJob } from '@/runtime/interfaces.ts';
 
 describe('InMemoryQueueAdapter', () => {
   it('rejects a different worker while the queue is running', async () => {
