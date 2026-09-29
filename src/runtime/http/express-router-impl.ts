@@ -934,6 +934,7 @@ async function handleTransaction(
 
   const transaction = await context.database.getInteractiveTransactionById(transactionId);
   if (!transaction) {
+    res.setHeader('Cache-Control', 'no-store');
     sendJson(res, 404, { error: 'not_found', message: 'Transaction not found' });
     return;
   }
@@ -974,6 +975,7 @@ async function handleTransaction(
     );
   }
 
+  res.setHeader('Cache-Control', 'no-store');
   sendJson(res, 200, responseData);
 }
 
