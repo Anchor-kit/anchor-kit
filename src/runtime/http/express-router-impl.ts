@@ -330,6 +330,11 @@ function endpointPath(req: IncomingMessage): string {
   return parseUrl(req).pathname;
 }
 
+export function isAuthChallengeExpired(expiresAt: string, nowMs = Date.now()): boolean {
+  const expirationMs = Date.parse(expiresAt);
+  return !Number.isFinite(expirationMs) || nowMs >= expirationMs;
+}
+
 function hasValidSignature(transaction: Transaction, publicKey: string): boolean {
   const keypair = Keypair.fromPublicKey(publicKey);
   const hash = transaction.hash();
@@ -634,7 +639,7 @@ async function handleAuthToken(
     return;
   }
 
-  if (new Date(stored.expiresAt).getTime() < Date.now()) {
+  if (isAuthChallengeExpired(stored.expiresAt)) {
     sendJson(res, 401, { error: 'invalid_challenge', message: 'Challenge expired' });
     return;
   }
@@ -779,61 +784,96 @@ async function handleDepositInteractive(
 
   if (typeof idempotencyKey === 'string' && idempotencyKey.length > 0) {
     const idempotencyId = randomUUID();
-    const idempotencyRecord = await context.database.insertOrGetIdempotencyRecord({
+    const reservation = await context.database.reserveIdempotencyRecord({
       id: idempotencyId,
       scope,
       idempotencyKey,
       requestHash,
-      statusCode: 201,
-      responseBody: '{}',
     });
+    const idempotencyRecord = reservation.record;
 
-    if (idempotencyRecord.id === idempotencyId) {
-      const transactionId = randomUUID();
-      const created = await context.database.insertInteractiveTransaction({
-        id: transactionId,
-        account: auth.account,
-        kind: 'deposit',
-        assetCode,
-        amount,
-        status: 'pending_user_transfer_start',
+    if (!reservation.inserted) {
+      if (idempotencyRecord.requestHash !== requestHash) {
+        sendJson(res, 409, {
+          error: 'idempotency_conflict',
+          message: 'Idempotency key was already used with a different request body',
+        });
+        return;
+      }
+
+      if (idempotencyRecord.status === 'pending') {
+        res.setHeader('Retry-After', '1');
+        sendJson(res, 409, {
+          error: 'idempotency_in_progress',
+          message: 'A request with this idempotency key is still being processed',
+        });
+        return;
+      }
+
+      let responseBody: Record<string, unknown>;
+      try {
+        const parsed = JSON.parse(idempotencyRecord.responseBody) as unknown;
+        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+          throw new Error('Invalid idempotency response body');
+        }
+        responseBody = parsed as Record<string, unknown>;
+      } catch {
+        res.setHeader('Retry-After', '1');
+        sendJson(res, 503, {
+          error: 'idempotency_response_unavailable',
+          message: 'The saved response is unavailable; retry this request',
+        });
+        return;
+      }
+
+      sendJson(res, idempotencyRecord.statusCode, {
+        ...responseBody,
+        idempotency_replay: true,
       });
-
-      const responseBody = {
-        id: created.id,
-        kind: created.kind,
-        status: created.status,
-        amount: created.amount,
-        asset_code: created.assetCode,
-        asset_issuer: selectedAsset.issuer,
-        account: created.account,
-        interactive_url: buildInteractiveUrl(serverConfig.interactiveDomain, created.id),
-        created_at: created.createdAt,
-      };
-
-      await context.database.updateIdempotencyRecord({
-        scope,
-        idempotencyKey,
-        statusCode: 201,
-        responseBody: JSON.stringify(responseBody),
-      });
-
-      sendJson(res, 201, responseBody);
       return;
     }
 
-    if (idempotencyRecord.requestHash !== requestHash) {
-      sendJson(res, 409, {
-        error: 'idempotency_conflict',
-        message: 'Idempotency key was already used with a different request body',
+    const transactionId = randomUUID();
+    const createdAt = new Date().toISOString();
+    const responseBody = {
+      id: transactionId,
+      kind: 'deposit',
+      status: 'pending_user_transfer_start',
+      amount,
+      asset_code: assetCode,
+      asset_issuer: selectedAsset.issuer,
+      account: auth.account,
+      interactive_url: buildInteractiveUrl(serverConfig.interactiveDomain, transactionId),
+      created_at: createdAt,
+    };
+
+    try {
+      await context.database.createDepositWithIdempotency({
+        transaction: {
+          id: transactionId,
+          account: auth.account,
+          kind: 'deposit',
+          assetCode,
+          amount,
+          status: 'pending_user_transfer_start',
+          createdAt,
+        },
+        idempotency: {
+          scope,
+          idempotencyKey,
+          requestHash,
+          statusCode: 201,
+          responseBody: JSON.stringify(responseBody),
+        },
       });
-      return;
+    } catch (error) {
+      await context.database
+        .deletePendingIdempotencyRecord(scope, idempotencyKey, requestHash)
+        .catch(() => undefined);
+      throw error;
     }
 
-    sendJson(res, idempotencyRecord.statusCode, {
-      ...(JSON.parse(idempotencyRecord.responseBody) as Record<string, unknown>),
-      idempotency_replay: true,
-    });
+    sendJson(res, 201, responseBody);
     return;
   }
 

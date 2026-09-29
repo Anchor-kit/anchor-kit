@@ -2,6 +2,7 @@ import { makeSqliteDbUrlForTests } from '@/core/factory.ts';
 import { createSqlDatabaseAdapter } from '@/runtime/database/sql-database-adapter.ts';
 import { AnchorConfig } from '@/core/config.ts';
 import {
+  isAuthChallengeExpired,
   handleExpressRouterRequest,
   type ExpressRouterContext,
 } from '@/runtime/http/express-router-impl.ts';
@@ -104,6 +105,13 @@ class ControllableFakeDatabaseAdapter implements DatabaseAdapter {
     throw new Error('Not implemented');
   }
   async updateIdempotencyRecord(): Promise<void> {}
+  async reserveIdempotencyRecord(): Promise<never> {
+    throw new Error('Not implemented');
+  }
+  async createDepositWithIdempotency(): Promise<never> {
+    throw new Error('Not implemented');
+  }
+  async deletePendingIdempotencyRecord(): Promise<void> {}
   async insertOrGetWebhookEvent(): Promise<never> {
     throw new Error('Not implemented');
   }
@@ -251,6 +259,17 @@ function makeMockRequestResponse(method: string, path: string, body: Record<stri
 }
 
 describe('Auth Challenge Consumption Atomicity & Recovery (#451)', () => {
+  it('expires at maxTime and accepts requests only before the fixed boundary', () => {
+    const maxTime = Date.parse('2026-01-01T00:05:00.000Z');
+    const expiresAt = new Date(maxTime).toISOString();
+
+    expect(isAuthChallengeExpired(expiresAt, maxTime - 1)).toBe(false);
+    expect(isAuthChallengeExpired(expiresAt, maxTime)).toBe(true);
+    expect(isAuthChallengeExpired(expiresAt, maxTime + 1)).toBe(true);
+    expect(isAuthChallengeExpired(expiresAt, maxTime - 300_000)).toBe(false);
+    expect(isAuthChallengeExpired('invalid-expiration', maxTime)).toBe(true);
+  });
+
   it('ensures concurrent exchanges have at most one successful consumer', async () => {
     const serverKeypair = Keypair.random();
     const userKeypair = Keypair.random();

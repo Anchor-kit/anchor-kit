@@ -128,6 +128,7 @@ describe('Export Verification', () => {
       scope: 'webhook',
       idempotencyKey: 'key-1',
       requestHash: 'hash-1',
+      status: 'completed',
       statusCode: 200,
       responseBody: '{}',
       createdAt: new Date(0).toISOString(),

@@ -55,6 +55,41 @@ describe('Asset Validation (#254)', () => {
     expect(() => anchor.validate()).not.toThrow();
   });
 
+  it('accepts native XLM without an issuer', () => {
+    const config: AnchorKitConfig = {
+      ...baseConfig,
+      assets: { assets: [{ code: 'XLM' }] },
+    };
+
+    expect(() => new AnchorConfig(config).validate()).not.toThrow();
+  });
+
+  it('rejects native XLM when an issuer is supplied', () => {
+    const config: AnchorKitConfig = {
+      ...baseConfig,
+      assets: {
+        assets: [
+          {
+            code: 'XLM',
+            issuer: 'GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5',
+          },
+        ],
+      },
+    };
+
+    expect(() => new AnchorConfig(config).validate()).toThrow(/Invalid asset at index 0/);
+  });
+
+  it('rejects issued assets without a valid classic issuer key', () => {
+    for (const issuer of [undefined, 'invalid-issuer']) {
+      const config = {
+        ...baseConfig,
+        assets: { assets: [{ code: 'USDC', ...(issuer ? { issuer } : {}) }] },
+      } as AnchorKitConfig;
+      expect(() => new AnchorConfig(config).validate()).toThrow(/Invalid asset at index 0/);
+    }
+  });
+
   it.each([' USDC', 'USDC ', '\tUSDC', 'USDC\n'])(
     'should reject whitespace-padded asset code %j',
     (code) => {

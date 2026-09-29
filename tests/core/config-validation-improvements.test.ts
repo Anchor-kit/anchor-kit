@@ -42,7 +42,7 @@ describe('Config Validation Improvements (#124, #125)', () => {
       framework: {
         ...validBaseConfig.framework,
         database: {
-          provider: 'mysql', // NOT SUPPORTED
+          provider: 'mysql' as AnchorKitConfig['framework']['database']['provider'], // NOT SUPPORTED
           url: 'mysql://user:pass@localhost:3306/db',
         },
       },

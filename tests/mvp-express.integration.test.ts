@@ -3,7 +3,7 @@ import { createAnchor, type AnchorInstance } from '@/index.ts';
 import type { DatabaseAdapter } from '@/runtime/interfaces.ts';
 import { ACCESS_TOKEN_AUDIENCE, ACCESS_TOKEN_ISSUER } from '@/runtime/http/express-router-impl.ts';
 import { Account, Keypair, Operation, Transaction, TransactionBuilder } from '@stellar/stellar-sdk';
-import { createHmac } from 'node:crypto';
+import { createHash, createHmac } from 'node:crypto';
 import { unlinkSync } from 'node:fs';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { Readable } from 'node:stream';
@@ -100,7 +100,13 @@ function createMountedInvoker(anchor: AnchorInstance) {
       }
 
       req.url = rawUrl.slice('/anchor'.length) || '/';
-      middleware(req, res, () => {
+      middleware(req, res, (error) => {
+        if (error) {
+          res.statusCode = 500;
+          res.setHeader('content-type', 'application/json');
+          res.end(JSON.stringify({ error: 'internal_server_error' }));
+          return;
+        }
         res.statusCode = 404;
         res.setHeader('content-type', 'application/json');
         res.end(JSON.stringify({ error: 'not_found' }));
@@ -2894,6 +2900,37 @@ describe('MVP Express-mounted integration', () => {
     expect(secondResponse.body.id).toBe(firstTxId);
   });
 
+  it('12a) an in-flight idempotency reservation returns a retry response', async () => {
+    const amount = '18.5';
+    const idempotencyKey = 'pending-replay-test-key';
+    const requestHash = createHash('sha256')
+      .update(JSON.stringify({ assetCode: 'USDC', amount }))
+      .digest('hex');
+    const database = (anchor as unknown as { database: DatabaseAdapter }).database;
+    await database.reserveIdempotencyRecord({
+      id: 'pending-replay-test-record',
+      scope: `deposit:${clientKeypair.publicKey()}`,
+      idempotencyKey,
+      requestHash,
+    });
+
+    const response = await invoke({
+      method: 'POST',
+      path: '/transactions/deposit/interactive',
+      headers: {
+        'content-type': 'application/json',
+        authorization: `Bearer ${accessToken}`,
+        'idempotency-key': idempotencyKey,
+      },
+      body: { asset_code: 'USDC', amount },
+    });
+
+    expect(response.status).toBe(409);
+    expect(response.headers['retry-after']).toBe('1');
+    expect(response.body.error).toBe('idempotency_in_progress');
+    expect(response.body).not.toHaveProperty('id');
+  });
+
   it('13) cross-account transaction lookup is rejected', async () => {
     // Create a new account and get its token
     const otherAccountKeypair = Keypair.random();
@@ -3484,6 +3521,7 @@ describe('MVP Express-mounted integration', () => {
       headers: {
         'content-type': 'application/json',
         authorization: `Bearer ${accessToken}`,
+        'x-forwarded-for': '203.0.113.253',
       },
       body: { asset_code: 'USDC', amount: '-5' },
     });
