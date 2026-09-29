@@ -122,6 +122,32 @@ describe('StellarUtils', () => {
       },
     );
 
+    it.each(['0.00000001', '1.12345678'])(
+      'should reject payment amounts with excessive precision: %s',
+      async (amount) => {
+        await expect(
+          StellarUtils.buildPaymentXdr({
+            source: validAccountId,
+            destination: validAccountId,
+            amount,
+            assetCode: 'XLM',
+            network: 'testnet',
+          }),
+        ).rejects.toThrow('amount must have at most 7 decimal places');
+      },
+    );
+
+    it('should accept seven fractional places', async () => {
+      const xdr = await StellarUtils.buildPaymentXdr({
+        source: validAccountId,
+        destination: validAccountId,
+        amount: '1.1234567',
+        assetCode: 'XLM',
+        network: 'testnet',
+      });
+      expect(xdr).toBeTruthy();
+    });
+
     it('should preserve a valid positive decimal amount', async () => {
       await expect(
         StellarUtils.buildPaymentXdr({
