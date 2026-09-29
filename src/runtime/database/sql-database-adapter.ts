@@ -46,6 +46,30 @@ export const SQLITE_JOURNAL_MODE = 'WAL';
  */
 export const SQLITE_BUSY_TIMEOUT_MS = 5000;
 
+/**
+ * Indexes supporting watcher polling and retention cleanup.
+ *
+ * Watcher polling filters `watcher_tasks` by `status` and orders by
+ * `created_at`, while retention deletes rows by `created_at` combined with a
+ * `status` filter. The same shape applies to `webhook_events`. Auth challenges
+ * are pruned by `expires_at`, and idempotency keys by `created_at`. Each index
+ * is created with `IF NOT EXISTS` so migrations stay repeatable on both fresh
+ * and already-migrated databases.
+ */
+export const SQLITE_INDEX_STATEMENTS: readonly string[] = [
+  'CREATE INDEX IF NOT EXISTS idx_watcher_tasks_status_created_at ON watcher_tasks (status, created_at)',
+  'CREATE INDEX IF NOT EXISTS idx_webhook_events_status_created_at ON webhook_events (status, created_at)',
+  'CREATE INDEX IF NOT EXISTS idx_auth_challenges_expires_at ON auth_challenges (expires_at)',
+  'CREATE INDEX IF NOT EXISTS idx_idempotency_keys_created_at ON idempotency_keys (created_at)',
+];
+
+export const POSTGRES_INDEX_STATEMENTS: readonly string[] = [
+  'CREATE INDEX IF NOT EXISTS idx_watcher_tasks_status_created_at ON watcher_tasks (status, created_at)',
+  'CREATE INDEX IF NOT EXISTS idx_webhook_events_status_created_at ON webhook_events (status, created_at)',
+  'CREATE INDEX IF NOT EXISTS idx_auth_challenges_expires_at ON auth_challenges (expires_at)',
+  'CREATE INDEX IF NOT EXISTS idx_idempotency_keys_created_at ON idempotency_keys (created_at)',
+];
+
 function nowIso(): string {
   return new Date().toISOString();
 }
@@ -287,15 +311,6 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
           processed_at TEXT,
           created_at TEXT NOT NULL
         );
-
-        CREATE INDEX IF NOT EXISTS idx_interactive_transactions_status_created_at
-          ON interactive_transactions (status, created_at);
-        CREATE INDEX IF NOT EXISTS idx_watcher_tasks_status_created_at
-          ON watcher_tasks (status, created_at);
-        CREATE INDEX IF NOT EXISTS idx_webhook_events_status_created_at
-          ON webhook_events (status, created_at);
-        CREATE INDEX IF NOT EXISTS idx_auth_challenges_expires_at
-          ON auth_challenges (expires_at);
       `);
       const idempotencyColumns = this.sqlite
         .prepare('PRAGMA table_info(idempotency_keys)')
@@ -304,6 +319,9 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
         this.sqlite.exec(
           "ALTER TABLE idempotency_keys ADD COLUMN status TEXT NOT NULL DEFAULT 'completed'",
         );
+      }
+      for (const statement of SQLITE_INDEX_STATEMENTS) {
+        this.sqlite.exec(statement);
       }
       return;
     }
@@ -370,22 +388,9 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
           created_at TIMESTAMPTZ NOT NULL
         );
       `);
-      await this.postgres.query(`
-        CREATE INDEX IF NOT EXISTS idx_interactive_transactions_status_created_at
-          ON interactive_transactions (status, created_at);
-      `);
-      await this.postgres.query(`
-        CREATE INDEX IF NOT EXISTS idx_watcher_tasks_status_created_at
-          ON watcher_tasks (status, created_at);
-      `);
-      await this.postgres.query(`
-        CREATE INDEX IF NOT EXISTS idx_webhook_events_status_created_at
-          ON webhook_events (status, created_at);
-      `);
-      await this.postgres.query(`
-        CREATE INDEX IF NOT EXISTS idx_auth_challenges_expires_at
-          ON auth_challenges (expires_at);
-      `);
+      for (const statement of POSTGRES_INDEX_STATEMENTS) {
+        await this.postgres.query(statement);
+      }
       return;
     }
 

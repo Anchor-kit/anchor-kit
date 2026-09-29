@@ -33,6 +33,22 @@ describe('SqlDatabaseAdapter – cleanupOldRecords (sqlite)', () => {
     }
   });
 
+  it('creates supporting indexes for watcher and retention queries', () => {
+    const indexes = raw
+      .prepare(
+        `SELECT name, tbl_name FROM sqlite_master WHERE type = 'index' AND name LIKE 'idx_%' ORDER BY name`,
+      )
+      .all() as Array<{ name: string; tbl_name: string }>;
+    const byName = new Map(indexes.map((i) => [i.name, i.tbl_name]));
+
+    expect(byName.get('idx_watcher_tasks_status_created_at')).toBe('watcher_tasks');
+    expect(byName.get('idx_watcher_tasks_status_processed_at')).toBe('watcher_tasks');
+    expect(byName.get('idx_webhook_events_status_created_at')).toBe('webhook_events');
+    expect(byName.get('idx_webhook_events_status_processed_at')).toBe('webhook_events');
+    expect(byName.get('idx_auth_challenges_expires_at')).toBe('auth_challenges');
+    expect(byName.get('idx_idempotency_keys_created_at')).toBe('idempotency_keys');
+  });
+
   it('retains rows exactly on the cleanup cutoff while removing strictly older rows', async () => {
     const challengeExpired = `challenge-expired-${randomUUID()}`;
     const challengeKept = `challenge-kept-${randomUUID()}`;
@@ -63,19 +79,19 @@ describe('SqlDatabaseAdapter – cleanupOldRecords (sqlite)', () => {
     const scope = `scope-${randomUUID()}`;
     raw
       .prepare(
-        `INSERT INTO-idempotency_keys (id, scope, idempotency_key, request_hash, status_code, response_body, created_at)
+        `INSERT INTO idempotency_keys (id, scope, idempotency_key, request_hash, status_code, response_body, created_at)
          VALUES (?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(idemOldId, scope, 'old-key', 'hash-a', 200, '{}', BEFORE );
     raw
       .prepare(
-        `INSERT INTO-idempotency_keys (id, scope, idempotency_key, request_hash, status_code, response_body, created_at)
+        `INSERT INTO idempotency_keys (id, scope, idempotency_key, request_hash, status_code, response_body, created_at)
          VALUES (?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(idemExactId, scope, 'exact-key', 'hash-e', 200, '{}', CUTOFF);
     raw
       .prepare(
-        `INSERT INTO-idempotency_keys (id, scope, idempotency_key, request_hash, status_code, response_body, created_at)
+        `INSERT INTO idempotency_keys (id, scope, idempotency_key, request_hash, status_code, response_body, created_at)
          VALUES (?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(idemNewId, scope, 'new-key', 'hash-b', 200, '{}', AFTER);
@@ -88,14 +104,14 @@ describe('SqlDatabaseAdapter – cleanupOldRecords (sqlite)', () => {
 
     raw
       .prepare(
-        `INSERT INTO-webhook_events (id, event_id, provider, payload, status, error_message, processed_at, created_at)
-         VALUES (?, |, |, |, 'processed', NULL, ?, ?)`,
+        `INSERT INTO webhook_events (id, event_id, provider, payload, status, error_message, processed_at, created_at)
+         VALUES (?, , ?, ?, 'processed', NULL, ?,/ ?)`,
       )
       .run(whOldProcessedId, `evt-op-${randomUUID()}`, 'test', payload, BEFORE, BEFORE );
     raw
       .prepare(
-        `INSERT INTO-webhook_events (id, event_id, provider, payload, status, error_message, processed_at, created_at)
-         VALUES (?, |, |, |, 'processed', NULL, ?, ?)`,
+        `INSERT INTO webhook_events (id, event_id, provider, payload, status, error_message, processed_at, created_at)
+         VALUES (?, , ?, ?, 'processed', NULL, ?,/ ?)`,
       )
       .run(whExactProcessedId, `evt-exact-${randomUUID()}`, 'test', payload, CUTOFF, CUTOFF);
     raw
@@ -106,8 +122,8 @@ describe('SqlDatabaseAdapter – cleanupOldRecords (sqlite)', () => {
       .run(whOldPendingId, `evt-pend-${randomUUID()}`, 'test', payload, BEFORE );
     raw
       .prepare(
-        `INSERT INTO-webhook_events (id, event_id, provider, payload, status, error_message, processed_at, created_at)
-         VALUES (?, |, |, |, 'processed', NULL, ?, ?)`,
+        `INSERT INTO webhook_events (id, event_id, provider, payload, status, error_message, processed_at, created_at)
+         VALUES (?, , ?, ?, 'processed', NULL, ?,/ ?)`,
       )
       .run(whNewProcessedId, `evt-new-${randomUUID()}`, 'test', payload, AFTER, AFTER);
 
@@ -119,13 +135,13 @@ describe('SqlDatabaseAdapter – cleanupOldRecords (sqlite)', () => {
 
     raw
       .prepare(
-        `INSERT INTO-watcher_tasks (id, watcher_name, payload, status, error_message, processed_at, created_at)
+        `INSERT INTO watcher_tasks (id, watcher_name, payload, status, error_message, processed_at, created_at)
          VALUES (?, 'w', ?, 'processed', NULL, ?, ?)`,
       )
       .run(wOldProcessedId, taskPayload, BEFORE, BEFORE );
     raw
       .prepare(
-        `INSERT INTO-watcher_tasks (id, watcher_name, payload, status, error_message, processed_at, created_at)
+        `INSERT INTO watcher_tasks (id, watcher_name, payload, status, error_message, processed_at, created_at)
          VALUES (?, 'w', ?, 'processed', NULL, ?, ?)`,
       )
       .run(wExactProcessedId, taskPayload, CUTOFF, CUTOFF);
@@ -134,13 +150,13 @@ describe('SqlDatabaseAdapter – cleanupOldRecords (sqlite)', () => {
         `INSERT INTO watcher_tasks (id, watcher_name, payload, status, error_message, processed_at, created_at)
          VALUES (?, 'w', ?, 'pending', NULL, NULL, ?)`,
       )
-      .run(wOldPendingId, taskPayload, BEFORE);
+      .run(wOldPendingId, taskPayload, BEFORE );
     raw
       .prepare(
-        `INSERT INTO-watcher_tasks (id, watcher_name, payload, status, error_message, processed_at, created_at)
-         VALUES (?, 'w', ?, 'processed', NULL, ?, ?)`,
+        `INSERT INTO watcher_tasks (id, watcher_name, payload, status, error_message, processed_at, created_at)
+         VALUES (?, 'w', ?, 'processed', NULL, ?,/ ?)`,
       )
-      .run(wNewProcessedId, taskPayload, ATER, ATER);
+      .run(wNewProcessedId, taskPayload, AFTER, AFTER);
 
     await db.cleanupOldRecords(CUTOFF);
 
@@ -186,7 +202,7 @@ describe('SqlDatabaseAdapter – cleanupOldRecords (sqlite)', () => {
     raw
       .prepare(
         `INSERT INTO webhook_events (id, event_id, provider, payload, status, error_message, processed_at, created_at)
-         VALUES (?, ?, ?, ?, 'processed', NULL, ?, ?)`,
+         VALUES (?, ?, ?, ?, 'processed', NULL, ?,/ ?)`,
       )
       .run(invalidRowId, eventId, 'test', '{not valid json}', CUTOFF, CUTOFF);
 
@@ -198,17 +214,5 @@ describe('SqlDatabaseAdapter – cleanupOldRecords (sqlite)', () => {
         payload: {},
       }),
     ).rejects.toThrow(/malformed/i);
-  });
-
-  it('creates supporting indexes for watcher and retention queries', () => {
-    const indexNames = (
-      raw.prepare("SELECT name FROM sqlite_master WHERE type = 'index'").all() as Array<{
-        name: string;
-      }>
-    ).map((row) => row.name);
-
-    expect(indexNames).some((name) => /idempotency_keys.*(created_at|expires_at)/i.test(name)).toBeTrue();
-    expect(indexNames).some((name) => /webhook_events.*(status|processed_at|created_at)/i.test(name)).toBeTrue();
-    expect(indexNames).some((name) => /watcher_tasks.*(status|processed_at|created_at)/i.test(name)).toBeTrue();
   });
 });
