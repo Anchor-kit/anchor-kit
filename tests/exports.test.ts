@@ -14,7 +14,7 @@ describe('package root exports', () => {
       return undefined;
     };
 
-    const job: QueueJob = { type: 'cleanup_records', payload: {} };
+    const job: QueueJob = { type: 'cleanup_records', payload: { retentionDays: 90 } };
     const adapter: QueueAdapter = {
       status: { pending: 0, active: 0 },
       async enqueue(_job) {},

@@ -113,7 +113,7 @@ describe('Export Verification', () => {
       kind: 'deposit',
       assetCode: 'USDC',
       amount: '100',
-      status: 'pending',
+      status: 'pending_anchor',
       createdAt: '2026-07-27T00:00:00.000Z',
       updatedAt: '2026-07-27T00:00:00.000Z',
     };
@@ -128,6 +128,7 @@ describe('Export Verification', () => {
       scope: 'webhook',
       idempotencyKey: 'key-1',
       requestHash: 'hash-1',
+      status: 'completed',
       statusCode: 200,
       responseBody: '{}',
       createdAt: new Date(0).toISOString(),

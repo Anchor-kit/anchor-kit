@@ -1,4 +1,6 @@
 import { Keypair } from '@stellar/stellar-sdk';
+import type { QueueAdapter, QueueJob } from '@/runtime/interfaces.ts';
+import { TransactionWatcher } from '@/runtime/watchers/transaction-watcher.ts';
 import { describe, expect, it } from 'vitest';
 import { createAnchor } from '@/index.ts';
 
@@ -60,6 +62,59 @@ class MockWatcher {
 }
 
 describe('AnchorInstance concurrent background startup', () => {
+  it.each([
+    ['uses the operational retention value when both settings are configured', 21, 45, 21],
+    ['uses the watcher retention value when the operational setting is absent', undefined, 45, 45],
+  ])(
+    '%s',
+    async (_description, transactionRetentionDays, watcherRetentionDays, expectedRetentionDays) => {
+      const anchor = createAnchor({
+        network: { network: 'testnet' },
+        server: { interactiveDomain: 'https://anchor.example.com' },
+        security: {
+          sep10SigningKey: Keypair.random().secret(),
+          interactiveJwtSecret: 'jwt-test-secret',
+          distributionAccountSecret: 'distribution-test-secret',
+        },
+        assets: {
+          assets: [
+            {
+              code: 'USDC',
+              issuer: 'GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5',
+            },
+          ],
+        },
+        operational:
+          transactionRetentionDays === undefined ? undefined : { transactionRetentionDays },
+        framework: {
+          database: { provider: 'sqlite', url: 'file::memory:' },
+          watchers: { retentionDays: watcherRetentionDays },
+        },
+      });
+      const cleanupJobs: QueueJob[] = [];
+
+      await anchor.init();
+      const watcher = (anchor as unknown as { watchers: TransactionWatcher[] }).watchers[0];
+      (watcher as unknown as { queue: QueueAdapter }).queue = {
+        enqueue: async (job) => {
+          cleanupJobs.push(job);
+        },
+        start: async () => undefined,
+        stop: async () => undefined,
+      };
+
+      await watcher.start();
+
+      expect(cleanupJobs).toContainEqual({
+        type: 'cleanup_records',
+        payload: { retentionDays: expectedRetentionDays },
+      });
+
+      await watcher.stop();
+      await anchor.shutdown();
+    },
+  );
+
   it('does not start duplicate background work when startBackgroundJobs is called concurrently', async () => {
     const anchor = createAnchor({
       network: { network: 'testnet' },

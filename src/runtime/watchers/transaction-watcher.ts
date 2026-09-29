@@ -58,14 +58,22 @@ export class TransactionWatcher implements Watcher {
   }
 
   public async stop(): Promise<void> {
-    if (!this.timer) return;
-    clearInterval(this.timer);
-    this.timer = null;
-
-    // Wait for any active tick to complete
-    if (this.tickPromise) {
-      await this.tickPromise;
+    if (this.timer) {
+      clearInterval(this.timer);
+      this.timer = null;
     }
+
+    const activeTick = this.tickPromise;
+    if (activeTick) {
+      try {
+        await activeTick;
+      } catch {
+        // Ignore transient tick failures during shutdown so timers and lifecycle state can settle.
+      }
+    }
+
+    this.isTickInProgress = false;
+    this.tickPromise = null;
   }
 
   private async tick(): Promise<void> {

@@ -71,6 +71,68 @@ describe('SqlDatabaseAdapter – webhook event deduplication (sqlite)', () => {
     expect(duplicate.record.payload).toEqual(payload);
   });
 
+  it('allows a failed event to retry once by resetting it to pending', async () => {
+    const eventId = `evt-${randomUUID()}`;
+    const payload = { type: 'payment.completed', amount: '200' };
+
+    const first = await db.insertOrGetWebhookEvent({
+      id: randomUUID(),
+      eventId,
+      provider: 'test-provider',
+      payload,
+    });
+    expect(first.inserted).toBe(true);
+
+    await db.updateWebhookEventStatus({
+      id: first.record.id,
+      status: 'failed',
+      errorMessage: 'temporary failure',
+    });
+
+    const retry = await db.insertOrGetWebhookEvent({
+      id: randomUUID(),
+      eventId,
+      provider: 'test-provider',
+      payload: { type: 'payment.completed', amount: '250' },
+    });
+
+    expect(retry.inserted).toBe(true);
+    expect(retry.record.id).toBe(first.record.id);
+    expect(retry.record.eventId).toBe(eventId);
+    expect(retry.record.status).toBe('pending');
+    expect(retry.record.payload).toEqual({ type: 'payment.completed', amount: '250' });
+  });
+
+  it('treats a processed event as a permanent duplicate', async () => {
+    const eventId = `evt-${randomUUID()}`;
+    const payload = { type: 'payment.completed', amount: '200' };
+
+    const first = await db.insertOrGetWebhookEvent({
+      id: randomUUID(),
+      eventId,
+      provider: 'test-provider',
+      payload,
+    });
+    expect(first.inserted).toBe(true);
+
+    await db.updateWebhookEventStatus({
+      id: first.record.id,
+      status: 'processed',
+    });
+
+    const duplicate = await db.insertOrGetWebhookEvent({
+      id: randomUUID(),
+      eventId,
+      provider: 'test-provider',
+      payload: { type: 'tampered', amount: '999' },
+    });
+
+    expect(duplicate.inserted).toBe(false);
+    expect(duplicate.record.id).toBe(first.record.id);
+    expect(duplicate.record.status).toBe('processed');
+    expect(duplicate.record.payload).toEqual(payload);
+  });
+
   it('different event_ids are each inserted independently', async () => {
     const eventIdA = `evt-${randomUUID()}`;
     const eventIdB = `evt-${randomUUID()}`;

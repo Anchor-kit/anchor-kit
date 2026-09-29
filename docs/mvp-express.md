@@ -44,6 +44,41 @@ Anchor-Kit auto-creates MVP tables during `anchor.init()`:
 
 PostgreSQL is the preferred production path.
 
+### SQLite concurrency settings
+
+When `database.provider` is `sqlite`, Anchor-Kit tunes each connection for the
+overlapping webhook, watcher, and idempotency writes described in
+[SQLite concurrency](sqlite-concurrency.md):
+
+- `PRAGMA journal_mode = WAL` for file-backed databases, so readers keep working
+  while a single writer commits.
+- `PRAGMA busy_timeout = 5000`, so a blocked writer retries instead of failing
+  immediately with `SQLITE_BUSY`.
+
+In-memory URLs such as `:memory:` or `file::memory:` keep SQLite's `memory`
+journal mode (and still get the busy timeout), so test databases are unaffected.
+
+### Deposit idempotency
+
+Idempotency keys are scoped to the authenticated account. Reusing a key with a different request
+body returns `409 idempotency_conflict`. A matching request that is still running returns
+`409 idempotency_in_progress` with `Retry-After: 1`; retry after that interval. Completed requests
+with the same key and body receive the cached response. The transaction and cached response are
+written atomically. If either write fails, the request returns `500`, both writes roll back, and
+the reservation is removed so the key can be retried. An incomplete cached response returns
+`503 idempotency_response_unavailable` with `Retry-After`.
+
+### SEP-10 challenge expiry
+
+The signed XDR time bounds allow a challenge from `minTime` up to, but not including, `maxTime`.
+The API treats a challenge as expired at `maxTime`.
+
+### Asset issuers
+
+Native XLM configuration omits `issuer`. Issued assets require a valid Stellar public key issuer.
+
+`min_amount` and `max_amount` accept finite, nonnegative numbers. Integer bounds must be safe JavaScript integers. Decimal bounds must keep the same value when rounded to 15 significant digits. When both bounds are set, `min_amount` must not exceed `max_amount`.
+
 ## 4) Express integration
 
 ```ts
@@ -61,7 +96,10 @@ app.use(
 
 const anchor = createAnchor({
   network: { network: 'testnet' },
-  server: { interactiveDomain: 'https://anchor.example.com' },
+  server: {
+    interactiveDomain: 'https://anchor.example.com',
+    corsOrigins: ['https://app.example.test'],
+  },
   security: {
     sep10SigningKey: process.env.SEP10_SIGNING_KEY!,
     interactiveJwtSecret: process.env.INTERACTIVE_JWT_SECRET!,
@@ -116,6 +154,22 @@ process.on('SIGTERM', async () => {
 ```
 
 Webhook signature verification depends on the exact raw request body bytes. Configure the JSON parser `verify` hook before mounting `anchor.getExpressRouter()` so Anchor-Kit can compare the incoming `x-anchor-signature` against the unmodified payload.
+
+### Browser requests and CORS
+
+Set `server.corsOrigins` to the exact browser origins allowed to call the API. Include the scheme and port when present, with no path or trailing slash. For example, `https://app.example.test` does not allow `https://admin.example.test` or `http://app.example.test`.
+
+When the router receives an `OPTIONS` request, it responds with `204`. For an allowed `Origin`, it also returns that origin in `Access-Control-Allow-Origin`, allows `GET`, `POST`, and `OPTIONS`, and permits `Content-Type`, `Authorization`, `Idempotency-Key`, `X-Anchor-Signature`, and `X-Webhook-Provider`. Requests with a missing or unlisted origin receive no `Access-Control-Allow-Origin` header. Browsers then prevent page code from reading the response. CORS does not prevent other clients from sending requests.
+
+The router does not enable credentialed browser requests: it does not return `Access-Control-Allow-Credentials`. Use bearer tokens in the `Authorization` header. The host application must let `OPTIONS` reach the Anchor-Kit router and preserve its CORS response headers. If another middleware handles CORS, configure it to use the same origin and header policy.
+
+For example, a browser request with a bearer token triggers a preflight because it uses `Authorization`:
+
+```ts
+const response = await fetch('https://anchor.example.com/anchor/info', {
+  headers: { Authorization: `Bearer ${token}` },
+});
+```
 
 ## 5) Webhook callback behavior
 

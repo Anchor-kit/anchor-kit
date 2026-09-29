@@ -1,13 +1,9 @@
-import type {
-  DatabaseAdapter,
-  WebhookEventRecord,
-  WebhookProcessor,
-} from '@/runtime/interfaces.ts';
-import type { AnchorKitConfig } from '@/types/config.ts';
+import type { DatabaseAdapter, WebhookProcessor } from '@/runtime/interfaces.ts';
+import type { AnchorKitConfigSnapshot } from '@/types/config.ts';
 import { createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
 
 interface DefaultWebhookProcessorOptions {
-  config: AnchorKitConfig;
+  config: AnchorKitConfigSnapshot;
   database: DatabaseAdapter;
 }
 
@@ -27,7 +23,7 @@ function safeEquals(left: string, right: string): boolean {
 }
 
 export class DefaultWebhookProcessor implements WebhookProcessor {
-  private readonly config: AnchorKitConfig;
+  private readonly config: AnchorKitConfigSnapshot;
   private readonly database: DatabaseAdapter;
 
   constructor(options: DefaultWebhookProcessorOptions) {
@@ -41,11 +37,7 @@ export class DefaultWebhookProcessor implements WebhookProcessor {
     payload: Record<string, unknown>;
     rawBody: string | Buffer | Uint8Array;
     signature?: string;
-  }): Promise<{
-    duplicate: boolean;
-    eventId: string;
-    status?: WebhookEventRecord['status'];
-  }> {
+  }): Promise<{ duplicate: boolean; eventId: string; provider: string }> {
     this.verifySignatureIfEnabled(input);
 
     const insertion = await this.database.insertOrGetWebhookEvent({
@@ -59,7 +51,7 @@ export class DefaultWebhookProcessor implements WebhookProcessor {
       return {
         duplicate: true,
         eventId: insertion.record.eventId,
-        status: insertion.record.status,
+        provider: insertion.record.provider,
       };
     }
 
@@ -91,7 +83,11 @@ export class DefaultWebhookProcessor implements WebhookProcessor {
       throw error;
     }
 
-    return { duplicate: false, eventId: insertion.record.eventId };
+    return {
+      duplicate: false,
+      eventId: insertion.record.eventId,
+      provider: insertion.record.provider,
+    };
   }
 
   private verifySignatureIfEnabled(input: {

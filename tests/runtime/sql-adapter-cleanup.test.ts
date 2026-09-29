@@ -33,9 +33,10 @@ describe('SqlDatabaseAdapter – cleanupOldRecords (sqlite)', () => {
     }
   });
 
-  it('removes expired operational rows and leaves rows that are not cleanup-eligible', async () => {
+  it('retains rows exactly on the cleanup cutoff while removing strictly older rows', async () => {
     const challengeExpired = `challenge-expired-${randomUUID()}`;
     const challengeKept = `challenge-kept-${randomUUID()}`;
+    const challengeExact = `challenge-exact-${randomUUID()}`;
 
     await db.insertAuthChallenge({
       id: randomUUID(),
@@ -45,12 +46,19 @@ describe('SqlDatabaseAdapter – cleanupOldRecords (sqlite)', () => {
     });
     await db.insertAuthChallenge({
       id: randomUUID(),
+      account: 'GEXACT',
+      challenge: challengeExact,
+      expiresAt: CUTOFF,
+    });
+    await db.insertAuthChallenge({
+      id: randomUUID(),
       account: 'GKEPT',
       challenge: challengeKept,
       expiresAt: AFTER,
     });
 
     const idemOldId = randomUUID();
+    const idemExactId = randomUUID();
     const idemNewId = randomUUID();
     const scope = `scope-${randomUUID()}`;
     raw
@@ -64,9 +72,16 @@ describe('SqlDatabaseAdapter – cleanupOldRecords (sqlite)', () => {
         `INSERT INTO idempotency_keys (id, scope, idempotency_key, request_hash, status_code, response_body, created_at)
          VALUES (?, ?, ?, ?, ?, ?, ?)`,
       )
+      .run(idemExactId, scope, 'exact-key', 'hash-e', 200, '{}', CUTOFF);
+    raw
+      .prepare(
+        `INSERT INTO idempotency_keys (id, scope, idempotency_key, request_hash, status_code, response_body, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      )
       .run(idemNewId, scope, 'new-key', 'hash-b', 200, '{}', AFTER);
 
     const whOldProcessedId = randomUUID();
+    const whExactProcessedId = randomUUID();
     const whOldPendingId = randomUUID();
     const whNewProcessedId = randomUUID();
     const payload = '{}';
@@ -77,6 +92,12 @@ describe('SqlDatabaseAdapter – cleanupOldRecords (sqlite)', () => {
          VALUES (?, ?, ?, ?, 'processed', NULL, ?, ?)`,
       )
       .run(whOldProcessedId, `evt-op-${randomUUID()}`, 'test', payload, BEFORE, BEFORE);
+    raw
+      .prepare(
+        `INSERT INTO webhook_events (id, event_id, provider, payload, status, error_message, processed_at, created_at)
+         VALUES (?, ?, ?, ?, 'processed', NULL, ?, ?)`,
+      )
+      .run(whExactProcessedId, `evt-exact-${randomUUID()}`, 'test', payload, CUTOFF, CUTOFF);
     raw
       .prepare(
         `INSERT INTO webhook_events (id, event_id, provider, payload, status, error_message, processed_at, created_at)
@@ -91,6 +112,7 @@ describe('SqlDatabaseAdapter – cleanupOldRecords (sqlite)', () => {
       .run(whNewProcessedId, `evt-new-${randomUUID()}`, 'test', payload, AFTER, AFTER);
 
     const wOldProcessedId = randomUUID();
+    const wExactProcessedId = randomUUID();
     const wOldPendingId = randomUUID();
     const wNewProcessedId = randomUUID();
     const taskPayload = '{}';
@@ -101,6 +123,12 @@ describe('SqlDatabaseAdapter – cleanupOldRecords (sqlite)', () => {
          VALUES (?, 'w', ?, 'processed', NULL, ?, ?)`,
       )
       .run(wOldProcessedId, taskPayload, BEFORE, BEFORE);
+    raw
+      .prepare(
+        `INSERT INTO watcher_tasks (id, watcher_name, payload, status, error_message, processed_at, created_at)
+         VALUES (?, 'w', ?, 'processed', NULL, ?, ?)`,
+      )
+      .run(wExactProcessedId, taskPayload, CUTOFF, CUTOFF);
     raw
       .prepare(
         `INSERT INTO watcher_tasks (id, watcher_name, payload, status, error_message, processed_at, created_at)
@@ -117,10 +145,12 @@ describe('SqlDatabaseAdapter – cleanupOldRecords (sqlite)', () => {
     await db.cleanupOldRecords(CUTOFF);
 
     expect(await db.getAuthChallengeByChallenge(challengeExpired)).toBeNull();
+    expect(await db.getAuthChallengeByChallenge(challengeExact)).not.toBeNull();
     const keptAuth = await db.getAuthChallengeByChallenge(challengeKept);
     expect(keptAuth).not.toBeNull();
 
     expect(await db.getIdempotencyRecord(scope, 'old-key')).toBeNull();
+    expect(await db.getIdempotencyRecord(scope, 'exact-key')).not.toBeNull();
     expect(await db.getIdempotencyRecord(scope, 'new-key')).not.toBeNull();
 
     const webhookCount = (id: string) =>
@@ -132,6 +162,7 @@ describe('SqlDatabaseAdapter – cleanupOldRecords (sqlite)', () => {
         ).c,
       );
     expect(webhookCount(whOldProcessedId)).toBe(0);
+    expect(webhookCount(whExactProcessedId)).toBe(1);
     expect(webhookCount(whOldPendingId)).toBe(1);
     expect(webhookCount(whNewProcessedId)).toBe(1);
 
@@ -144,7 +175,28 @@ describe('SqlDatabaseAdapter – cleanupOldRecords (sqlite)', () => {
         ).c,
       );
     expect(watcherCount(wOldProcessedId)).toBe(0);
+    expect(watcherCount(wExactProcessedId)).toBe(1);
     expect(watcherCount(wOldPendingId)).toBe(1);
     expect(watcherCount(wNewProcessedId)).toBe(1);
+  });
+
+  it('throws when persisted JSON payloads are malformed instead of silently coercing to empty objects', async () => {
+    const eventId = `evt-invalid-${randomUUID()}`;
+    const invalidRowId = randomUUID();
+    raw
+      .prepare(
+        `INSERT INTO webhook_events (id, event_id, provider, payload, status, error_message, processed_at, created_at)
+         VALUES (?, ?, ?, ?, 'processed', NULL, ?, ?)`,
+      )
+      .run(invalidRowId, eventId, 'test', '{not valid json}', CUTOFF, CUTOFF);
+
+    await expect(
+      db.insertOrGetWebhookEvent({
+        id: randomUUID(),
+        eventId,
+        provider: 'test',
+        payload: {},
+      }),
+    ).rejects.toThrow(/malformed/i);
   });
 });

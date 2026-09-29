@@ -1,4 +1,5 @@
 import type { AnchorKitConfig, Asset, NetworkConfig, SecurityConfig } from '@/types/config.ts';
+import { StrKey } from '@stellar/stellar-sdk';
 import DOMPurify from 'isomorphic-dompurify';
 import type { ServerConfig } from '../types/config.ts';
 
@@ -25,6 +26,12 @@ function isValidIso4217CurrencyCode(value: unknown): value is string {
   return typeof value === 'string' && /^[A-Z]{3}$/.test(value);
 }
 
+function isSafePositiveInteger(value: unknown): value is number {
+  return (
+    typeof value === 'number' && Number.isInteger(value) && Number.isSafeInteger(value) && value > 0
+  );
+}
+
 function isValidUrlString(url: string): boolean {
   try {
     const parsed = new URL(url);
@@ -32,6 +39,16 @@ function isValidUrlString(url: string): boolean {
   } catch {
     return false;
   }
+}
+
+function isValidClientDomain(value: unknown): value is string {
+  return (
+    typeof value === 'string' &&
+    value.length <= 64 &&
+    /^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)(?:\.(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?))*$/i.test(
+      value,
+    )
+  );
 }
 
 function isValidDatabaseUrlString(urlString: unknown): boolean {
@@ -44,11 +61,16 @@ function isValidDatabaseUrlString(urlString: unknown): boolean {
 }
 
 function isValidStellarAssetCode(code: string): boolean {
-  return /^[a-zA-Z0-9]{1,12}$/.test(code);
+  return code === code.trim() && /^[a-zA-Z0-9]{1,12}$/.test(code);
 }
 
 function isValidAssetAmount(value: unknown): value is number {
-  return typeof value === 'number' && Number.isFinite(value) && value >= 0;
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) return false;
+  if (Number.isSafeInteger(value)) return true;
+  if (value > Number.MAX_SAFE_INTEGER) return false;
+
+  // Accept decimal bounds only when 15 significant digits reproduce the same number.
+  return Number(value.toPrecision(15)) === value;
 }
 
 function validateAssetAmountRange(asset: { min_amount?: number; max_amount?: number }): boolean {
@@ -64,7 +86,7 @@ function validateFrameworkDatabase(framework: AnchorKitConfig['framework']): boo
     throw new Error('Missing required database configuration in framework.database');
   }
 
-  if (framework.database.provider === 'mysql') {
+  if (String(framework.database.provider) === 'mysql') {
     throw new Error(
       'MySQL is not currently supported in this MVP. Please use "postgres" or "sqlite".',
     );
@@ -172,6 +194,63 @@ function validateFrameworkRateLimit(framework: AnchorKitConfig['framework']): bo
   return true;
 }
 
+function validateKycConfig(kyc: AnchorKitConfig['kyc']): boolean {
+  if (kyc === undefined) return true;
+  if (!kyc || typeof kyc !== 'object' || Array.isArray(kyc)) {
+    throw new Error('kyc must be an object');
+  }
+
+  if (kyc.level !== undefined && !['none', 'basic', 'strict'].includes(kyc.level)) {
+    throw new Error('kyc.level must be one of: none, basic, strict');
+  }
+
+  const booleanKeys = [
+    'requireDocuments',
+    'requireName',
+    'requireAddress',
+    'requireEmail',
+    'requirePhoneNumber',
+    'requireBirthDate',
+  ] as const;
+
+  for (const key of booleanKeys) {
+    const value = kyc[key];
+    if (value !== undefined && typeof value !== 'boolean') {
+      throw new Error(`kyc.${key} must be a boolean`);
+    }
+  }
+
+  const { minAge, maxAge } = kyc;
+
+  if (minAge !== undefined) {
+    if (
+      typeof minAge !== 'number' ||
+      !Number.isFinite(minAge) ||
+      minAge < 0 ||
+      !Number.isInteger(minAge)
+    ) {
+      throw new Error('kyc.minAge must be a finite non-negative integer');
+    }
+  }
+
+  if (maxAge !== undefined) {
+    if (
+      typeof maxAge !== 'number' ||
+      !Number.isFinite(maxAge) ||
+      maxAge < 0 ||
+      !Number.isInteger(maxAge)
+    ) {
+      throw new Error('kyc.maxAge must be a finite non-negative integer');
+    }
+  }
+
+  if (minAge !== undefined && maxAge !== undefined && minAge > maxAge) {
+    throw new Error('kyc.minAge must be less than or equal to kyc.maxAge');
+  }
+
+  return true;
+}
+
 function validateFrameworkUrls(
   metadata: AnchorKitConfig['metadata'],
   server: AnchorKitConfig['server'],
@@ -183,6 +262,24 @@ function validateFrameworkUrls(
 
   if (metadata?.tomlUrl && !isValidUrlString(metadata.tomlUrl)) {
     throw new Error('Invalid URL format for metadata.tomlUrl');
+  }
+
+  if (
+    metadata?.documentationUrls?.apiDocs &&
+    !isValidUrlString(metadata.documentationUrls.apiDocs)
+  ) {
+    throw new Error('Invalid URL format for metadata.documentationUrls.apiDocs');
+  }
+
+  if (
+    metadata?.documentationUrls?.support &&
+    !isValidUrlString(metadata.documentationUrls.support)
+  ) {
+    throw new Error('Invalid URL format for metadata.documentationUrls.support');
+  }
+
+  if (metadata?.documentationUrls?.terms && !isValidUrlString(metadata.documentationUrls.terms)) {
+    throw new Error('Invalid URL format for metadata.documentationUrls.terms');
   }
 
   if (operational?.website && !isValidUrlString(operational.website)) {
@@ -199,16 +296,87 @@ function validateFrameworkUrls(
   return true;
 }
 
+function validateMetadataFeatures(metadata: AnchorKitConfig['metadata']): boolean {
+  const features = metadata?.features;
+  if (!features) return true;
+
+  for (const key of [
+    'supportsInteractiveDeposits',
+    'supportsInteractiveWithdrawals',
+    'supportsAsyncTransactionStatus',
+  ] as const) {
+    const value = features[key];
+    if (value !== undefined && typeof value !== 'boolean') {
+      throw new Error(`metadata.features.${key} must be a boolean`);
+    }
+  }
+
+  return true;
+}
+
+function validateOperationalNumbers(operational: AnchorKitConfig['operational']): boolean {
+  const retentionDays = operational?.transactionRetentionDays;
+  if (retentionDays !== undefined && (!Number.isSafeInteger(retentionDays) || retentionDays <= 0)) {
+    throw new Error('operational.transactionRetentionDays must be a positive safe integer');
+  }
+
+  return true;
+}
+
+function validateOperationalBooleans(operational: AnchorKitConfig['operational']): boolean {
+  const webhooksEnabled = operational?.webhooksEnabled;
+  if (webhooksEnabled !== undefined && typeof webhooksEnabled !== 'boolean') {
+    throw new Error('operational.webhooksEnabled must be a boolean');
+  }
+
+  const corsEnabled = operational?.corsEnabled;
+  if (corsEnabled !== undefined && typeof corsEnabled !== 'boolean') {
+    throw new Error('operational.corsEnabled must be a boolean');
+  }
+
+  return true;
+}
+
 function validateFrameworkConfig(
   framework: AnchorKitConfig['framework'],
   server: AnchorKitConfig['server'],
   metadata: AnchorKitConfig['metadata'],
   operational: AnchorKitConfig['operational'],
 ): boolean {
+  validateFrameworkPlugins(framework.plugins);
   validateFrameworkDatabase(framework);
   validateFrameworkNumbers(framework);
   validateFrameworkRateLimit(framework);
   validateFrameworkUrls(metadata, server, operational);
+  validateMetadataFeatures(metadata);
+  validateOperationalNumbers(operational);
+  validateOperationalBooleans(operational);
+  return true;
+}
+
+function validateFrameworkPlugins(plugins: unknown): boolean {
+  if (plugins === undefined) return true;
+  if (!Array.isArray(plugins)) {
+    throw new Error('framework.plugins must be an array');
+  }
+
+  const seenIds = new Set<string>();
+  for (const [index, plugin] of plugins.entries()) {
+    if (typeof plugin !== 'object' || plugin === null || Array.isArray(plugin)) {
+      throw new Error(`framework.plugins[${index}] must be an object`);
+    }
+
+    const pluginId = (plugin as Record<string, unknown>).id;
+    if (typeof pluginId !== 'string' || pluginId.length === 0 || pluginId.trim() !== pluginId) {
+      throw new Error(`framework.plugins[${index}].id must be a non-empty trimmed string`);
+    }
+
+    if (seenIds.has(pluginId)) {
+      throw new Error(`framework.plugins[${index}].id duplicates "${pluginId}"`);
+    }
+    seenIds.add(pluginId);
+  }
+
   return true;
 }
 
@@ -217,7 +385,11 @@ function validateAsset(asset: unknown): asset is Asset {
   const a = asset as Record<string, unknown>;
 
   if (!isNonEmptyString(a.code) || !isValidStellarAssetCode(a.code)) return false;
-  if (!isString(a.issuer) || !ValidationUtils.isValidStellarAddress(a.issuer)) return false;
+  if (a.code === 'XLM') {
+    if (a.issuer !== undefined) return false;
+  } else if (!isString(a.issuer) || !StrKey.isValidEd25519PublicKey(a.issuer)) {
+    return false;
+  }
 
   if (a.name !== undefined && !isString(a.name)) return false;
   if (a.deposits_enabled !== undefined && typeof a.deposits_enabled !== 'boolean') return false;
@@ -237,7 +409,14 @@ function validateAsset(asset: unknown): asset is Asset {
 export const ValidationUtils = {
   isValidEmail(email: string): boolean {
     const emailRegex = /^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/;
-    return emailRegex.test(email);
+    if (!emailRegex.test(email)) return false;
+
+    const [localPart, domain] = email.split('@');
+    if (localPart.startsWith('.') || localPart.endsWith('.') || localPart.includes('..')) {
+      return false;
+    }
+
+    return !domain.startsWith('.') && !domain.endsWith('.') && !domain.includes('..');
   },
 
   isValidPhoneNumber(phone: string): boolean {
@@ -266,8 +445,8 @@ export const ValidationUtils = {
 
   isValidStellarAddress(address: string): boolean {
     if (!address || typeof address !== 'string') return false;
-    if (!/^G[A-Z2-7]{55}$/.test(address)) return false;
-    return true;
+    // Account addresses may be classic Ed25519 keys or muxed account addresses.
+    return StrKey.isValidEd25519PublicKey(address) || StrKey.isValidMed25519PublicKey(address);
   },
 
   isValidDatabaseUrl(urlString: string): boolean {
@@ -330,20 +509,51 @@ export const SecurityConfigSchema = {
     if (!config.distributionAccountSecret)
       throw new Error('Missing required secret: security.distributionAccountSecret');
     if (
-      config.challengeExpirationSeconds !== undefined &&
-      (typeof config.challengeExpirationSeconds !== 'number' ||
-        !Number.isFinite(config.challengeExpirationSeconds) ||
-        config.challengeExpirationSeconds <= 0)
+      config.enableClientAttribution !== undefined &&
+      typeof config.enableClientAttribution !== 'boolean'
     ) {
-      throw new Error('security.challengeExpirationSeconds must be > 0');
+      throw new Error('security.enableClientAttribution must be a boolean');
+    }
+    if (config.clientDomain !== undefined && !isValidClientDomain(config.clientDomain)) {
+      throw new Error(
+        'security.clientDomain must be a valid DNS hostname of at most 64 characters',
+      );
+    }
+    if (
+      config.clientDomainSigningKey !== undefined &&
+      !ValidationUtils.isValidStellarAddress(config.clientDomainSigningKey)
+    ) {
+      throw new Error('security.clientDomainSigningKey must be a valid Stellar public key');
+    }
+    if (config.enableClientAttribution) {
+      if (!config.clientDomain) {
+        throw new Error(
+          'security.clientDomain is required when security.enableClientAttribution is true',
+        );
+      }
+      if (!config.clientDomainSigningKey) {
+        throw new Error(
+          'security.clientDomainSigningKey is required when security.enableClientAttribution is true',
+        );
+      }
+    }
+    if (
+      config.verifyWebhookSignatures !== undefined &&
+      typeof config.verifyWebhookSignatures !== 'boolean'
+    ) {
+      throw new Error('security.verifyWebhookSignatures must be a boolean');
+    }
+    if (
+      config.challengeExpirationSeconds !== undefined &&
+      !isSafePositiveInteger(config.challengeExpirationSeconds)
+    ) {
+      throw new Error('security.challengeExpirationSeconds must be a safe positive integer');
     }
     if (
       config.authTokenLifetimeSeconds !== undefined &&
-      (typeof config.authTokenLifetimeSeconds !== 'number' ||
-        !Number.isFinite(config.authTokenLifetimeSeconds) ||
-        config.authTokenLifetimeSeconds <= 0)
+      !isSafePositiveInteger(config.authTokenLifetimeSeconds)
     ) {
-      throw new Error('security.authTokenLifetimeSeconds must be > 0');
+      throw new Error('security.authTokenLifetimeSeconds must be a safe positive integer');
     }
   },
 };
@@ -356,40 +566,6 @@ export const AnchorKitConfigSchema = {
     validateAnchorKitConfig(config);
   },
 };
-
-function validateKycConfig(kyc: AnchorKitConfig['kyc']): boolean {
-  if (!kyc) return true;
-
-  const { minAge, maxAge } = kyc;
-
-  if (minAge !== undefined) {
-    if (
-      typeof minAge !== 'number' ||
-      !Number.isFinite(minAge) ||
-      minAge < 0 ||
-      !Number.isInteger(minAge)
-    ) {
-      throw new Error('kyc.minAge must be a finite non-negative integer');
-    }
-  }
-
-  if (maxAge !== undefined) {
-    if (
-      typeof maxAge !== 'number' ||
-      !Number.isFinite(maxAge) ||
-      maxAge < 0 ||
-      !Number.isInteger(maxAge)
-    ) {
-      throw new Error('kyc.maxAge must be a finite non-negative integer');
-    }
-  }
-
-  if (minAge !== undefined && maxAge !== undefined && minAge > maxAge) {
-    throw new Error('kyc.minAge must be less than or equal to kyc.maxAge');
-  }
-
-  return true;
-}
 
 function validateAnchorKitConfig(config: AnchorKitConfig): boolean {
   if (!config) throw new Error('Configuration object is missing');
@@ -404,15 +580,34 @@ function validateAnchorKitConfig(config: AnchorKitConfig): boolean {
 
   NetworkConfigSchema.validate(network);
   SecurityConfigSchema.validate(security);
+  if (security.enableClientAttribution) {
+    const expectedOrigin = `https://${security.clientDomain?.toLowerCase()}`;
+    if (!Array.isArray(server.corsOrigins) || !server.corsOrigins.includes(expectedOrigin)) {
+      throw new Error(
+        `server.corsOrigins must include "${expectedOrigin}" when security.enableClientAttribution is true`,
+      );
+    }
+  }
+  validateKycConfig(config.kyc);
+
+  for (const key of ['host', 'corsOrigins'] as const) {
+    const value = server[key];
+    if (value !== undefined && value !== null && !ServerConfigSchema[key].validate(value)) {
+      throw new Error(`server.${key}: invalid value`);
+    }
+  }
+
+  for (const [protocol, value] of Object.entries(metadata?.protocols ?? {})) {
+    if (value !== undefined && typeof value !== 'boolean') {
+      throw new Error(`metadata.protocols.${protocol} must be a boolean`);
+    }
+  }
 
   if (!assets.assets || !Array.isArray(assets.assets) || assets.assets.length === 0) {
     throw new Error('At least one asset must be configured in assets.assets');
   }
 
-  if (
-    assets.defaultCurrency !== undefined &&
-    !isValidIso4217CurrencyCode(assets.defaultCurrency)
-  ) {
+  if (assets.defaultCurrency !== undefined && !isValidIso4217CurrencyCode(assets.defaultCurrency)) {
     throw new Error('assets.defaultCurrency must be a three-letter uppercase ISO 4217 code');
   }
 
@@ -423,17 +618,21 @@ function validateAnchorKitConfig(config: AnchorKitConfig): boolean {
       const code = (asset as unknown as Record<string, unknown>)?.code;
       const codeStr = typeof code === 'string' && code ? ` (code: "${code}")` : '';
       throw new Error(
-        `Invalid asset at index ${i}${codeStr}: asset.code must be a non-empty string and asset.issuer must be a valid Stellar public key.`,
+        `Invalid asset at index ${i}${codeStr}: native XLM must omit asset.issuer and issued assets must provide a valid Stellar public key issuer.`,
       );
     }
-    const code = asset.code;
-    if (seenCodes.has(code)) {
-      throw new Error(`Duplicate asset code detected: ${code}`);
+    const assetCode = asset.code;
+    if (seenCodes.has(assetCode)) {
+      throw new Error(`Duplicate asset code detected: ${assetCode}`);
     }
-    seenCodes.add(code);
+    seenCodes.add(assetCode);
   }
 
   validateFrameworkConfig(framework, server, metadata, operational);
+  const serverErrors = validateServerConfig(server);
+  if (serverErrors.length > 0) {
+    throw new Error(`Invalid server configuration: ${serverErrors.join(', ')}`);
+  }
   validateKycConfig(kyc);
 
   return true;
@@ -504,7 +703,7 @@ export const ServerConfigSchema: Record<keyof Required<ServerConfig>, SchemaFiel
     type: 'number',
     required: false,
     description: 'Request timeout in milliseconds. Defaults to 30000.',
-    validate: (value) => typeof value === 'number' && Number.isFinite(value) && value > 0,
+    validate: (value) => typeof value === 'number' && Number.isSafeInteger(value) && value > 0,
   },
 };
 
