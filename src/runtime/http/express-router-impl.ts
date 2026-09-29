@@ -1,7 +1,8 @@
 import type { AnchorConfig } from '@/core/config.ts';
-import { PayloadTooLargeError, ValidationError } from '@/core/errors.ts';
+import { ConfigError, PayloadTooLargeError, ValidationError } from '@/core/errors.ts';
 import { InMemoryRateLimiter, type RateLimitRule } from '@/runtime/http/rate-limiter.ts';
 import type { DatabaseAdapter, WebhookProcessor } from '@/runtime/interfaces.ts';
+import type { PluginRouteContext, RouteDefinition } from '@/types/foundation.ts';
 import { IdempotencyUtils } from '@/utils/idempotency.ts';
 import {
   Account,
@@ -44,6 +45,7 @@ export interface ExpressRouterContext {
   requestTimeout: number;
   rateLimiter: InMemoryRateLimiter;
   rateRules: Record<'auth_challenge' | 'auth_token' | 'webhook' | 'deposit', RateLimitRule>;
+  pluginRoutes?: Array<{ pluginId: string; route: RouteDefinition }>;
 }
 
 interface AuthenticatedRequestData {
@@ -328,6 +330,103 @@ function buildInteractiveUrl(interactiveDomain: string, transactionId: string): 
 
 function endpointPath(req: IncomingMessage): string {
   return parseUrl(req).pathname;
+}
+
+const BUILT_IN_PATHS = new Set([
+  '/health',
+  '/info',
+  '/auth/challenge',
+  '/auth/token',
+  '/transactions/deposit/interactive',
+  '/webhooks/events',
+]);
+const BUILT_IN_TRANSACTION_PATH = /^\/transactions\/[^/]+$/;
+
+export function validatePluginRoutes(
+  routes: Array<{ pluginId: string; route: RouteDefinition }>,
+): void {
+  const registrations = new Map<string, string>();
+  for (const { pluginId, route } of routes) {
+    if (
+      !route.path.startsWith('/') ||
+      (route.path !== '/' && route.path.endsWith('/')) ||
+      route.path.includes('?') ||
+      route.path.includes('#') ||
+      route.path.includes('//') ||
+      route.path.split('/').some((segment) => segment === '.' || segment === '..')
+    ) {
+      throw new ConfigError(
+        `Plugin "${pluginId}" route path "${route.path}" must be an absolute normalized path without query or fragment`,
+      );
+    }
+    if (!['GET', 'POST', 'PUT', 'DELETE', 'PATCH'].includes(route.method)) {
+      throw new ConfigError(
+        `Plugin "${pluginId}" route for "${route.path}" has unsupported method "${route.method}"`,
+      );
+    }
+    if (BUILT_IN_PATHS.has(route.path) || BUILT_IN_TRANSACTION_PATH.test(route.path)) {
+      throw new ConfigError(
+        `Plugin "${pluginId}" route "${route.method} ${route.path}" conflicts with a built-in endpoint`,
+      );
+    }
+    const routeKey = `${route.method} ${route.path}`;
+    const existingPlugin = registrations.get(routeKey);
+    if (existingPlugin) {
+      throw new ConfigError(
+        `Plugin route "${routeKey}" is registered by both "${existingPlugin}" and "${pluginId}"`,
+      );
+    }
+    registrations.set(routeKey, pluginId);
+  }
+}
+
+function buildPluginRouteContext(
+  context: ExpressRouterContext,
+  req: IncomingMessage,
+  res: ServerResponse,
+  body: Record<string, unknown>,
+): PluginRouteContext {
+  const query: Record<string, string | Array<string>> = {};
+  for (const [key, value] of parseUrl(req).searchParams) {
+    const current = query[key];
+    if (current === undefined) query[key] = value;
+    else if (Array.isArray(current)) current.push(value);
+    else query[key] = [current, value];
+  }
+  return {
+    request: req,
+    response: res,
+    params: {},
+    query,
+    body,
+    config: context.config,
+    database: context.database,
+  };
+}
+
+async function handlePluginRoute(
+  context: ExpressRouterContext,
+  registeredRoute: { pluginId: string; route: RouteDefinition },
+  req: IncomingMessage,
+  res: ServerResponse,
+): Promise<void> {
+  let body: Record<string, unknown> = {};
+  if (registeredRoute.route.method !== 'GET') {
+    const parsedBody = await parsePostJsonBody(req, res, context.maxBodyBytes);
+    if (!parsedBody) return;
+    body = parsedBody.body;
+  }
+
+  const result = await registeredRoute.route.handler(
+    buildPluginRouteContext(context, req, res, body),
+  );
+  if (res.writableEnded || res.headersSent) return;
+  if (result === undefined) {
+    res.statusCode = 204;
+    res.end();
+    return;
+  }
+  sendJson(res, 200, { data: result }, (req.method ?? 'GET').toUpperCase());
 }
 
 export function isAuthChallengeExpired(expiresAt: string, nowMs = Date.now()): boolean {
@@ -1151,6 +1250,17 @@ export async function handleExpressRouterRequest(
 
       if (method === 'POST' && path === '/webhooks/events') {
         await handleWebhook(context, req, res);
+        return;
+      }
+
+      const pluginRoutes = (context.pluginRoutes ?? []).filter(({ route }) => route.path === path);
+      if (pluginRoutes.length > 0) {
+        const pluginRoute = pluginRoutes.find(({ route }) => route.method === method);
+        if (pluginRoute) {
+          await handlePluginRoute(context, pluginRoute, req, res);
+        } else {
+          sendMethodNotAllowed(res, pluginRoutes.map(({ route }) => route.method).sort());
+        }
         return;
       }
 

@@ -2,9 +2,14 @@ import type { AnchorConfig } from '@/core/config.ts';
 import { errorHandler } from '@/utils/error-handler.ts';
 import { InMemoryRateLimiter, type RateLimitRule } from '@/runtime/http/rate-limiter.ts';
 import type { DatabaseAdapter, WebhookProcessor } from '@/runtime/interfaces.ts';
+import type { RouteDefinition } from '@/types/foundation.ts';
 import { Keypair } from '@stellar/stellar-sdk';
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import { handleExpressRouterRequest, type ExpressRouterContext } from './express-router-impl.ts';
+import {
+  handleExpressRouterRequest,
+  type ExpressRouterContext,
+  validatePluginRoutes,
+} from './express-router-impl.ts';
 
 export type ExpressLikeMiddleware = (
   req: IncomingMessage,
@@ -16,12 +21,15 @@ interface RouterDependencies {
   config: AnchorConfig;
   database: DatabaseAdapter;
   webhookProcessor: WebhookProcessor;
+  pluginRoutes?: Array<{ pluginId: string; route: RouteDefinition }>;
 }
 
 export class AnchorExpressRouter {
   private readonly context: ExpressRouterContext;
 
   constructor(dependencies: RouterDependencies) {
+    const pluginRoutes = dependencies.pluginRoutes ?? [];
+    validatePluginRoutes(pluginRoutes);
     const config = dependencies.config;
     const sep10ServerKeypair = Keypair.fromSecret(config.get('security').sep10SigningKey);
     const networkPassphrase = config.get('network').networkPassphrase ?? '';
@@ -51,6 +59,7 @@ export class AnchorExpressRouter {
       requestTimeout,
       rateLimiter: new InMemoryRateLimiter(),
       rateRules,
+      pluginRoutes,
     };
   }
 
