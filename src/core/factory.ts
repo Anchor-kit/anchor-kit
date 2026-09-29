@@ -9,7 +9,6 @@ import type {
   DatabaseAdapter,
   InteractiveTransactionRecord,
   QueueAdapter,
-  QueueJob,
   Watcher,
   WebhookProcessor,
 } from '@/runtime/interfaces.ts';
@@ -257,11 +256,30 @@ export class AnchorInstance {
     return this.queue;
   }
 
-  private async processQueueJob(job: QueueJob): Promise<void> {
+  private async processQueueJob(input: unknown): Promise<void> {
     const database = this.requireDatabase();
+    if (
+      typeof input !== 'object' ||
+      input === null ||
+      !('type' in input) ||
+      !('payload' in input)
+    ) {
+      return;
+    }
+
+    const job = input as { type: unknown; payload: unknown };
+    if (typeof job.type !== 'string') {
+      return;
+    }
+
+    if (typeof job.payload !== 'object' || job.payload === null || Array.isArray(job.payload)) {
+      return;
+    }
+
+    const payload = job.payload as Record<string, unknown>;
 
     if (job.type === 'expire_transaction') {
-      const transactionIdValue = job.payload.transactionId;
+      const transactionIdValue = payload.transactionId;
       if (typeof transactionIdValue !== 'string' || transactionIdValue.length === 0) {
         return;
       }
@@ -287,7 +305,7 @@ export class AnchorInstance {
     }
 
     if (job.type === 'process_watcher_task') {
-      const watcherTaskIdValue = job.payload.watcherTaskId;
+      const watcherTaskIdValue = payload.watcherTaskId;
       if (typeof watcherTaskIdValue !== 'string' || watcherTaskIdValue.length === 0) {
         return;
       }
@@ -300,7 +318,7 @@ export class AnchorInstance {
     }
 
     if (job.type === 'cleanup_records') {
-      const retentionDaysValue = job.payload.retentionDays;
+      const retentionDaysValue = payload.retentionDays;
       if (typeof retentionDaysValue !== 'number' || !Number.isFinite(retentionDaysValue)) {
         return;
       }
