@@ -273,6 +273,24 @@ function validateFrameworkUrls(
   return true;
 }
 
+function validateMetadataFeatures(metadata: AnchorKitConfig['metadata']): boolean {
+  const features = metadata?.features;
+  if (!features) return true;
+
+  for (const key of [
+    'supportsInteractiveDeposits',
+    'supportsInteractiveWithdrawals',
+    'supportsAsyncTransactionStatus',
+  ] as const) {
+    const value = features[key];
+    if (value !== undefined && typeof value !== 'boolean') {
+      throw new Error(`metadata.features.${key} must be a boolean`);
+    }
+  }
+
+  return true;
+}
+
 function validateOperationalNumbers(operational: AnchorKitConfig['operational']): boolean {
   const retentionDays = operational?.transactionRetentionDays;
   if (retentionDays !== undefined && (!Number.isSafeInteger(retentionDays) || retentionDays <= 0)) {
@@ -306,6 +324,7 @@ function validateFrameworkConfig(
   validateFrameworkNumbers(framework);
   validateFrameworkRateLimit(framework);
   validateFrameworkUrls(metadata, server, operational);
+  validateMetadataFeatures(metadata);
   validateOperationalNumbers(operational);
   validateOperationalBooleans(operational);
   return true;

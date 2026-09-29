@@ -198,10 +198,16 @@ async function readRawBody(req: IncomingMessage, maxBodyBytes: number): Promise<
 
   const chunks: Uint8Array[] = [];
   let totalBytes = 0;
-  for await (const chunk of req) {
+  const iterator = req.iterator({ destroyOnReturn: false });
+  while (true) {
+    const { done, value: chunk } = await iterator.next();
+    if (done) break;
+
     const chunkBuffer = typeof chunk === 'string' ? Buffer.from(chunk) : chunk;
     totalBytes += chunkBuffer.byteLength;
     if (totalBytes > maxBodyBytes) {
+      req.pause();
+      await iterator.return?.();
       throw new PayloadTooLargeError(`Request body too large. Max ${maxBodyBytes} bytes`);
     }
     chunks.push(chunkBuffer);
@@ -317,7 +323,7 @@ function buildInteractiveUrl(interactiveDomain: string, transactionId: string): 
   const normalizedDomain = interactiveDomain.endsWith('/')
     ? interactiveDomain.slice(0, -1)
     : interactiveDomain;
-  return `${normalizedDomain}/deposit/${transactionId}`;
+  return `${normalizedDomain}/deposit/${encodeURIComponent(transactionId)}`;
 }
 
 function endpointPath(req: IncomingMessage): string {
@@ -1003,7 +1009,7 @@ async function handleWebhook(
   }
 }
 
-const TRANSACTION_PATH_RE = /^\/transactions\/([^/]+)$/;
+const TRANSACTION_PATH_RE = /^\/transactions\/([^/]*)$/;
 
 const KNOWN_ROUTES: Record<string, string[]> = {
   '/health': ['GET'],
@@ -1079,6 +1085,14 @@ export async function handleExpressRouterRequest(
           sendJson(res, 400, {
             error: 'invalid_request',
             message: 'Transaction id contains malformed percent-encoding',
+          });
+          return;
+        }
+
+        if (transactionId.trim().length === 0) {
+          sendJson(res, 400, {
+            error: 'invalid_request',
+            message: 'Transaction id must not be empty',
           });
           return;
         }
