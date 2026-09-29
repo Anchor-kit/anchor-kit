@@ -71,7 +71,7 @@ describe('SqlDatabaseAdapter – interactive transaction status updates', () => 
     expect(fetched).toBeNull();
   });
 
-  it('updates only when the current status matches the expected status', async () => {
+  it('updates a transaction only when its current status matches the expected status', async () => {
     const txId = randomUUID();
     await db.insertInteractiveTransaction({
       id: txId,

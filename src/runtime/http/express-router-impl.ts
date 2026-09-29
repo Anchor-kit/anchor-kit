@@ -480,7 +480,24 @@ async function handleAuthChallenge(
   }
 
   // Accept canonical Stellar public keys and treat surrounding whitespace as non-semantic.
-  const account = parseUrl(req).searchParams.get('account')?.trim() ?? '';
+  const accountParams = parseUrl(req).searchParams.getAll('account');
+  if (accountParams.length === 0) {
+    sendJson(res, 400, {
+      error: 'invalid_request',
+      message: 'Query param account is required',
+    });
+    return;
+  }
+
+  if (accountParams.length !== 1) {
+    sendJson(res, 400, {
+      error: 'invalid_request',
+      message: 'Query param account must be provided exactly once',
+    });
+    return;
+  }
+
+  const account = accountParams[0].trim();
   if (!account) {
     sendJson(res, 400, {
       error: 'invalid_request',
@@ -917,6 +934,7 @@ async function handleTransaction(
 
   const transaction = await context.database.getInteractiveTransactionById(transactionId);
   if (!transaction) {
+    res.setHeader('Cache-Control', 'no-store');
     sendJson(res, 404, { error: 'not_found', message: 'Transaction not found' });
     return;
   }
@@ -957,6 +975,7 @@ async function handleTransaction(
     );
   }
 
+  res.setHeader('Cache-Control', 'no-store');
   sendJson(res, 200, responseData);
 }
 
