@@ -239,4 +239,18 @@ describe('SqlDatabaseAdapter – watcher task persistence and processed counts',
     expect(limited).toHaveLength(3);
     expect(limited.map((task) => task.payload.order)).toEqual([1, 2, 3]);
   });
+
+  it.each([0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1])(
+    'rejects invalid pending task limit %s before querying',
+    async (limit) => {
+      await expect(db.listPendingWatcherTasks(limit)).rejects.toThrow(
+        'Watcher task limit must be a positive safe integer',
+      );
+    },
+  );
+
+  it('accepts a pending task limit of one', async () => {
+    const pending = await db.listPendingWatcherTasks(1);
+    expect(pending.length).toBeLessThanOrEqual(1);
+  });
 });

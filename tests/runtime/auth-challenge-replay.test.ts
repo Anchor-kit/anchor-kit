@@ -154,6 +154,7 @@ function makeTestContext(dbAdapter: DatabaseAdapter, serverKeypair: Keypair): Ex
     networkPassphrase: Networks.TESTNET,
     maxBodyBytes: 1048576,
     corsOrigins: undefined,
+    requestTimeout: 30_000,
   };
 }
 

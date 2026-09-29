@@ -28,6 +28,24 @@ interface PostgresClient {
 const SQLITE_FILE_PREFIX = 'file:';
 const SQLITE_URL_PREFIX = 'sqlite:';
 
+/**
+ * Journal mode requested for file-backed SQLite databases.
+ *
+ * WAL lets readers keep working while a single writer commits, so the webhook,
+ * watcher, and idempotency writes that overlap during normal anchor operation
+ * queue behind each other instead of failing. SQLite stores the journal mode in
+ * the database file itself, so applying it once on connect also covers later
+ * connections to the same file.
+ */
+export const SQLITE_JOURNAL_MODE = 'WAL';
+
+/**
+ * How long a blocked SQLite writer waits for a competing lock before giving up
+ * with SQLITE_BUSY. Overlapping writes are short-lived, so a retry window
+ * absorbs lock contention that would otherwise surface as avoidable errors.
+ */
+export const SQLITE_BUSY_TIMEOUT_MS = 5000;
+
 function nowIso(): string {
   return new Date().toISOString();
 }
@@ -40,6 +58,32 @@ function toSqlitePath(url: string): string {
     return url.slice(SQLITE_URL_PREFIX.length);
   }
   return url;
+}
+
+/**
+ * In-memory databases keep SQLite's `memory` journal mode and share no file for
+ * connections to coordinate on, so WAL does not apply to them. Both the plain
+ * `:memory:` form and URI forms such as `file::memory:` or `?mode=memory` are
+ * recognised so in-memory test databases keep working unchanged.
+ */
+function isInMemorySqlite(path: string): boolean {
+  return path.includes(':memory:') || path.includes('mode=memory');
+}
+
+/**
+ * Applies the concurrency settings to a freshly opened SQLite connection.
+ *
+ * `busy_timeout` applies to every connection, including in-memory ones, while
+ * the WAL journal mode is only requested for file-backed databases.
+ */
+function configureSqliteConnection(database: SqliteLike, path: string): void {
+  database.exec(`PRAGMA busy_timeout = ${SQLITE_BUSY_TIMEOUT_MS};`);
+
+  if (isInMemorySqlite(path)) {
+    return;
+  }
+
+  database.exec(`PRAGMA journal_mode = ${SQLITE_JOURNAL_MODE};`);
 }
 
 function parseJsonObject(value: string): Record<string, unknown> {
@@ -71,6 +115,7 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
   private postgres: PostgresClient | null = null;
   private connectPromise: Promise<void> | null = null;
   private disconnectPromise: Promise<void> | null = null;
+  private migratePromise: Promise<void> | null = null;
 
   constructor(databaseConfig: FrameworkConfig['database']) {
     this.provider = databaseConfig.provider;
@@ -90,7 +135,18 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
     this.connectPromise = (async () => {
       try {
         if (this.provider === 'sqlite') {
-          this.sqlite = new Database(toSqlitePath(this.url));
+          const path = toSqlitePath(this.url);
+          const database = new Database(path);
+
+          try {
+            configureSqliteConnection(database, path);
+          } catch (error) {
+            // Do not leak the handle when the connection cannot be tuned.
+            database.close();
+            throw error;
+          }
+
+          this.sqlite = database;
           return;
         }
 
@@ -160,6 +216,23 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
   }
 
   public async migrate(): Promise<void> {
+    if (this.migratePromise) {
+      await this.migratePromise;
+      return;
+    }
+
+    this.migratePromise = this.runMigrations();
+
+    try {
+      await this.migratePromise;
+    } finally {
+      // Clear the guard once the sequence settles so a failed migration can be
+      // retried by the next caller instead of being cached as successful.
+      this.migratePromise = null;
+    }
+  }
+
+  private async runMigrations(): Promise<void> {
     if (this.sqlite) {
       this.sqlite.exec(`
         CREATE TABLE IF NOT EXISTS auth_challenges (
@@ -728,6 +801,10 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
   }
 
   public async listPendingWatcherTasks(limit: number): Promise<WatcherTaskRecord[]> {
+    if (!Number.isSafeInteger(limit) || limit <= 0) {
+      throw new RangeError('Watcher task limit must be a positive safe integer');
+    }
+
     if (this.sqlite) {
       const rows = this.sqlite
         .prepare('SELECT * FROM watcher_tasks WHERE status = ? ORDER BY created_at ASC LIMIT ?')
