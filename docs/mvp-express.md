@@ -77,6 +77,8 @@ The API treats a challenge as expired at `maxTime`.
 
 Native XLM configuration omits `issuer`. Issued assets require a valid Stellar public key issuer.
 
+`min_amount` and `max_amount` accept finite, nonnegative numbers. Integer bounds must be safe JavaScript integers. Decimal bounds must keep the same value when rounded to 15 significant digits. When both bounds are set, `min_amount` must not exceed `max_amount`.
+
 ## 4) Express integration
 
 ```ts
