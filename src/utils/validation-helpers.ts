@@ -51,7 +51,7 @@ function isValidDatabaseUrlString(urlString: unknown): boolean {
 }
 
 function isValidStellarAssetCode(code: string): boolean {
-  return /^[a-zA-Z0-9]{1,12}$/.test(code);
+  return code === code.trim() && /^[a-zA-Z0-9]{1,12}$/.test(code);
 }
 
 function isValidAssetAmount(value: unknown): value is number {
