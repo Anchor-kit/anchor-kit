@@ -92,7 +92,10 @@ function isPortSuffix(value: string): boolean {
 }
 
 function isPortNumber(value: string): boolean {
-  return /^\d{1,5}$/.test(value);
+  if (!/^\d{1,5}$/.test(value)) return false;
+
+  const port = Number(value);
+  return port >= 1 && port <= 65_535;
 }
 
 /** RFC 5952 canonical form for an already-validated IPv6 address. */

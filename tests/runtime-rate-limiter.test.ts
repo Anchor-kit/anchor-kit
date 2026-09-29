@@ -111,6 +111,8 @@ describe('extractClientIdentifier address normalization', () => {
       '[2001:db8::1',
       '[2001:db8::1]evil',
       '198.51.100.7:notaport',
+      '198.51.100.7:0',
+      '198.51.100.7:99999',
       '999.1.1.1',
       '',
     ];
