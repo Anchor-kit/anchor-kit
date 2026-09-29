@@ -300,6 +300,7 @@ curl -s \
 
 ## Docs
 
+- [Configuration Reference](./docs/configuration-reference.md) – Complete guide to all configuration options, their status, and usage
 - [Architecture Overview](./ARCHITECTURE.md)
 - [Contributing Guide](./CONTRIBUTING.md)
 - [Roadmap](./ROADMAP.md)
