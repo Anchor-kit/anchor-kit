@@ -44,6 +44,20 @@ Anchor-Kit auto-creates MVP tables during `anchor.init()`:
 
 PostgreSQL is the preferred production path.
 
+### SQLite concurrency settings
+
+When `database.provider` is `sqlite`, Anchor-Kit tunes each connection for the
+overlapping webhook, watcher, and idempotency writes described in
+[SQLite concurrency](sqlite-concurrency.md):
+
+- `PRAGMA journal_mode = WAL` for file-backed databases, so readers keep working
+  while a single writer commits.
+- `PRAGMA busy_timeout = 5000`, so a blocked writer retries instead of failing
+  immediately with `SQLITE_BUSY`.
+
+In-memory URLs such as `:memory:` or `file::memory:` keep SQLite's `memory`
+journal mode (and still get the busy timeout), so test databases are unaffected.
+
 ## 4) Express integration
 
 ```ts
