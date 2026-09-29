@@ -576,7 +576,7 @@ describe('MVP Express-mounted integration', () => {
         },
         rateLimit: {
           windowMs: 60000,
-          authChallengeMax: 1,
+          authChallengeMax: 2,
           authTokenMax: 5,
           webhookMax: 20,
           depositMax: 20,
@@ -595,6 +595,17 @@ describe('MVP Express-mounted integration', () => {
         headers,
       });
       expect(firstResponse.status).toBe(200);
+      expect(firstResponse.headers['ratelimit-limit']).toBe('2');
+      expect(firstResponse.headers['ratelimit-remaining']).toBe('1');
+      expect(firstResponse.headers['ratelimit-reset']).toBeDefined();
+
+      const secondResponse = await customInvoke({
+        path: `/auth/challenge?account=${account}`,
+        headers,
+      });
+      expect(secondResponse.status).toBe(200);
+      expect(secondResponse.headers['ratelimit-limit']).toBe('2');
+      expect(secondResponse.headers['ratelimit-remaining']).toBe('0');
 
       const limitedResponse = await customInvoke({
         path: `/auth/challenge?account=${account}`,
@@ -603,6 +614,9 @@ describe('MVP Express-mounted integration', () => {
 
       expect(limitedResponse.status).toBe(429);
       expect(limitedResponse.headers['retry-after']).toBeDefined();
+      expect(limitedResponse.headers['ratelimit-limit']).toBe('2');
+      expect(limitedResponse.headers['ratelimit-remaining']).toBe('0');
+      expect(limitedResponse.headers['ratelimit-reset']).toBeDefined();
       expect(limitedResponse.body.error).toBe('rate_limited');
       expect(limitedResponse.body.retry_after_seconds).toBe(
         Number(limitedResponse.headers['retry-after']),

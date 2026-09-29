@@ -179,6 +179,63 @@ function validateFrameworkRateLimit(framework: AnchorKitConfig['framework']): bo
   return true;
 }
 
+function validateKycConfig(kyc: AnchorKitConfig['kyc']): boolean {
+  if (kyc === undefined) return true;
+  if (!kyc || typeof kyc !== 'object' || Array.isArray(kyc)) {
+    throw new Error('kyc must be an object');
+  }
+
+  if (kyc.level !== undefined && !['none', 'basic', 'strict'].includes(kyc.level)) {
+    throw new Error('kyc.level must be one of: none, basic, strict');
+  }
+
+  const booleanKeys = [
+    'requireDocuments',
+    'requireName',
+    'requireAddress',
+    'requireEmail',
+    'requirePhoneNumber',
+    'requireBirthDate',
+  ] as const;
+
+  for (const key of booleanKeys) {
+    const value = kyc[key];
+    if (value !== undefined && typeof value !== 'boolean') {
+      throw new Error(`kyc.${key} must be a boolean`);
+    }
+  }
+
+  const { minAge, maxAge } = kyc;
+
+  if (minAge !== undefined) {
+    if (
+      typeof minAge !== 'number' ||
+      !Number.isFinite(minAge) ||
+      minAge < 0 ||
+      !Number.isInteger(minAge)
+    ) {
+      throw new Error('kyc.minAge must be a finite non-negative integer');
+    }
+  }
+
+  if (maxAge !== undefined) {
+    if (
+      typeof maxAge !== 'number' ||
+      !Number.isFinite(maxAge) ||
+      maxAge < 0 ||
+      !Number.isInteger(maxAge)
+    ) {
+      throw new Error('kyc.maxAge must be a finite non-negative integer');
+    }
+  }
+
+  if (minAge !== undefined && maxAge !== undefined && minAge > maxAge) {
+    throw new Error('kyc.minAge must be less than or equal to kyc.maxAge');
+  }
+
+  return true;
+}
+
 function validateFrameworkUrls(
   metadata: AnchorKitConfig['metadata'],
   server: AnchorKitConfig['server'],
@@ -404,40 +461,6 @@ export const AnchorKitConfigSchema = {
   },
 };
 
-function validateKycConfig(kyc: AnchorKitConfig['kyc']): boolean {
-  if (!kyc) return true;
-
-  const { minAge, maxAge } = kyc;
-
-  if (minAge !== undefined) {
-    if (
-      typeof minAge !== 'number' ||
-      !Number.isFinite(minAge) ||
-      minAge < 0 ||
-      !Number.isInteger(minAge)
-    ) {
-      throw new Error('kyc.minAge must be a finite non-negative integer');
-    }
-  }
-
-  if (maxAge !== undefined) {
-    if (
-      typeof maxAge !== 'number' ||
-      !Number.isFinite(maxAge) ||
-      maxAge < 0 ||
-      !Number.isInteger(maxAge)
-    ) {
-      throw new Error('kyc.maxAge must be a finite non-negative integer');
-    }
-  }
-
-  if (minAge !== undefined && maxAge !== undefined && minAge > maxAge) {
-    throw new Error('kyc.minAge must be less than or equal to kyc.maxAge');
-  }
-
-  return true;
-}
-
 function validateAnchorKitConfig(config: AnchorKitConfig): boolean {
   if (!config) throw new Error('Configuration object is missing');
 
@@ -451,6 +474,7 @@ function validateAnchorKitConfig(config: AnchorKitConfig): boolean {
 
   NetworkConfigSchema.validate(network);
   SecurityConfigSchema.validate(security);
+  validateKycConfig(config.kyc);
 
   if (!assets.assets || !Array.isArray(assets.assets) || assets.assets.length === 0) {
     throw new Error('At least one asset must be configured in assets.assets');

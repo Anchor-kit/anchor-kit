@@ -1,4 +1,5 @@
 import type { AnchorConfig } from '@/core/config.ts';
+import { errorHandler } from '@/utils/error-handler.ts';
 import { InMemoryRateLimiter, type RateLimitRule } from '@/runtime/http/rate-limiter.ts';
 import type { DatabaseAdapter, WebhookProcessor } from '@/runtime/interfaces.ts';
 import { Keypair } from '@stellar/stellar-sdk';
@@ -57,16 +58,12 @@ export class AnchorExpressRouter {
           return;
         }
 
+        const { status, payload } = errorHandler(error);
         if (!res.headersSent) {
-          res.statusCode = 500;
+          res.statusCode = status;
           res.setHeader('content-type', 'application/json');
         }
-        res.end(
-          JSON.stringify({
-            error: 'internal_server_error',
-            message: 'Internal server error',
-          }),
-        );
+        res.end(JSON.stringify(payload));
       });
     };
   }

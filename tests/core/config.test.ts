@@ -177,6 +177,50 @@ describe('AnchorConfig', () => {
       expect(() => config.validate()).not.toThrow();
     });
 
+    it('accepts each documented KYC level and exposes valid KYC settings through get()', () => {
+      for (const level of ['none', 'basic', 'strict'] as const) {
+        const kyc = {
+          level,
+          requireDocuments: true,
+          requireName: false,
+          requireAddress: true,
+          requireEmail: false,
+          requirePhoneNumber: true,
+          requireBirthDate: false,
+        };
+        const config = new AnchorConfig({ ...validBaseConfig, kyc });
+
+        expect(() => config.validate()).not.toThrow();
+        expect(config.get('kyc')).toEqual(kyc);
+      }
+    });
+
+    it('rejects unsupported KYC levels', () => {
+      const config = new AnchorConfig({
+        ...validBaseConfig,
+        // @ts-expect-error this is for runtime validation
+        kyc: { level: 'enhanced' },
+      });
+
+      expect(() => config.validate()).toThrow(ConfigError);
+      expect(() => config.validate()).toThrow(/kyc\.level must be one of/);
+    });
+
+    it.each([
+      'requireDocuments',
+      'requireName',
+      'requireAddress',
+      'requireEmail',
+      'requirePhoneNumber',
+      'requireBirthDate',
+    ] as const)('rejects a non-boolean kyc.%s value', (field) => {
+      const kyc = { [field]: 'true' } as unknown as NonNullable<AnchorKitConfig['kyc']>;
+      const config = new AnchorConfig({ ...validBaseConfig, kyc });
+
+      expect(() => config.validate()).toThrow(ConfigError);
+      expect(() => config.validate()).toThrow(new RegExp(`kyc\\.${field} must be a boolean`));
+    });
+
     it('should throw ConfigError if top-level network is missing', () => {
       // @ts-expect-error this is for test cases
       const invalidConfig: AnchorKitConfig = { ...validBaseConfig, network: undefined };

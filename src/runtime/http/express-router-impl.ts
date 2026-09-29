@@ -328,6 +328,10 @@ function checkRateLimit(
   const key = `${endpoint}:${clientId}`;
   const result = context.rateLimiter.hit(key, context.rateRules[endpoint]);
 
+  res.setHeader('RateLimit-Limit', `${result.limit}`);
+  res.setHeader('RateLimit-Remaining', `${result.remaining}`);
+  res.setHeader('RateLimit-Reset', `${result.resetSeconds}`);
+
   if (!result.allowed) {
     res.setHeader('retry-after', `${result.retryAfterSeconds}`);
     sendJson(res, 429, {

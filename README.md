@@ -201,6 +201,12 @@ Mounted under your chosen base path (for example `/anchor`):
 - `GET /transactions/:id` (Bearer auth)
 - `POST /webhooks/events`
 
+## Rate limits
+
+Rate-limited routes return `RateLimit-Limit`, `RateLimit-Remaining`, and `RateLimit-Reset` headers on both allowed and rejected requests. Values are specific to the route's configured rule; `RateLimit-Reset` is the number of seconds until the active window resets. A rejected request also retains the `Retry-After` header and existing JSON response body.
+
+The in-memory limiter retains at most 10,000 client-and-route buckets. Expired buckets are cleaned up as needed. If the limit is reached while all buckets are active, requests from new client identifiers receive a rate-limited response until an active bucket expires; active buckets are not evicted, so their clients do not unexpectedly regain requests.
+
 ## curl Examples
 
 Assume your host app mounts the router at `/anchor` on `http://localhost:3000`.
