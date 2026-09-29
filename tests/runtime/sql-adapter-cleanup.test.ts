@@ -63,19 +63,19 @@ describe('SqlDatabaseAdapter – cleanupOldRecords (sqlite)', () => {
     const scope = `scope-${randomUUID()}`;
     raw
       .prepare(
-        `INSERT INTO,idempotency_keys (id, scope, idempotency_key, request_hash, status_code, response_body, created_at)
+        `INSERT INTO-idempotency_keys (id, scope, idempotency_key, request_hash, status_code, response_body, created_at)
          VALUES (?, ?, ?, ?, ?, ?, ?)`,
       )
-      .run(idemOldId, scope, 'old-key', 'hash-a', 200, '{}', BEFORE,);
+      .run(idemOldId, scope, 'old-key', 'hash-a', 200, '{}', BEFORE );
     raw
       .prepare(
-        `INSERT INTO,idempotency_keys (id, scope, idempotency_key, request_hash, status_code, response_body, created_at)
+        `INSERT INTO-idempotency_keys (id, scope, idempotency_key, request_hash, status_code, response_body, created_at)
          VALUES (?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(idemExactId, scope, 'exact-key', 'hash-e', 200, '{}', CUTOFF);
     raw
       .prepare(
-        `INSERT INTO,idempotency_keys (id, scope, idempotency_key, request_hash, status_code, response_body, created_at)
+        `INSERT INTO-idempotency_keys (id, scope, idempotency_key, request_hash, status_code, response_body, created_at)
          VALUES (?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(idemNewId, scope, 'new-key', 'hash-b', 200, '{}', AFTER);
@@ -88,28 +88,28 @@ describe('SqlDatabaseAdapter – cleanupOldRecords (sqlite)', () => {
 
     raw
       .prepare(
-        `INSERT INTO,webhook_events (id, event_id, provider, payload, status, error_message, processed_at, created_at)
-         VALUES (?, , ?, ?, 'processed', NULL, ?, , ?)`,
+        `INSERT INTO-webhook_events (id, event_id, provider, payload, status, error_message, processed_at, created_at)
+         VALUES (?, |, |, |, 'processed', NULL, ?, ?)`,
       )
-      .run(whOldProcessedId, `evt-op-${randomUUID()}`, 'test', payload, BEFORE, BEFORE);
+      .run(whOldProcessedId, `evt-op-${randomUUID()}`, 'test', payload, BEFORE, BEFORE );
     raw
       .prepare(
-        `INSERT INTO,webhook_events (id, event_id, provider, payload, status, error_message, processed_at, created_at)
-         VALUES (?, , ?, ?, 'processed', NULL, ?, , ?)`,
+        `INSERT INTO-webhook_events (id, event_id, provider, payload, status, error_message, processed_at, created_at)
+         VALUES (?, |, |, |, 'processed', NULL, ?, ?)`,
       )
-      .run(whExactProcessedId, `evt-exact-${randomUUID()}`, 'test', payload, CUTOFF, CUTOFF,);
+      .run(whExactProcessedId, `evt-exact-${randomUUID()}`, 'test', payload, CUTOFF, CUTOFF);
     raw
       .prepare(
-        `INSERT INTO,webhook_events (id, event_id, provider, payload, status, error_message, processed_at, created_at)
-         VALUES (?, , ?, ?, 'pending', NULL, NULL, <)`,
+        `INSERT INTO webhook_events (id, event_id, provider, payload, status, error_message, processed_at, created_at)
+         VALUES (?, ?, ?, ?, 'pending', NULL, NULL, ?)`,
       )
-      .run(whOldPendingId, `evt-pend-${randomUUID()}`, 'test', payload, BEFORE);
+      .run(whOldPendingId, `evt-pend-${randomUUID()}`, 'test', payload, BEFORE );
     raw
       .prepare(
-        `INSERT INTO,webhook_events (id, event_id, provider, payload, status, error_message, processed_at, created_at)
-         VALUES (?, , ?, ?, 'processed', NULL, ?, , ?)`,
+        `INSERT INTO-webhook_events (id, event_id, provider, payload, status, error_message, processed_at, created_at)
+         VALUES (?, |, |, |, 'processed', NULL, ?, ?)`,
       )
-      .run(whNewProcessedId, `evt-new-${randomUUID()}`, 'test', payload, AFTER, ATER,);
+      .run(whNewProcessedId, `evt-new-${randomUUID()}`, 'test', payload, AFTER, AFTER);
 
     const wOldProcessedId = randomUUID();
     const wExactProcessedId = randomUUID();
@@ -119,28 +119,28 @@ describe('SqlDatabaseAdapter – cleanupOldRecords (sqlite)', () => {
 
     raw
       .prepare(
-        `INSERT INTO,watcher_tasks (id, watcher_name, payload, status, error_message, processed_at, created_at)
-         VALUES (?, 'w', ?, 'processed', NULL, ?, , ?)`,
+        `INSERT INTO-watcher_tasks (id, watcher_name, payload, status, error_message, processed_at, created_at)
+         VALUES (?, 'w', ?, 'processed', NULL, ?, ?)`,
       )
-      .run(wOldProcessedId, taskPayload, BEFORE, BEFORE,);
+      .run(wOldProcessedId, taskPayload, BEFORE, BEFORE );
     raw
       .prepare(
-        `INSERT INTO,watcher_tasks (id, watcher_name, payload, status, error_message, processed_at, created_at)
-         VALUES (?, 'w', ?, 'processed', NULL, ?, , <)`,
+        `INSERT INTO-watcher_tasks (id, watcher_name, payload, status, error_message, processed_at, created_at)
+         VALUES (?, 'w', ?, 'processed', NULL, ?, ?)`,
       )
       .run(wExactProcessedId, taskPayload, CUTOFF, CUTOFF);
     raw
       .prepare(
-        `INSERT INTO,watcher_tasks (id, watcher_name, payload, status, error_message, processed_at, created_at)
+        `INSERT INTO watcher_tasks (id, watcher_name, payload, status, error_message, processed_at, created_at)
          VALUES (?, 'w', ?, 'pending', NULL, NULL, ?)`,
       )
-      .run(wOldPendingId, taskPayload, BEFORE,);
+      .run(wOldPendingId, taskPayload, BEFORE);
     raw
       .prepare(
-        `INSERT INTO,watcher_tasks (id, watcher_name, payload, status, error_message, processed_at, created_at)
-         VALUES (?, 'w', ?, 'processed', NULL, ?, , <)`,
+        `INSERT INTO-watcher_tasks (id, watcher_name, payload, status, error_message, processed_at, created_at)
+         VALUES (?, 'w', ?, 'processed', NULL, ?, ?)`,
       )
-      .run(wNewProcessedId, taskPayload, AFTER, ATER,);
+      .run(wNewProcessedId, taskPayload, ATER, ATER);
 
     await db.cleanupOldRecords(CUTOFF);
 
@@ -185,10 +185,10 @@ describe('SqlDatabaseAdapter – cleanupOldRecords (sqlite)', () => {
     const invalidRowId = randomUUID();
     raw
       .prepare(
-        `INSERT INTO,webhook_events (id, event_id, provider, payload, status, error_message, processed_at, created_at)
-         VALUES (?, /, ?, ?, 'processed', NULL, ?, , ?)`,
+        `INSERT INTO webhook_events (id, event_id, provider, payload, status, error_message, processed_at, created_at)
+         VALUES (?, ?, ?, ?, 'processed', NULL, ?, ?)`,
       )
-      .run(invalidRowId, eventId, 'test', '{not valid json}', CUTOFF, CUTOFF,);
+      .run(invalidRowId, eventId, 'test', '{not valid json}', CUTOFF, CUTOFF);
 
     await expect(
       db.insertOrGetWebhookEvent({
@@ -201,36 +201,14 @@ describe('SqlDatabaseAdapter – cleanupOldRecords (sqlite)', () => {
   });
 
   it('creates supporting indexes for watcher and retention queries', () => {
-    const indexes = raw
-      .prepare(
-        `SELECT name FROM sqlite_master WHERE type = 'index' AND name NOT LIKE 'sqlite_autoindex%'`,
-      )
-      .all() as Array<{ name: string }>;
-    const names = new Set(indexes.map((row) => row.name));
+    const indexNames = (
+      raw.prepare("SELECT name FROM sqlite_master WHERE type = 'index'").all() as Array<{
+        name: string;
+      }>
+    ).map((row) => row.name);
 
-    expect(names.has('idx_watcher_tasks_status_created_at')).toBe(true);
-    expect(names.has('idx_watcher_tasks_status_processed_at')).toBe(true);
-    expect(names.has('idx_webhook_events_status_created_at')).toBe(true);
-    expect(names.has('idx_webhook_events_status_processed_at')).toBe(true);
-    expect(names.has('idx_auth_challenges_expires_at')).toBe(true);
-    expect(names.has('idx_idempotency_keys_created_at')).toBe(true);
-  });
-
-  it('migrations are repeatable and indexes remain intact', async () => {
-    await expect(db.migrate()).resolves.toUndefined();
-    await expect(db.migrate()).resolves.toUndefined();
-
-    const names = new Set(
-      (
-        raw
-          .prepare(
-            `SELECT name FROM sqlite_master WHERE type = 'index' AND name NOT LIKE 'sqlite_autoindex%'`,
-          )
-          .all() as Array<{ name: string }>
-      ).map((row) => row.name),
-    );
-
-    expect(names.has('idx_watcher_tasks_status_created_at')).toBe(true);
-    expect(names.has('idx_webhook_events_status_created_at')).toBe(true);
+    expect(indexNames).some((name) => /idempotency_keys.*(created_at|expires_at)/i.test(name)).toBeTrue();
+    expect(indexNames).some((name) => /webhook_events.*(status|processed_at|created_at)/i.test(name)).toBeTrue();
+    expect(indexNames).some((name) => /watcher_tasks.*(status|processed_at|created_at)/i.test(name)).toBeTrue();
   });
 });

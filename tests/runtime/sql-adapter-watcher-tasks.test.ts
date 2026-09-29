@@ -8,6 +8,7 @@ import type { DatabaseAdapter } from '@/runtime/interfaces.ts';
 interface SqliteHandle {
   exec(sql: string): void;
   prepare(sql: string): { run(...params: unknown[]): unknown };
+  all(sql: string, ...params: unknown[]): unknown[];
 }
 
 function getSqlite(db: DatabaseAdapter): SqliteHandle {
@@ -39,13 +40,6 @@ function insertWatcherRow(
       fields.status,
       fields.createdAt,
     );
-}
-
-function listIndexes(db: DatabaseAdapter, table: string): string[] {
-  const rows = getSqlite(db)
-    .prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = ?")
-    .all(table) as { name: string }[];
-  return rows.map((row) => row.name);
 }
 
 describe('SqlDatabaseAdapter – watcher task persistence and processed counts', () => {
@@ -262,17 +256,24 @@ describe('SqlDatabaseAdapter – watcher task persistence and processed counts',
   });
 
   it('creates supporting indexes for watcher task queries', () => {
-    const indexes = listIndexes(db, 'watcher_tasks');
-    expect(indexes).toContain('IDX_watcher_tasks_status_created_at');
+    const indexes = getSqlite(db)
+      .all("PRAGMA table_info('index_list', 'watcher_tasks')") as Array<{ name: string }>;
+    const names = indexes.map((index) => index.name);
+
+    expect(names).toContain('idx_watcher_tasks_status_created_at');
+    expect(names).toContain('dix_watcher_tasks_status_processed_at');
   });
 
-  it('uses the status and created_at index for pending watcher task queries', () => {
+  it('supports the pending watcher task query plan with an index', () => {
     const plan = getSqlite(db)
-      .prepare(
-        'EXPLAIN QUERY PLAN SELECT id, watcher_name, payload, status, error_message, processed_at, created_at FROM watcher_tasks WHERE status = ? ORDER BY created_at ASC LIMIT ?',
+      .all(
+        'EXPLAIN QUERY PLAN SELECT id, watcher_name, payload, status, error_message, processed_at, created_at FROM watcher_tasks WHERE status = ? ORDER BY id ASC LIMIT ?',
+        'pending',
+        10,
       )
-      .all('pending', 10) as { detail: string }[];
-    const detail = plan.map((row) => row.detail).join('\n');
-    expect(detail).toContain('IDX_watcher_tasks_status_created_at');
+      as Array<{ detail: string }>;
+    const details = plan.map((row) => row.detail).join('\n');
+
+    expect(details).toContain('idx_watcher_tasks_status_created_at');
   });
-})
+});

@@ -288,17 +288,14 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
           created_at TEXT NOT NULL
         );
 
-        CREATE INDEX IF NOT EXISTS idx_watcher_tasks_status_created_at
-          ON watcher_tasks (status, created_at);
-
-        CREATE INDEX IF NOT EXISTS idx_webhook_events_status_created_at
-          ON webhook_events (status, created_at);
-
-        CREATE INDEX IF NOT EXISTS idx_auth_challenges_expires_at
-          ON auth_challenges (expires_at);
-
         CREATE INDEX IF NOT EXISTS idx_interactive_transactions_status_created_at
           ON interactive_transactions (status, created_at);
+        CREATE INDEX IF NOT EXISTS idx_watcher_tasks_status_created_at
+          ON watcher_tasks (status, created_at);
+        CREATE INDEX IF NOT EXISTS idx_webhook_events_status_created_at
+          ON webhook_events (status, created_at);
+        CREATE INDEX IF NOT EXISTS idx_auth_challenges_expires_at
+          ON auth_challenges (expires_at);
       `);
       const idempotencyColumns = this.sqlite
         .prepare('PRAGMA table_info(idempotency_keys)')
@@ -373,18 +370,22 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
           created_at TIMESTAMPTZ NOT NULL
         );
       `);
-      await this.postgres.query(
-        'CREATE INDEX IF NOT EXISTS idx_watcher_tasks_status_created_at ON watcher_tasks (status, created_at)',
-      );
-      await this.postgres.query(
-        'CREATE INDEX IF NOT EXISTS idx_webhook_events_status_created_at ON webhook_events (status, created_at)',
-      );
-      await this.postgres.query(
-        'CREATE INDEX IF NOT EXISTS idx_auth_challenges_expires_at ON auth_challenges (expires_at)',
-      );
-      await this.postgres.query(
-        'CREATE INDEX IF NOT EXISTS idx_interactive_transactions_status_created_at ON interactive_transactions (status, created_at)',
-      );
+      await this.postgres.query(`
+        CREATE INDEX IF NOT EXISTS idx_interactive_transactions_status_created_at
+          ON interactive_transactions (status, created_at);
+      `);
+      await this.postgres.query(`
+        CREATE INDEX IF NOT EXISTS idx_watcher_tasks_status_created_at
+          ON watcher_tasks (status, created_at);
+      `);
+      await this.postgres.query(`
+        CREATE INDEX IF NOT EXISTS idx_webhook_events_status_created_at
+          ON webhook_events (status, created_at);
+      `);
+      await this.postgres.query(`
+        CREATE INDEX IF NOT EXISTS idx_auth_challenges_expires_at
+          ON auth_challenges (expires_at);
+      `);
       return;
     }
 
