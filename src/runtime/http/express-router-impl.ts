@@ -223,6 +223,15 @@ function isPlainDecimalString(value: unknown): value is string {
   return typeof value === 'string' && /^\d+(?:\.\d+)?$/.test(value);
 }
 
+/**
+ * Detects numbers JavaScript cannot represent exactly. Integers above
+ * `Number.MAX_SAFE_INTEGER` and fractions with a magnitude that large are
+ * rounded during JSON parsing, which can silently change the amount.
+ */
+function isUnsafeAmountNumber(value: number): boolean {
+  return !Number.isFinite(value) || !Number.isSafeInteger(Math.trunc(value));
+}
+
 function buildInteractiveUrl(interactiveDomain: string, transactionId: string): string {
   const normalizedDomain = interactiveDomain.endsWith('/')
     ? interactiveDomain.slice(0, -1)
@@ -626,6 +635,15 @@ async function handleDepositInteractive(
     sendJson(res, 400, {
       error: 'invalid_amount',
       message: 'Amount must be a positive number',
+    });
+    return;
+  }
+
+  if (typeof amountRaw === 'number' && isUnsafeAmountNumber(numericAmount)) {
+    sendJson(res, 400, {
+      error: 'invalid_amount',
+      message:
+        'Amount must be a positive number. Unsafe numeric amounts must be sent as decimal strings to avoid precision loss',
     });
     return;
   }
