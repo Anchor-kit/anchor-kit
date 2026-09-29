@@ -358,6 +358,72 @@ describe('AnchorConfig', () => {
       });
     });
 
+    describe('operational flags preservation (#551)', () => {
+      it('should preserve webhooksEnabled when set to true', () => {
+        const config = new AnchorConfig({
+          ...validBaseConfig,
+          operational: { webhooksEnabled: true },
+        });
+        expect(config.get('operational')?.webhooksEnabled).toBe(true);
+        expect(() => config.validate()).not.toThrow();
+      });
+
+      it('should preserve webhooksEnabled when set to false', () => {
+        const config = new AnchorConfig({
+          ...validBaseConfig,
+          operational: { webhooksEnabled: false },
+        });
+        expect(config.get('operational')?.webhooksEnabled).toBe(false);
+        expect(() => config.validate()).not.toThrow();
+      });
+
+      it('should preserve corsEnabled when set to true', () => {
+        const config = new AnchorConfig({
+          ...validBaseConfig,
+          operational: { corsEnabled: true },
+        });
+        expect(config.get('operational')?.corsEnabled).toBe(true);
+        expect(() => config.validate()).not.toThrow();
+      });
+
+      it('should preserve corsEnabled when set to false', () => {
+        const config = new AnchorConfig({
+          ...validBaseConfig,
+          operational: { corsEnabled: false },
+        });
+        expect(config.get('operational')?.corsEnabled).toBe(false);
+        expect(() => config.validate()).not.toThrow();
+      });
+
+      it('should preserve both operational flags when both are set', () => {
+        const config = new AnchorConfig({
+          ...validBaseConfig,
+          operational: { webhooksEnabled: true, corsEnabled: false },
+        });
+        expect(config.get('operational')?.webhooksEnabled).toBe(true);
+        expect(config.get('operational')?.corsEnabled).toBe(false);
+        expect(() => config.validate()).not.toThrow();
+      });
+
+      it('should leave webhooksEnabled undefined when not specified', () => {
+        const config = new AnchorConfig({
+          ...validBaseConfig,
+          operational: { name: 'Test Anchor' },
+        });
+        expect(config.get('operational')?.webhooksEnabled).toBeUndefined();
+        expect(() => config.validate()).not.toThrow();
+      });
+
+      it('should leave corsEnabled undefined when not specified', () => {
+        const config = new AnchorConfig({
+          ...validBaseConfig,
+          operational: { name: 'Test Anchor' },
+        });
+        expect(config.get('operational')?.corsEnabled).toBeUndefined();
+        expect(() => config.validate()).not.toThrow();
+      });
+    });
+
     describe('KYC age bounds validation', () => {
       it.each([
         { kyc: { minAge: 18 }, name: 'minimum age only' },
