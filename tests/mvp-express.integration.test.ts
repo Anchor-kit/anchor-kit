@@ -36,9 +36,8 @@ function createMountedInvoker(anchor: AnchorInstance) {
           ? serializedBody
           : Buffer.from(serializedBody);
 
-    const req = (
-      options.requestStream ?? Readable.from(reqBody ? [reqBody] : [])
-    ) as IncomingMessage & {
+    const req = (options.requestStream ??
+      Readable.from(reqBody ? [reqBody] : [])) as IncomingMessage & {
       method: string;
       url: string;
       headers: Record<string, string | string[]>;
@@ -1540,9 +1539,11 @@ describe('MVP Express-mounted integration', () => {
       body: { account, challenge: challengeTx.toXDR() },
     });
     const reservedIdAccessToken = String(tokenResponse.body.token ?? '');
-    const database = (anchor as unknown as {
-      database: { getInteractiveTransactionById: (id: string) => Promise<unknown> };
-    }).database;
+    const database = (
+      anchor as unknown as {
+        database: { getInteractiveTransactionById: (id: string) => Promise<unknown> };
+      }
+    ).database;
     const lookupSpy = vi.spyOn(database, 'getInteractiveTransactionById').mockResolvedValue({
       id: reservedId,
       account,
@@ -1560,8 +1561,7 @@ describe('MVP Express-mounted integration', () => {
       headers: { authorization: `Bearer ${reservedIdAccessToken}` },
     });
 
-    const expectedInteractiveUrl =
-      `https://anchor.example.com/deposit/${encodeURIComponent(reservedId)}`;
+    const expectedInteractiveUrl = `https://anchor.example.com/deposit/${encodeURIComponent(reservedId)}`;
     expect(response.status).toBe(200);
     expect(lookupSpy).toHaveBeenCalledWith(reservedId);
     expect(response.body.id).toBe(reservedId);
@@ -1573,9 +1573,11 @@ describe('MVP Express-mounted integration', () => {
   it.each(['/transactions/', '/transactions/%20%20'])(
     '7a) transaction lookup rejects empty decoded ID path %s before database lookup',
     async (path) => {
-      const database = (anchor as unknown as {
-        database: { getInteractiveTransactionById: (id: string) => Promise<unknown> };
-      }).database;
+      const database = (
+        anchor as unknown as {
+          database: { getInteractiveTransactionById: (id: string) => Promise<unknown> };
+        }
+      ).database;
       const lookupSpy = vi.spyOn(database, 'getInteractiveTransactionById');
 
       const response = await invoke({
@@ -1592,9 +1594,11 @@ describe('MVP Express-mounted integration', () => {
   );
 
   it('7d) transaction lookup preserves malformed percent-encoding rejection', async () => {
-    const database = (anchor as unknown as {
-      database: { getInteractiveTransactionById: (id: string) => Promise<unknown> };
-    }).database;
+    const database = (
+      anchor as unknown as {
+        database: { getInteractiveTransactionById: (id: string) => Promise<unknown> };
+      }
+    ).database;
     const lookupSpy = vi.spyOn(database, 'getInteractiveTransactionById');
 
     const response = await invoke({
