@@ -15,8 +15,23 @@ import jwt from 'jsonwebtoken';
 import { createHash, randomUUID } from 'node:crypto';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { version } from '../../../package.json';
+import { extractClientIdentifier } from './client-identifier.ts';
 
 const SEP10_NONCE_OP = 'anchor_auth';
+
+/**
+ * Stable issuer for bearer access tokens minted by the anchor API.
+ * Tokens issued by a different service must not be accepted here, even when
+ * they are signed with the same shared secret.
+ */
+export const ACCESS_TOKEN_ISSUER = 'anchor-kit';
+
+/**
+ * Stable audience for bearer access tokens minted by the anchor API.
+ * Verification requires this exact audience so a valid token minted for an
+ * unintended service is rejected.
+ */
+export const ACCESS_TOKEN_AUDIENCE = 'anchor-api';
 
 export interface ExpressRouterContext {
   config: AnchorConfig;
@@ -25,6 +40,8 @@ export interface ExpressRouterContext {
   sep10ServerKeypair: Keypair;
   networkPassphrase: string;
   maxBodyBytes: number;
+  corsOrigins: string[] | undefined;
+  requestTimeout: number;
   rateLimiter: InMemoryRateLimiter;
   rateRules: Record<'auth_challenge' | 'auth_token' | 'webhook' | 'deposit', RateLimitRule>;
 }
@@ -36,12 +53,71 @@ interface AuthenticatedRequestData {
 type RawBodyValue = string | Buffer | Uint8Array;
 type IncomingRequestWithRawBody = IncomingMessage & { rawBody?: RawBodyValue; body?: unknown };
 
-function sendJson(res: ServerResponse, status: number, body: Record<string, unknown>): void {
+function firstNonEmptyString(value: unknown): string | undefined {
+  const values = Array.isArray(value) ? value : [value];
+  for (const candidate of values) {
+    if (typeof candidate === 'string' && candidate.trim().length > 0) {
+      return candidate.trim();
+    }
+  }
+  return undefined;
+}
+
+function sendJson(
+  res: ServerResponse,
+  status: number,
+  body: Record<string, unknown>,
+  method = 'GET',
+): void {
+  const payload = JSON.stringify(body);
   if (!res.headersSent) {
     res.statusCode = status;
     res.setHeader('content-type', 'application/json');
+    res.setHeader('content-length', String(Buffer.byteLength(payload, 'utf8')));
   }
-  res.end(JSON.stringify(body));
+  if (method === 'HEAD') {
+    res.end();
+  } else {
+    res.end(payload);
+  }
+}
+
+function setCorsHeaders(
+  res: ServerResponse,
+  origin: string | undefined,
+  corsOrigins: string[] | undefined,
+): void {
+  if (!res.headersSent) {
+    if (corsOrigins) {
+      const existingVary = res.getHeader('Vary');
+      const varyValues = Array.isArray(existingVary)
+        ? existingVary
+        : typeof existingVary === 'string'
+          ? existingVary.split(',').map((value) => value.trim())
+          : [];
+      if (!varyValues.some((value) => value.toLowerCase() === 'origin')) {
+        res.setHeader('Vary', [...varyValues, 'Origin'].filter(Boolean).join(', '));
+      }
+    }
+    if (origin && corsOrigins && corsOrigins.includes(origin)) {
+      res.setHeader('Access-Control-Allow-Origin', origin);
+      res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+      res.setHeader(
+        'Access-Control-Allow-Headers',
+        'Content-Type, Authorization, Idempotency-Key, X-Anchor-Signature, X-Webhook-Provider',
+      );
+    }
+  }
+}
+
+function sendMethodNotAllowed(res: ServerResponse, allowedMethods: string[]): void {
+  if (!res.headersSent) {
+    res.setHeader('Allow', allowedMethods.join(', '));
+  }
+  sendJson(res, 405, {
+    error: 'method_not_allowed',
+    message: 'Method not allowed',
+  });
 }
 
 function sendJsonUnauthorized(res: ServerResponse, body: Record<string, unknown>): void {
@@ -51,6 +127,41 @@ function sendJsonUnauthorized(res: ServerResponse, body: Record<string, unknown>
     res.setHeader('WWW-Authenticate', 'Bearer');
   }
   res.end(JSON.stringify(body));
+}
+
+function sendJsonTimeout(res: ServerResponse): void {
+  if (!res.headersSent) {
+    res.statusCode = 504;
+    res.setHeader('content-type', 'application/json');
+  }
+  res.end(
+    JSON.stringify({
+      error: 'gateway_timeout',
+      message: 'Request timeout',
+    }),
+  );
+}
+
+async function withTimeout<T>(
+  promise: Promise<T>,
+  timeoutMs: number,
+  onTimeout: () => void,
+): Promise<T> {
+  let timeoutHandle: NodeJS.Timeout | undefined;
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    timeoutHandle = setTimeout(() => {
+      onTimeout();
+      reject(new Error('Request timeout'));
+    }, timeoutMs);
+  });
+
+  try {
+    return await Promise.race([promise, timeoutPromise]);
+  } finally {
+    if (timeoutHandle) {
+      clearTimeout(timeoutHandle);
+    }
+  }
 }
 
 function parseUrl(req: IncomingMessage): URL {
@@ -87,10 +198,16 @@ async function readRawBody(req: IncomingMessage, maxBodyBytes: number): Promise<
 
   const chunks: Uint8Array[] = [];
   let totalBytes = 0;
-  for await (const chunk of req) {
+  const iterator = req.iterator({ destroyOnReturn: false });
+  while (true) {
+    const { done, value: chunk } = await iterator.next();
+    if (done) break;
+
     const chunkBuffer = typeof chunk === 'string' ? Buffer.from(chunk) : chunk;
     totalBytes += chunkBuffer.byteLength;
     if (totalBytes > maxBodyBytes) {
+      req.pause();
+      await iterator.return?.();
       throw new PayloadTooLargeError(`Request body too large. Max ${maxBodyBytes} bytes`);
     }
     chunks.push(chunkBuffer);
@@ -122,6 +239,16 @@ async function parsePostJsonBody(
   res: ServerResponse,
   maxBodyBytes: number,
 ): Promise<{ rawBody: RawBodyValue; body: Record<string, unknown> } | null> {
+  const contentType = firstNonEmptyString(req.headers['content-type']);
+  const mediaType = contentType?.split(';', 1)[0]?.trim().toLowerCase();
+  if (mediaType !== 'application/json') {
+    sendJson(res, 400, {
+      error: 'invalid_request',
+      message: 'Content-Type must be application/json',
+    });
+    return null;
+  }
+
   let rawBody: RawBodyValue;
   try {
     rawBody = await readRawBody(req, maxBodyBytes);
@@ -156,9 +283,14 @@ function sha256(input: string | Buffer | Uint8Array): string {
 
 function readBearerToken(req: IncomingMessage): string | null {
   const authHeader = req.headers.authorization;
-  if (typeof authHeader !== 'string' || authHeader.length === 0) return null;
+  const normalizedHeader = Array.isArray(authHeader)
+    ? authHeader.length === 1
+      ? authHeader[0]
+      : null
+    : authHeader;
+  if (typeof normalizedHeader !== 'string' || normalizedHeader.length === 0) return null;
 
-  const match = authHeader.match(/^(\S+)\s+(\S+)$/);
+  const match = normalizedHeader.match(/^(\S+)\s+(\S+)$/);
   if (!match) return null;
 
   const [, scheme, token] = match;
@@ -178,25 +310,29 @@ function isPlainDecimalString(value: unknown): value is string {
   return typeof value === 'string' && /^\d+(?:\.\d+)?$/.test(value);
 }
 
+/**
+ * Detects numbers JavaScript cannot represent exactly. Integers above
+ * `Number.MAX_SAFE_INTEGER` and fractions with a magnitude that large are
+ * rounded during JSON parsing, which can silently change the amount.
+ */
+function isUnsafeAmountNumber(value: number): boolean {
+  return !Number.isFinite(value) || !Number.isSafeInteger(Math.trunc(value));
+}
+
 function buildInteractiveUrl(interactiveDomain: string, transactionId: string): string {
   const normalizedDomain = interactiveDomain.endsWith('/')
     ? interactiveDomain.slice(0, -1)
     : interactiveDomain;
-  return `${normalizedDomain}/deposit/${transactionId}`;
+  return `${normalizedDomain}/deposit/${encodeURIComponent(transactionId)}`;
 }
 
 function endpointPath(req: IncomingMessage): string {
   return parseUrl(req).pathname;
 }
 
-function extractClientIdentifier(req: IncomingMessage, trustForwardedFor: boolean): string {
-  const socketIp = req.socket?.remoteAddress;
-  if (trustForwardedFor) {
-    const forwardedFor = req.headers['x-forwarded-for'];
-    const leftMost = typeof forwardedFor === 'string' ? forwardedFor.split(',')[0].trim() : null;
-    return leftMost || socketIp || 'unknown';
-  }
-  return socketIp || 'unknown';
+export function isAuthChallengeExpired(expiresAt: string, nowMs = Date.now()): boolean {
+  const expirationMs = Date.parse(expiresAt);
+  return !Number.isFinite(expirationMs) || nowMs >= expirationMs;
 }
 
 function hasValidSignature(transaction: Transaction, publicKey: string): boolean {
@@ -244,18 +380,21 @@ function authenticate(
   if (!token) return null;
 
   try {
-    const decoded = jwt.verify(
-      token,
-      context.config.get('security').interactiveJwtSecret,
-    ) as jwt.JwtPayload;
+    const decoded = jwt.verify(token, context.config.get('security').interactiveJwtSecret, {
+      algorithms: ['HS256'],
+    }) as jwt.JwtPayload;
     const account = typeof decoded.sub === 'string' ? decoded.sub : null;
     const scope = typeof decoded.scope === 'string' ? decoded.scope : null;
     const typ = typeof decoded.typ === 'string' ? decoded.typ : null;
+    const issuer = typeof decoded.iss === 'string' ? decoded.iss : null;
+    const audience = typeof decoded.aud === 'string' ? decoded.aud : null;
     if (
       !account ||
       !StrKey.isValidEd25519PublicKey(account) ||
       scope !== 'anchor_api' ||
-      typ !== 'access_token'
+      typ !== 'access_token' ||
+      issuer !== ACCESS_TOKEN_ISSUER ||
+      audience !== ACCESS_TOKEN_AUDIENCE
     ) {
       return null;
     }
@@ -273,9 +412,17 @@ function checkRateLimit(
   endpoint: keyof ExpressRouterContext['rateRules'],
 ): boolean {
   const trustForwardedFor = context.config.get('framework')?.rateLimit?.trustForwardedFor ?? false;
-  const clientId = extractClientIdentifier(req, trustForwardedFor);
+  const clientId = extractClientIdentifier(
+    req.socket?.remoteAddress,
+    req.headers['x-forwarded-for'],
+    trustForwardedFor,
+  );
   const key = `${endpoint}:${clientId}`;
   const result = context.rateLimiter.hit(key, context.rateRules[endpoint]);
+
+  res.setHeader('RateLimit-Limit', `${result.limit}`);
+  res.setHeader('RateLimit-Remaining', `${result.remaining}`);
+  res.setHeader('RateLimit-Reset', `${result.resetSeconds}`);
 
   if (!result.allowed) {
     res.setHeader('retry-after', `${result.retryAfterSeconds}`);
@@ -290,8 +437,8 @@ function checkRateLimit(
   return true;
 }
 
-async function handleHealth(res: ServerResponse): Promise<void> {
-  sendJson(res, 200, { status: 'ok', version });
+async function handleHealth(res: ServerResponse, method = 'GET'): Promise<void> {
+  sendJson(res, 200, { status: 'ok', version }, method);
 }
 
 async function handleInfo(context: ExpressRouterContext, res: ServerResponse): Promise<void> {
@@ -362,6 +509,10 @@ async function handleInfo(context: ExpressRouterContext, res: ServerResponse): P
 
   if (fullConfig.server.interactiveDomain) {
     responseBody.interactive_domain = fullConfig.server.interactiveDomain;
+  }
+
+  if (fullConfig.assets.defaultCurrency) {
+    responseBody.default_currency = fullConfig.assets.defaultCurrency;
   }
 
   if (fullConfig.operational?.supportEmail) {
@@ -457,7 +608,8 @@ async function handleAuthChallenge(
     return;
   }
 
-  const account = parseUrl(req).searchParams.get('account');
+  // Accept canonical Stellar public keys and treat surrounding whitespace as non-semantic.
+  const account = parseUrl(req).searchParams.get('account')?.trim() ?? '';
   if (!account) {
     sendJson(res, 400, {
       error: 'invalid_request',
@@ -479,7 +631,7 @@ async function handleAuthChallenge(
   const expirationSeconds = context.config.get('security').challengeExpirationSeconds ?? 300;
   const expiresAtUnix = now + expirationSeconds;
 
-  const challengeTx = new TransactionBuilder(
+  const challengeBuilder = new TransactionBuilder(
     new Account(context.sep10ServerKeypair.publicKey(), '0'),
     {
       fee: '100',
@@ -493,8 +645,20 @@ async function handleAuthChallenge(
         source: account,
       }),
     )
-    .setTimebounds(now, expiresAtUnix)
-    .build();
+    .setTimebounds(now, expiresAtUnix);
+
+  const securityConfig = context.config.get('security');
+  if (securityConfig.enableClientAttribution) {
+    challengeBuilder.addOperation(
+      Operation.manageData({
+        name: 'client_domain',
+        value: securityConfig.clientDomain!,
+        source: securityConfig.clientDomainSigningKey!,
+      }),
+    );
+  }
+
+  const challengeTx = challengeBuilder.build();
 
   challengeTx.sign(context.sep10ServerKeypair);
   const challengeXdr = challengeTx.toXDR();
@@ -530,7 +694,7 @@ async function handleAuthToken(
     return;
   }
 
-  const account = typeof parsedBody.body.account === 'string' ? parsedBody.body.account : '';
+  const account = typeof parsedBody.body.account === 'string' ? parsedBody.body.account.trim() : '';
   const signedChallenge =
     typeof parsedBody.body.challenge === 'string' ? parsedBody.body.challenge : '';
   if (!account || !signedChallenge) {
@@ -604,18 +768,34 @@ async function handleAuthToken(
     return;
   }
 
-  if (new Date(stored.expiresAt).getTime() < Date.now()) {
+  if (isAuthChallengeExpired(stored.expiresAt)) {
     sendJson(res, 401, { error: 'invalid_challenge', message: 'Challenge expired' });
     return;
   }
 
-  await context.database.markAuthChallengeConsumed(stored.id);
+  let consumed: boolean;
+  try {
+    consumed = await context.database.markAuthChallengeConsumed(stored.id);
+  } catch {
+    sendJson(res, 500, {
+      error: 'server_error',
+      message: 'Failed to record challenge consumption',
+    });
+    return;
+  }
+
+  if (!consumed) {
+    sendJson(res, 401, { error: 'invalid_challenge', message: 'Challenge already used' });
+    return;
+  }
 
   const tokenLifetime = context.config.get('security').authTokenLifetimeSeconds ?? 3600;
   const expiresAt = new Date((Math.floor(Date.now() / 1000) + tokenLifetime) * 1000).toISOString();
   const token = jwt.sign(
     {
       sub: account,
+      iss: ACCESS_TOKEN_ISSUER,
+      aud: ACCESS_TOKEN_AUDIENCE,
       scope: 'anchor_api',
       typ: 'access_token',
     },
@@ -700,6 +880,15 @@ async function handleDepositInteractive(
     return;
   }
 
+  if (typeof amountRaw === 'number' && isUnsafeAmountNumber(numericAmount)) {
+    sendJson(res, 400, {
+      error: 'invalid_amount',
+      message:
+        'Amount must be a positive number. Unsafe numeric amounts must be sent as decimal strings to avoid precision loss',
+    });
+    return;
+  }
+
   if (selectedAsset.max_amount !== undefined && numericAmount > selectedAsset.max_amount) {
     sendJson(res, 400, {
       error: 'invalid_amount',
@@ -724,61 +913,96 @@ async function handleDepositInteractive(
 
   if (typeof idempotencyKey === 'string' && idempotencyKey.length > 0) {
     const idempotencyId = randomUUID();
-    const idempotencyRecord = await context.database.insertOrGetIdempotencyRecord({
+    const reservation = await context.database.reserveIdempotencyRecord({
       id: idempotencyId,
       scope,
       idempotencyKey,
       requestHash,
-      statusCode: 201,
-      responseBody: '{}',
     });
+    const idempotencyRecord = reservation.record;
 
-    if (idempotencyRecord.id === idempotencyId) {
-      const transactionId = randomUUID();
-      const created = await context.database.insertInteractiveTransaction({
-        id: transactionId,
-        account: auth.account,
-        kind: 'deposit',
-        assetCode,
-        amount,
-        status: 'pending_user_transfer_start',
+    if (!reservation.inserted) {
+      if (idempotencyRecord.requestHash !== requestHash) {
+        sendJson(res, 409, {
+          error: 'idempotency_conflict',
+          message: 'Idempotency key was already used with a different request body',
+        });
+        return;
+      }
+
+      if (idempotencyRecord.status === 'pending') {
+        res.setHeader('Retry-After', '1');
+        sendJson(res, 409, {
+          error: 'idempotency_in_progress',
+          message: 'A request with this idempotency key is still being processed',
+        });
+        return;
+      }
+
+      let responseBody: Record<string, unknown>;
+      try {
+        const parsed = JSON.parse(idempotencyRecord.responseBody) as unknown;
+        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+          throw new Error('Invalid idempotency response body');
+        }
+        responseBody = parsed as Record<string, unknown>;
+      } catch {
+        res.setHeader('Retry-After', '1');
+        sendJson(res, 503, {
+          error: 'idempotency_response_unavailable',
+          message: 'The saved response is unavailable; retry this request',
+        });
+        return;
+      }
+
+      sendJson(res, idempotencyRecord.statusCode, {
+        ...responseBody,
+        idempotency_replay: true,
       });
-
-      const responseBody = {
-        id: created.id,
-        kind: created.kind,
-        status: created.status,
-        amount: created.amount,
-        asset_code: created.assetCode,
-        asset_issuer: selectedAsset.issuer,
-        account: created.account,
-        interactive_url: buildInteractiveUrl(serverConfig.interactiveDomain, created.id),
-        created_at: created.createdAt,
-      };
-
-      await context.database.updateIdempotencyRecord({
-        scope,
-        idempotencyKey,
-        statusCode: 201,
-        responseBody: JSON.stringify(responseBody),
-      });
-
-      sendJson(res, 201, responseBody);
       return;
     }
 
-    if (idempotencyRecord.requestHash !== requestHash) {
-      sendJson(res, 409, {
-        error: 'idempotency_conflict',
-        message: 'Idempotency key was already used with a different request body',
+    const transactionId = randomUUID();
+    const createdAt = new Date().toISOString();
+    const responseBody = {
+      id: transactionId,
+      kind: 'deposit',
+      status: 'pending_user_transfer_start',
+      amount,
+      asset_code: assetCode,
+      asset_issuer: selectedAsset.issuer,
+      account: auth.account,
+      interactive_url: buildInteractiveUrl(serverConfig.interactiveDomain, transactionId),
+      created_at: createdAt,
+    };
+
+    try {
+      await context.database.createDepositWithIdempotency({
+        transaction: {
+          id: transactionId,
+          account: auth.account,
+          kind: 'deposit',
+          assetCode,
+          amount,
+          status: 'pending_user_transfer_start',
+          createdAt,
+        },
+        idempotency: {
+          scope,
+          idempotencyKey,
+          requestHash,
+          statusCode: 201,
+          responseBody: JSON.stringify(responseBody),
+        },
       });
-      return;
+    } catch (error) {
+      await context.database
+        .deletePendingIdempotencyRecord(scope, idempotencyKey, requestHash)
+        .catch(() => undefined);
+      throw error;
     }
 
-    sendJson(res, idempotencyRecord.statusCode, {
-      ...(JSON.parse(idempotencyRecord.responseBody) as Record<string, unknown>),
-      idempotency_replay: true,
-    });
+    sendJson(res, 201, responseBody);
     return;
   }
 
@@ -852,8 +1076,14 @@ async function handleTransaction(
   };
 
   if (serverConfig.interactiveDomain) {
-    responseData.interactive_url = buildInteractiveUrl(serverConfig.interactiveDomain, transaction.id);
-    responseData.more_info_url = buildInteractiveUrl(serverConfig.interactiveDomain, transaction.id);
+    responseData.interactive_url = buildInteractiveUrl(
+      serverConfig.interactiveDomain,
+      transaction.id,
+    );
+    responseData.more_info_url = buildInteractiveUrl(
+      serverConfig.interactiveDomain,
+      transaction.id,
+    );
   }
 
   sendJson(res, 200, responseData);
@@ -862,12 +1092,8 @@ async function handleTransaction(
 const MAX_PROVIDER_IDENTIFIER_LENGTH = 64;
 
 function normalizeProviderIdentifier(value: unknown): string | null {
-  if (typeof value !== 'string') {
-    return null;
-  }
-
-  const normalized = value.trim();
-  if (normalized.length === 0) {
+  const normalized = firstNonEmptyString(value);
+  if (!normalized) {
     return null;
   }
 
@@ -878,6 +1104,10 @@ function normalizeProviderIdentifier(value: unknown): string | null {
   }
 
   return normalized;
+}
+
+function hasPathSeparator(value: string): boolean {
+  return value.includes('/') || value.includes('\\');
 }
 
 async function handleWebhook(
@@ -921,7 +1151,7 @@ async function handleWebhook(
       ? eventIdField
       : randomUUID();
   const signatureHeader = req.headers['x-anchor-signature'];
-  const signature = typeof signatureHeader === 'string' ? signatureHeader : undefined;
+  const signature = firstNonEmptyString(signatureHeader);
 
   try {
     const result = await context.webhookProcessor.process({
@@ -937,7 +1167,7 @@ async function handleWebhook(
       duplicate: result.duplicate,
       event_id: result.eventId,
       received_at: new Date().toISOString(),
-      provider,
+      provider: result.provider,
     });
   } catch {
     sendJson(res, 400, {
@@ -948,6 +1178,24 @@ async function handleWebhook(
   }
 }
 
+const TRANSACTION_PATH_RE = /^\/transactions\/([^/]*)$/;
+
+const KNOWN_ROUTES: Record<string, string[]> = {
+  '/health': ['GET'],
+  '/info': ['GET'],
+  '/auth/challenge': ['GET'],
+  '/auth/token': ['POST'],
+  '/transactions/deposit/interactive': ['POST'],
+  '/webhooks/events': ['POST'],
+};
+
+function getAllowedMethods(path: string): string[] | null {
+  const exactMatch = KNOWN_ROUTES[path];
+  if (exactMatch) return exactMatch;
+  if (TRANSACTION_PATH_RE.test(path)) return ['GET'];
+  return null;
+}
+
 export async function handleExpressRouterRequest(
   context: ExpressRouterContext,
   req: IncomingMessage,
@@ -955,46 +1203,102 @@ export async function handleExpressRouterRequest(
 ): Promise<void> {
   const path = endpointPath(req);
   const method = (req.method ?? 'GET').toUpperCase();
+  const origin = firstNonEmptyString(req.headers.origin);
 
-  if (method === 'OPTIONS' && handleCorsPreflight(context, path, req, res)) {
+  // Set CORS headers for all responses
+  setCorsHeaders(res, origin, context.corsOrigins);
+
+  if (method === 'OPTIONS') {
+    res.statusCode = 204;
+    res.end();
     return;
   }
 
-  if (method === 'GET' && path === '/health') {
-    await handleHealth(res);
+  // Skip timeout for health endpoint (should always respond quickly)
+  if ((method === 'GET' || method === 'HEAD') && path === '/health') {
+    await handleHealth(res, method);
     return;
   }
 
-  if (method === 'GET' && path === '/info') {
-    await handleInfo(context, res);
-    return;
-  }
+  // Wrap all other requests with timeout
+  let timedOut = false;
+  await withTimeout(
+    (async () => {
+      if (method === 'GET' && path === '/info') {
+        await handleInfo(context, res);
+        return;
+      }
 
-  if (method === 'GET' && path === '/auth/challenge') {
-    await handleAuthChallenge(context, req, res);
-    return;
-  }
+      if (method === 'GET' && path === '/auth/challenge') {
+        await handleAuthChallenge(context, req, res);
+        return;
+      }
 
-  if (method === 'POST' && path === '/auth/token') {
-    await handleAuthToken(context, req, res);
-    return;
-  }
+      if (method === 'POST' && path === '/auth/token') {
+        await handleAuthToken(context, req, res);
+        return;
+      }
 
-  if (method === 'POST' && path === '/transactions/deposit/interactive') {
-    await handleDepositInteractive(context, req, res);
-    return;
-  }
+      if (method === 'POST' && path === '/transactions/deposit/interactive') {
+        await handleDepositInteractive(context, req, res);
+        return;
+      }
 
-  const transactionMatch = /^\/transactions\/([^/]+)$/.exec(path);
-  if (method === 'GET' && transactionMatch) {
-    await handleTransaction(context, req, res, decodeURIComponent(transactionMatch[1]));
-    return;
-  }
+      const transactionMatch = TRANSACTION_PATH_RE.exec(path);
+      if (method === 'GET' && transactionMatch) {
+        const transactionIdRaw = transactionMatch[1];
+        let transactionId: string;
+        try {
+          transactionId = decodeURIComponent(transactionIdRaw);
+        } catch {
+          sendJson(res, 400, {
+            error: 'invalid_request',
+            message: 'Transaction id contains malformed percent-encoding',
+          });
+          return;
+        }
 
-  if (method === 'POST' && path === '/webhooks/events') {
-    await handleWebhook(context, req, res);
-    return;
-  }
+        if (transactionId.trim().length === 0) {
+          sendJson(res, 400, {
+            error: 'invalid_request',
+            message: 'Transaction id must not be empty',
+          });
+          return;
+        }
 
-  sendJson(res, 404, { error: 'not_found', message: 'Endpoint not found' });
+        if (hasPathSeparator(transactionId)) {
+          sendJson(res, 400, {
+            error: 'invalid_request',
+            message: 'Transaction id must not contain path separators',
+          });
+          return;
+        }
+
+        await handleTransaction(context, req, res, transactionId);
+        return;
+      }
+
+      if (method === 'POST' && path === '/webhooks/events') {
+        await handleWebhook(context, req, res);
+        return;
+      }
+
+      const allowedMethods = getAllowedMethods(path);
+      if (allowedMethods) {
+        sendMethodNotAllowed(res, allowedMethods);
+        return;
+      }
+
+      sendJson(res, 404, { error: 'not_found', message: 'Endpoint not found' });
+    })(),
+    context.requestTimeout,
+    () => {
+      timedOut = true;
+      sendJsonTimeout(res);
+    },
+  ).catch((error: unknown) => {
+    if (!timedOut) {
+      throw error;
+    }
+  });
 }

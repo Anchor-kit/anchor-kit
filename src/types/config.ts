@@ -124,10 +124,22 @@ export interface SecurityConfig {
 
   /**
    * Enable client attribution for SEP-10
-   * Requires client domain verification
+   * Requires clientDomain, clientDomainSigningKey, and a matching HTTPS origin in server.corsOrigins
    * @optional - defaults to false
    */
   enableClientAttribution?: boolean;
+
+  /**
+   * Client's DNS hostname used for SEP-10 client attribution (without a scheme).
+   * @optional - required when enableClientAttribution is true
+   */
+  clientDomain?: string;
+
+  /**
+   * Stellar public key from the client's SEP-1 SIGNING_KEY entry.
+   * @optional - required when enableClientAttribution is true
+   */
+  clientDomainSigningKey?: string;
 
   /**
    * Webhook secret for payment rail providers
@@ -159,9 +171,9 @@ export interface Asset {
   code: string;
 
   /**
-   * Asset issuer public key
+   * Asset issuer public key. Required for issued assets and omitted for native XLM.
    */
-  issuer: string;
+  issuer?: string;
 
   /**
    * Human-readable name
@@ -205,7 +217,8 @@ export interface AssetsConfig {
   assets: Asset[];
 
   /**
-   * Default fiat currency code (ISO 4217)
+   * Default fiat currency code (ISO 4217).
+   * Only standard three-letter uppercase fiat codes are accepted; custom or non-fiat values are not allowed.
    * @optional
    */
   defaultCurrency?: string;
@@ -379,7 +392,7 @@ export interface FrameworkConfig {
     /**
      * Database provider type
      */
-    provider: 'postgres' | 'sqlite' | 'mysql';
+    provider: 'postgres' | 'sqlite';
 
     /**
      * Database connection URL
@@ -635,3 +648,19 @@ export interface AnchorKitConfig {
     ) => Promise<void> | void;
   };
 }
+
+/**
+ * Deep readonly utility type to reflect runtime deep-freeze behavior.
+ */
+export type DeepReadonly<T> = T extends (...args: never[]) => unknown
+  ? T
+  : T extends Array<infer U>
+    ? ReadonlyArray<DeepReadonly<U>>
+    : T extends object
+      ? { readonly [K in keyof T]: DeepReadonly<T[K]> }
+      : T;
+
+/**
+ * Snapshot type returned by `AnchorConfig.getConfig()` — deeply readonly.
+ */
+export type AnchorKitConfigSnapshot = DeepReadonly<AnchorKitConfig>;

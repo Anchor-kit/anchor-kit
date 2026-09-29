@@ -28,6 +28,13 @@ export class InMemoryQueueAdapter implements QueueAdapter {
   }
 
   public async start(worker: (job: QueueJob) => Promise<void>): Promise<void> {
+    if (this.running) {
+      if (this.worker === worker) {
+        return;
+      }
+      throw new Error('Queue is already running with a different worker callback.');
+    }
+
     this.worker = worker;
     this.running = true;
     this.kick();

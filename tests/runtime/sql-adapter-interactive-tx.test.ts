@@ -55,7 +55,7 @@ describe('SqlDatabaseAdapter – interactive transaction status updates', () => 
       expect(inserted.status).toBe('pending_user_transfer_start');
 
       currentTime = new RealDate('2026-01-01T00:00:01.000Z').getTime();
-      await db.updateTransactionStatus(txId, 'completed');
+      await expect(db.updateTransactionStatus(txId, 'completed')).resolves.toBe(true);
 
       const fetched = await db.getInteractiveTransactionById(txId);
       expect(fetched).not.toBeNull();

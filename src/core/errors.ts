@@ -135,3 +135,15 @@ export class CryptoError extends AnchorKitError {
     super(message, context);
   }
 }
+
+/**
+ * Error raised when persisted JSON payloads are malformed or cannot be decoded into the expected object shape.
+ */
+export class MalformedPersistedDataError extends AnchorKitError {
+  public readonly statusCode = 500;
+  public readonly errorCode = 'MALFORMED_PERSISTED_DATA';
+
+  constructor(message: string, context?: Record<string, unknown>) {
+    super(message, context);
+  }
+}

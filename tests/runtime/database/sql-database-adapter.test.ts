@@ -52,7 +52,15 @@ describe('SqlDatabaseAdapter (sqlite)', () => {
     expect(stored?.account).toBe('GB7W6F6S6LFQXCNHZVKI53ZJHULPF4E66YW2LJ3F4PAEPGZF5FY2B7ZB');
     expect(stored?.consumedAt).toBeNull();
 
-    await adapter.markAuthChallengeConsumed('challenge-1');
+    const firstConsume = await adapter.markAuthChallengeConsumed('challenge-1');
+    expect(firstConsume).toBe(true);
+
+    const secondConsume = await adapter.markAuthChallengeConsumed('challenge-1');
+    expect(secondConsume).toBe(false);
+
+    const nonExistentConsume = await adapter.markAuthChallengeConsumed('non-existent');
+    expect(nonExistentConsume).toBe(false);
+
     const consumed = await adapter.getAuthChallengeByChallenge('live-test-challenge');
     expect(consumed).not.toBeNull();
     expect(consumed?.consumedAt).toEqual(expect.any(String));

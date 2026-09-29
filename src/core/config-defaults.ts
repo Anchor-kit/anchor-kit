@@ -31,6 +31,8 @@ function buildOperationalConfig(input: Partial<AnchorKitConfig>): AnchorKitConfi
     name: operationalInput?.name,
     website: operationalInput?.website,
     supportEmail: operationalInput?.supportEmail,
+    webhooksEnabled: operationalInput?.webhooksEnabled,
+    corsEnabled: operationalInput?.corsEnabled,
     address: operationalInput?.address,
     transactionRetentionDays: operationalInput?.transactionRetentionDays ?? 90,
   } as AnchorKitConfig['operational'];

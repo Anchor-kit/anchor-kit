@@ -3,13 +3,14 @@
  * any test file written against bun:test works unchanged under vitest.
  */
 export {
-  describe,
-  it,
-  test,
-  expect,
-  beforeAll,
   afterAll,
-  beforeEach,
   afterEach,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  it,
   vi as mock,
+  test,
+  vi,
 } from 'vitest';
