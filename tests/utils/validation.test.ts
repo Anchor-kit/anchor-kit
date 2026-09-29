@@ -217,6 +217,138 @@ describe('Asset Validation (#254)', () => {
   });
 });
 
+describe('Operational Boolean Options Validation (#550)', () => {
+  const baseConfig: AnchorKitConfig = {
+    network: { network: 'testnet' },
+    server: { port: 3000 },
+    security: {
+      sep10SigningKey: 'secret-key-10',
+      interactiveJwtSecret: 'jwt-secret',
+      distributionAccountSecret: 'dist-secret',
+    },
+    assets: {
+      assets: [
+        {
+          code: 'USDC',
+          issuer: 'GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5',
+        },
+      ],
+    },
+    framework: {
+      database: {
+        provider: 'postgres',
+        url: 'postgresql://localhost:5432/anchor',
+      },
+    },
+  };
+
+  it('should accept valid boolean true for webhooksEnabled', () => {
+    const config: AnchorKitConfig = {
+      ...baseConfig,
+      operational: {
+        webhooksEnabled: true,
+      },
+    };
+    const anchor = new AnchorConfig(config);
+    expect(() => anchor.validate()).not.toThrow();
+  });
+
+  it('should accept valid boolean false for webhooksEnabled', () => {
+    const config: AnchorKitConfig = {
+      ...baseConfig,
+      operational: {
+        webhooksEnabled: false,
+      },
+    };
+    const anchor = new AnchorConfig(config);
+    expect(() => anchor.validate()).not.toThrow();
+  });
+
+  it('should accept valid boolean true for corsEnabled', () => {
+    const config: AnchorKitConfig = {
+      ...baseConfig,
+      operational: {
+        corsEnabled: true,
+      },
+    };
+    const anchor = new AnchorConfig(config);
+    expect(() => anchor.validate()).not.toThrow();
+  });
+
+  it('should accept valid boolean false for corsEnabled', () => {
+    const config: AnchorKitConfig = {
+      ...baseConfig,
+      operational: {
+        corsEnabled: false,
+      },
+    };
+    const anchor = new AnchorConfig(config);
+    expect(() => anchor.validate()).not.toThrow();
+  });
+
+  it('should accept config without webhooksEnabled (optional field)', () => {
+    const config: AnchorKitConfig = {
+      ...baseConfig,
+      operational: {},
+    };
+    const anchor = new AnchorConfig(config);
+    expect(() => anchor.validate()).not.toThrow();
+  });
+
+  it('should accept config without corsEnabled (optional field)', () => {
+    const config: AnchorKitConfig = {
+      ...baseConfig,
+      operational: {},
+    };
+    const anchor = new AnchorConfig(config);
+    expect(() => anchor.validate()).not.toThrow();
+  });
+
+  it('should reject string value for webhooksEnabled', () => {
+    const config = {
+      ...baseConfig,
+      operational: {
+        webhooksEnabled: 'true',
+      },
+    } as unknown as AnchorKitConfig;
+    const anchor = new AnchorConfig(config);
+    expect(() => anchor.validate()).toThrow('operational.webhooksEnabled must be a boolean');
+  });
+
+  it('should reject string value for corsEnabled', () => {
+    const config = {
+      ...baseConfig,
+      operational: {
+        corsEnabled: 'true',
+      },
+    } as unknown as AnchorKitConfig;
+    const anchor = new AnchorConfig(config);
+    expect(() => anchor.validate()).toThrow('operational.corsEnabled must be a boolean');
+  });
+
+  it('should reject number value for webhooksEnabled', () => {
+    const config = {
+      ...baseConfig,
+      operational: {
+        webhooksEnabled: 1,
+      },
+    } as unknown as AnchorKitConfig;
+    const anchor = new AnchorConfig(config);
+    expect(() => anchor.validate()).toThrow('operational.webhooksEnabled must be a boolean');
+  });
+
+  it('should reject number value for corsEnabled', () => {
+    const config = {
+      ...baseConfig,
+      operational: {
+        corsEnabled: 0,
+      },
+    } as unknown as AnchorKitConfig;
+    const anchor = new AnchorConfig(config);
+    expect(() => anchor.validate()).toThrow('operational.corsEnabled must be a boolean');
+  });
+});
+
 describe('Operational Website Validation (#388)', () => {
   const baseConfig: AnchorKitConfig = {
     network: { network: 'testnet' },
