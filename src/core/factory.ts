@@ -91,11 +91,12 @@ export class AnchorInstance {
 
         const watchersEnabled = frameworkConfig.watchers?.enabled ?? true;
         if (watchersEnabled) {
+          const retentionDays = this.config.get('operational')?.transactionRetentionDays ?? 90;
           this.watchers = [
             new TransactionWatcher(this.database, this.queue, {
               pollIntervalMs: frameworkConfig.watchers?.pollIntervalMs ?? 15000,
               transactionTimeoutMs: frameworkConfig.watchers?.transactionTimeoutMs ?? 300000,
-              retentionDays: frameworkConfig.watchers?.retentionDays ?? 90,
+              retentionDays,
             }),
           ];
         }
