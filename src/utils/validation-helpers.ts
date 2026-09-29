@@ -320,6 +320,7 @@ function validateFrameworkConfig(
   metadata: AnchorKitConfig['metadata'],
   operational: AnchorKitConfig['operational'],
 ): boolean {
+  validateFrameworkPlugins(framework.plugins);
   validateFrameworkDatabase(framework);
   validateFrameworkNumbers(framework);
   validateFrameworkRateLimit(framework);
@@ -327,6 +328,32 @@ function validateFrameworkConfig(
   validateMetadataFeatures(metadata);
   validateOperationalNumbers(operational);
   validateOperationalBooleans(operational);
+  return true;
+}
+
+function validateFrameworkPlugins(plugins: unknown): boolean {
+  if (plugins === undefined) return true;
+  if (!Array.isArray(plugins)) {
+    throw new Error('framework.plugins must be an array');
+  }
+
+  const seenIds = new Set<string>();
+  for (const [index, plugin] of plugins.entries()) {
+    if (typeof plugin !== 'object' || plugin === null || Array.isArray(plugin)) {
+      throw new Error(`framework.plugins[${index}] must be an object`);
+    }
+
+    const pluginId = (plugin as Record<string, unknown>).id;
+    if (typeof pluginId !== 'string' || pluginId.length === 0 || pluginId.trim() !== pluginId) {
+      throw new Error(`framework.plugins[${index}].id must be a non-empty trimmed string`);
+    }
+
+    if (seenIds.has(pluginId)) {
+      throw new Error(`framework.plugins[${index}].id duplicates "${pluginId}"`);
+    }
+    seenIds.add(pluginId);
+  }
+
   return true;
 }
 

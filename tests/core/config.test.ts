@@ -30,6 +30,15 @@ describe('AnchorConfig', () => {
     },
   };
 
+  function configWithPlugins(
+    plugins: NonNullable<AnchorKitConfig['framework']['plugins']>,
+  ): AnchorKitConfig {
+    return {
+      ...validBaseConfig,
+      framework: { ...validBaseConfig.framework, plugins },
+    };
+  }
+
   describe('Initialization and Getters', () => {
     it('should initialize and return specific config properties', () => {
       const config = new AnchorConfig(validBaseConfig);
@@ -72,6 +81,33 @@ describe('AnchorConfig', () => {
 
       expect(config.get('operational')?.transactionRetentionDays).toBe(30);
       expect(() => config.validate()).not.toThrow();
+    });
+  });
+
+  describe('Framework plugin configuration', () => {
+    it.each(['', ' ', ' plugin', 'plugin '])('rejects plugin ID %j', (id) => {
+      const config = new AnchorConfig(configWithPlugins([{ id }]));
+
+      expect(() => config.validate()).toThrow(/framework\.plugins\[0\]\.id/);
+    });
+
+    it('rejects duplicate plugin IDs', () => {
+      const config = new AnchorConfig(configWithPlugins([{ id: 'payments' }, { id: 'payments' }]));
+
+      expect(() => config.validate()).toThrow(/framework\.plugins\[1\]\.id duplicates "payments"/);
+    });
+
+    it('keeps valid plugin settings unchanged in the frozen config snapshot', () => {
+      const plugins = [
+        { id: 'payments', config: { provider: 'example', enabled: true } },
+        { id: 'identity', config: { fields: ['email'] } },
+      ];
+      const config = new AnchorConfig(configWithPlugins(plugins));
+
+      expect(() => config.validate()).not.toThrow();
+      expect(config.get('framework').plugins).toEqual(plugins);
+      expect(Object.isFrozen(config.get('framework').plugins)).toBe(true);
+      expect(Object.isFrozen(config.get('framework').plugins?.[0].config)).toBe(true);
     });
   });
 
