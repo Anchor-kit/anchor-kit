@@ -61,6 +61,10 @@ export const CryptoUtils = {
     secret: string,
     options: { expiresIn?: string | number } = {},
   ): Promise<string> {
+    if (secret.trim().length === 0) {
+      throw new TypeError('secret must not be empty');
+    }
+
     const secretKey = new TextEncoder().encode(secret);
     const builder = new jose.SignJWT(payload).setProtectedHeader({ alg: 'HS256' }).setIssuedAt();
 
@@ -81,6 +85,10 @@ export const CryptoUtils = {
    * @throws Error if the token is invalid or expired.
    */
   async verifyJwt(token: string, secret: string): Promise<JWTPayload> {
+    if (secret.trim().length === 0) {
+      throw new TypeError('secret must not be empty');
+    }
+
     const secretKey = new TextEncoder().encode(secret);
     const { payload } = await jose.jwtVerify(token, secretKey);
     return payload;
