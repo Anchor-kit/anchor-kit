@@ -76,6 +76,10 @@ const anchor = createAnchor({
       },
     ],
   },
+  operational: {
+    // Controls cleanup retention. This overrides framework.watchers.retentionDays.
+    transactionRetentionDays: 90,
+  },
   framework: {
     database: {
       provider: 'postgres',
@@ -97,6 +101,10 @@ const anchor = createAnchor({
     },
   },
 });
+
+`operational.transactionRetentionDays` controls the retention value included in cleanup jobs.
+For compatibility, existing configurations that only set `framework.watchers.retentionDays` continue
+to use that value; when both are set, the operational setting takes precedence.
 
 await anchor.init();
 await anchor.startBackgroundJobs();
