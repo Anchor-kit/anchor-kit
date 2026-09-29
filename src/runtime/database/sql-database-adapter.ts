@@ -71,6 +71,7 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
   private postgres: PostgresClient | null = null;
   private connectPromise: Promise<void> | null = null;
   private disconnectPromise: Promise<void> | null = null;
+  private migratePromise: Promise<void> | null = null;
 
   constructor(databaseConfig: FrameworkConfig['database']) {
     this.provider = databaseConfig.provider;
@@ -160,6 +161,23 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
   }
 
   public async migrate(): Promise<void> {
+    if (this.migratePromise) {
+      await this.migratePromise;
+      return;
+    }
+
+    this.migratePromise = this.runMigrations();
+
+    try {
+      await this.migratePromise;
+    } finally {
+      // Clear the guard once the sequence settles so a failed migration can be
+      // retried by the next caller instead of being cached as successful.
+      this.migratePromise = null;
+    }
+  }
+
+  private async runMigrations(): Promise<void> {
     if (this.sqlite) {
       this.sqlite.exec(`
         CREATE TABLE IF NOT EXISTS auth_challenges (
