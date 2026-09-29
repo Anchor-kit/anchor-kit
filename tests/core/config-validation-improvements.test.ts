@@ -36,6 +36,48 @@ describe('Config Validation Improvements (#124, #125)', () => {
     },
   };
 
+  it('validates server host and CORS origins in the complete config', () => {
+    for (const [server, expectedError] of [
+      [{ host: '' }, /server\.host: invalid value/],
+      [{ host: 123 }, /server\.host: invalid value/],
+      [{ corsOrigins: [''] }, /server\.corsOrigins: invalid value/],
+      [{ corsOrigins: [123] }, /server\.corsOrigins: invalid value/],
+    ] as const) {
+      const config = new AnchorConfig({
+        ...validBaseConfig,
+        server: server as AnchorKitConfig['server'],
+      });
+      expect(() => config.validate()).toThrow(expectedError);
+    }
+
+    const validConfig = new AnchorConfig({
+      ...validBaseConfig,
+      server: { host: 'localhost', corsOrigins: ['https://app.example.com'] },
+    });
+    expect(() => validConfig.validate()).not.toThrow();
+    expect(validConfig.get('server').corsOrigins).toEqual(['https://app.example.com']);
+  });
+
+  it('validates metadata protocol flags as booleans and freezes valid flags', () => {
+    const protocolFlags = ['sep10', 'sep24', 'sep6', 'sep31'] as const;
+    for (const protocol of protocolFlags) {
+      const invalidConfig = new AnchorConfig({
+        ...validBaseConfig,
+        metadata: { protocols: { [protocol]: 'yes' as unknown as boolean } },
+      });
+      expect(() => invalidConfig.validate()).toThrow(
+        new RegExp(`metadata\\.protocols\\.${protocol} must be a boolean`),
+      );
+
+      const validConfig = new AnchorConfig({
+        ...validBaseConfig,
+        metadata: { protocols: { [protocol]: true } },
+      });
+      expect(() => validConfig.validate()).not.toThrow();
+      expect(Object.isFrozen(validConfig.get('metadata')?.protocols)).toBe(true);
+    }
+  });
+
   it('should reject MySQL provider during validation (#124)', () => {
     const mysqlConfig: AnchorKitConfig = {
       ...validBaseConfig,

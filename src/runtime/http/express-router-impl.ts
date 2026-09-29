@@ -443,12 +443,68 @@ async function handleHealth(res: ServerResponse, method = 'GET'): Promise<void> 
 
 async function handleInfo(context: ExpressRouterContext, res: ServerResponse): Promise<void> {
   const fullConfig = context.config.getConfig();
+  const metadata = fullConfig.metadata;
   const responseBody: Record<string, unknown> = {
     name: fullConfig.operational?.name ?? 'Anchor-Kit Anchor',
     network: fullConfig.network.network,
     network_passphrase: context.networkPassphrase,
     assets: fullConfig.assets.assets,
     version,
+    metadata: {
+      ...(metadata?.tomlUrl === undefined ? {} : { tomlUrl: metadata.tomlUrl }),
+      ...(metadata?.protocols === undefined
+        ? {}
+        : {
+            protocols: {
+              ...(metadata.protocols.sep10 === undefined
+                ? {}
+                : { sep10: metadata.protocols.sep10 }),
+              ...(metadata.protocols.sep24 === undefined
+                ? {}
+                : { sep24: metadata.protocols.sep24 }),
+              ...(metadata.protocols.sep6 === undefined ? {} : { sep6: metadata.protocols.sep6 }),
+              ...(metadata.protocols.sep31 === undefined
+                ? {}
+                : { sep31: metadata.protocols.sep31 }),
+            },
+          }),
+      ...(metadata?.features === undefined
+        ? {}
+        : {
+            features: {
+              ...(metadata.features.supportsInteractiveDeposits === undefined
+                ? {}
+                : { supportsInteractiveDeposits: metadata.features.supportsInteractiveDeposits }),
+              ...(metadata.features.supportsInteractiveWithdrawals === undefined
+                ? {}
+                : {
+                    supportsInteractiveWithdrawals:
+                      metadata.features.supportsInteractiveWithdrawals,
+                  }),
+              ...(metadata.features.supportsAsyncTransactionStatus === undefined
+                ? {}
+                : {
+                    supportsAsyncTransactionStatus:
+                      metadata.features.supportsAsyncTransactionStatus,
+                  }),
+            },
+          }),
+      ...(metadata?.documentationUrls === undefined
+        ? {}
+        : {
+            documentationUrls: {
+              ...(metadata.documentationUrls.apiDocs === undefined
+                ? {}
+                : { apiDocs: metadata.documentationUrls.apiDocs }),
+              ...(metadata.documentationUrls.support === undefined
+                ? {}
+                : { support: metadata.documentationUrls.support }),
+              ...(metadata.documentationUrls.terms === undefined
+                ? {}
+                : { terms: metadata.documentationUrls.terms }),
+            },
+          }),
+    },
   };
 
   if (fullConfig.server.interactiveDomain) {
@@ -468,6 +524,85 @@ async function handleInfo(context: ExpressRouterContext, res: ServerResponse): P
   }
 
   sendJson(res, 200, responseBody);
+}
+
+function allowedMethodsForPath(path: string): readonly string[] | undefined {
+  if (path === '/health' || path === '/info' || path === '/auth/challenge') return ['GET'];
+  if (
+    path === '/auth/token' ||
+    path === '/transactions/deposit/interactive' ||
+    path === '/webhooks/events'
+  ) {
+    return ['POST'];
+  }
+  if (/^\/transactions\/[^/]+$/.test(path)) return ['GET'];
+  return undefined;
+}
+
+function handleCorsPreflight(
+  context: ExpressRouterContext,
+  path: string,
+  req: IncomingMessage,
+  res: ServerResponse,
+): boolean {
+  const allowedMethods = allowedMethodsForPath(path);
+  if (!allowedMethods) return false;
+
+  const requestedMethodHeader = req.headers['access-control-request-method'];
+  if (requestedMethodHeader === undefined) {
+    res.statusCode = 204;
+    res.end();
+    return true;
+  }
+
+  const originHeader = req.headers.origin;
+  const requestedMethod =
+    typeof requestedMethodHeader === 'string' ? requestedMethodHeader.toUpperCase() : '';
+  const requestedHeadersHeader = req.headers['access-control-request-headers'];
+  const requestedHeaders =
+    typeof requestedHeadersHeader === 'string'
+      ? requestedHeadersHeader
+          .split(',')
+          .map((header) => header.trim())
+          .filter(Boolean)
+      : [];
+  const allowedHeaders = new Map([
+    ['authorization', 'Authorization'],
+    ['content-type', 'Content-Type'],
+    ['idempotency-key', 'Idempotency-Key'],
+    ['x-anchor-signature', 'X-Anchor-Signature'],
+    ['x-webhook-provider', 'X-Webhook-Provider'],
+  ]);
+  const corsOrigins = context.config.get('server').corsOrigins ?? [];
+
+  if (
+    typeof originHeader !== 'string' ||
+    !corsOrigins.includes(originHeader) ||
+    !allowedMethods.includes(requestedMethod) ||
+    requestedHeaders.some((header) => !allowedHeaders.has(header.toLowerCase()))
+  ) {
+    sendJson(res, 403, {
+      error: 'cors_preflight_denied',
+      message: 'CORS preflight request is not allowed',
+    });
+    return true;
+  }
+
+  res.statusCode = 204;
+  res.setHeader('access-control-allow-origin', originHeader);
+  res.setHeader('access-control-allow-methods', requestedMethod);
+  if (requestedHeaders.length > 0) {
+    res.setHeader(
+      'access-control-allow-headers',
+      requestedHeaders
+        .map((header) => allowedHeaders.get(header.toLowerCase()))
+        .filter((header): header is string => header !== undefined)
+        .join(', '),
+    );
+  }
+  res.setHeader('vary', 'Origin, Access-Control-Request-Method, Access-Control-Request-Headers');
+  res.end();
+  return true;
 }
 
 async function handleAuthChallenge(
@@ -1107,8 +1242,10 @@ export async function handleExpressRouterRequest(
   setCorsHeaders(res, origin, context.corsOrigins);
 
   if (method === 'OPTIONS') {
-    res.statusCode = 204;
-    res.end();
+    if (!handleCorsPreflight(context, path, req, res)) {
+      res.statusCode = 204;
+      res.end();
+    }
     return;
   }
 
