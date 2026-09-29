@@ -71,6 +71,9 @@ function createMountedInvoker(anchor: AnchorInstance) {
         setHeader(name: string, value: string): void {
           responseHeaders[name.toLowerCase()] = value;
         },
+        getHeader(name: string): string | undefined {
+          return responseHeaders[name.toLowerCase()];
+        },
         end(payload?: string): void {
           const contentType = responseHeaders['content-type'] ?? '';
           const bodyText = typeof payload === 'string' ? payload : '';
@@ -3029,8 +3032,9 @@ describe('MVP Express-mounted integration', () => {
       expect(allowedResponse.headers['access-control-allow-origin']).toBe('https://example.com');
       expect(allowedResponse.headers['access-control-allow-methods']).toBe('GET, POST, OPTIONS');
       expect(allowedResponse.headers['access-control-allow-headers']).toBe(
-        'Content-Type, Authorization',
+        'Content-Type, Authorization, Idempotency-Key, X-Anchor-Signature, X-Webhook-Provider',
       );
+      expect(allowedResponse.headers.vary).toContain('Origin');
 
       // Test another allowed origin
       const allowedResponse2 = await customInvoke({
@@ -3041,6 +3045,22 @@ describe('MVP Express-mounted integration', () => {
       expect(allowedResponse2.status).toBe(200);
       expect(allowedResponse2.headers['access-control-allow-origin']).toBe(
         'https://trusted-site.com',
+      );
+
+      const preflightResponse = await customInvoke({
+        method: 'OPTIONS',
+        path: '/transactions/deposit/interactive',
+        headers: {
+          origin: 'https://example.com',
+          'access-control-request-method': 'POST',
+          'access-control-request-headers': 'authorization, idempotency-key',
+        },
+      });
+      expect(preflightResponse.status).toBe(204);
+      expect(preflightResponse.headers['access-control-allow-origin']).toBe('https://example.com');
+      expect(preflightResponse.headers['access-control-allow-methods']).toContain('POST');
+      expect(preflightResponse.headers['access-control-allow-headers']).toContain(
+        'Idempotency-Key',
       );
     } finally {
       await customAnchor.shutdown();

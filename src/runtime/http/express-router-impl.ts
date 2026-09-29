@@ -62,10 +62,24 @@ function setCorsHeaders(
   corsOrigins: string[] | undefined,
 ): void {
   if (!res.headersSent) {
+    if (corsOrigins) {
+      const existingVary = res.getHeader('Vary');
+      const varyValues = Array.isArray(existingVary)
+        ? existingVary
+        : typeof existingVary === 'string'
+          ? existingVary.split(',').map((value) => value.trim())
+          : [];
+      if (!varyValues.some((value) => value.toLowerCase() === 'origin')) {
+        res.setHeader('Vary', [...varyValues, 'Origin'].filter(Boolean).join(', '));
+      }
+    }
     if (origin && corsOrigins && corsOrigins.includes(origin)) {
       res.setHeader('Access-Control-Allow-Origin', origin);
       res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-      res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+      res.setHeader(
+        'Access-Control-Allow-Headers',
+        'Content-Type, Authorization, Idempotency-Key, X-Anchor-Signature, X-Webhook-Provider',
+      );
     }
   }
 }
@@ -908,6 +922,12 @@ export async function handleExpressRouterRequest(
 
   // Set CORS headers for all responses
   setCorsHeaders(res, origin, context.corsOrigins);
+
+  if (method === 'OPTIONS') {
+    res.statusCode = 204;
+    res.end();
+    return;
+  }
 
   // Skip timeout for health endpoint (should always respond quickly)
   if (method === 'GET' && path === '/health') {
