@@ -65,7 +65,12 @@ function isValidStellarAssetCode(code: string): boolean {
 }
 
 function isValidAssetAmount(value: unknown): value is number {
-  return typeof value === 'number' && Number.isFinite(value) && value >= 0;
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) return false;
+  if (Number.isSafeInteger(value)) return true;
+  if (value > Number.MAX_SAFE_INTEGER) return false;
+
+  // Accept decimal bounds only when 15 significant digits reproduce the same number.
+  return Number(value.toPrecision(15)) === value;
 }
 
 function validateAssetAmountRange(asset: { min_amount?: number; max_amount?: number }): boolean {
@@ -259,6 +264,24 @@ function validateFrameworkUrls(
     throw new Error('Invalid URL format for metadata.tomlUrl');
   }
 
+  if (
+    metadata?.documentationUrls?.apiDocs &&
+    !isValidUrlString(metadata.documentationUrls.apiDocs)
+  ) {
+    throw new Error('Invalid URL format for metadata.documentationUrls.apiDocs');
+  }
+
+  if (
+    metadata?.documentationUrls?.support &&
+    !isValidUrlString(metadata.documentationUrls.support)
+  ) {
+    throw new Error('Invalid URL format for metadata.documentationUrls.support');
+  }
+
+  if (metadata?.documentationUrls?.terms && !isValidUrlString(metadata.documentationUrls.terms)) {
+    throw new Error('Invalid URL format for metadata.documentationUrls.terms');
+  }
+
   if (operational?.website && !isValidUrlString(operational.website)) {
     throw new Error('Invalid URL format for operational.website');
   }
@@ -320,6 +343,7 @@ function validateFrameworkConfig(
   metadata: AnchorKitConfig['metadata'],
   operational: AnchorKitConfig['operational'],
 ): boolean {
+  validateFrameworkPlugins(framework.plugins);
   validateFrameworkDatabase(framework);
   validateFrameworkNumbers(framework);
   validateFrameworkRateLimit(framework);
@@ -327,6 +351,32 @@ function validateFrameworkConfig(
   validateMetadataFeatures(metadata);
   validateOperationalNumbers(operational);
   validateOperationalBooleans(operational);
+  return true;
+}
+
+function validateFrameworkPlugins(plugins: unknown): boolean {
+  if (plugins === undefined) return true;
+  if (!Array.isArray(plugins)) {
+    throw new Error('framework.plugins must be an array');
+  }
+
+  const seenIds = new Set<string>();
+  for (const [index, plugin] of plugins.entries()) {
+    if (typeof plugin !== 'object' || plugin === null || Array.isArray(plugin)) {
+      throw new Error(`framework.plugins[${index}] must be an object`);
+    }
+
+    const pluginId = (plugin as Record<string, unknown>).id;
+    if (typeof pluginId !== 'string' || pluginId.length === 0 || pluginId.trim() !== pluginId) {
+      throw new Error(`framework.plugins[${index}].id must be a non-empty trimmed string`);
+    }
+
+    if (seenIds.has(pluginId)) {
+      throw new Error(`framework.plugins[${index}].id duplicates "${pluginId}"`);
+    }
+    seenIds.add(pluginId);
+  }
+
   return true;
 }
 
@@ -539,6 +589,19 @@ function validateAnchorKitConfig(config: AnchorKitConfig): boolean {
     }
   }
   validateKycConfig(config.kyc);
+
+  for (const key of ['host', 'corsOrigins'] as const) {
+    const value = server[key];
+    if (value !== undefined && value !== null && !ServerConfigSchema[key].validate(value)) {
+      throw new Error(`server.${key}: invalid value`);
+    }
+  }
+
+  for (const [protocol, value] of Object.entries(metadata?.protocols ?? {})) {
+    if (value !== undefined && typeof value !== 'boolean') {
+      throw new Error(`metadata.protocols.${protocol} must be a boolean`);
+    }
+  }
 
   if (!assets.assets || !Array.isArray(assets.assets) || assets.assets.length === 0) {
     throw new Error('At least one asset must be configured in assets.assets');

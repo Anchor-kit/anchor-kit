@@ -27,6 +27,22 @@ describe('Asset Validation (#254)', () => {
     },
   };
 
+  function configWithAmountBounds(minAmount?: number, maxAmount?: number): AnchorKitConfig {
+    return {
+      ...baseConfig,
+      assets: {
+        assets: [
+          {
+            code: 'USDC',
+            issuer: 'GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5',
+            min_amount: minAmount,
+            max_amount: maxAmount,
+          },
+        ],
+      },
+    };
+  }
+
   it('should accept valid asset config with code and issuer', () => {
     const config = new AnchorConfig(baseConfig);
     expect(() => config.validate()).not.toThrow();
@@ -51,6 +67,31 @@ describe('Asset Validation (#254)', () => {
     };
     const anchor = new AnchorConfig(config);
     expect(() => anchor.validate()).not.toThrow();
+  });
+
+  it('accepts safe integer and decimal amount bounds', () => {
+    for (const [minAmount, maxAmount] of [
+      [1, 10000],
+      [0.125, 1.2345678901234],
+      [Number.MAX_SAFE_INTEGER, Number.MAX_SAFE_INTEGER],
+    ]) {
+      expect(() =>
+        new AnchorConfig(configWithAmountBounds(minAmount, maxAmount)).validate(),
+      ).not.toThrow();
+    }
+  });
+
+  it.each([
+    [Number.MAX_SAFE_INTEGER + 1, undefined],
+    [0.1234567890123456, undefined],
+    [Number.NaN, undefined],
+    [Number.POSITIVE_INFINITY, undefined],
+    [-0.01, undefined],
+    [10, 1],
+  ])('rejects unsafe or invalid amount bounds %s / %s', (minAmount, maxAmount) => {
+    expect(() => new AnchorConfig(configWithAmountBounds(minAmount, maxAmount)).validate()).toThrow(
+      /Invalid asset at index 0/,
+    );
   });
 
   it('should reject asset with empty code string', () => {

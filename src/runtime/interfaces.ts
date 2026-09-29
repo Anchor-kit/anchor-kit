@@ -76,7 +76,11 @@ export interface DatabaseAdapter {
   }): Promise<InteractiveTransactionRecord>;
   getInteractiveTransactionById(id: string): Promise<InteractiveTransactionRecord | null>;
   listPendingTransactionsBefore(cutoffIso: string): Promise<InteractiveTransactionRecord[]>;
-  updateTransactionStatus(id: string, status: TransactionStatus): Promise<boolean>;
+  updateTransactionStatus(
+    id: string,
+    status: TransactionStatus,
+    expectedStatus?: TransactionStatus,
+  ): Promise<boolean>;
 
   getIdempotencyRecord(scope: string, idempotencyKey: string): Promise<IdempotencyRecord | null>;
   insertOrGetIdempotencyRecord(input: {
@@ -150,10 +154,10 @@ export interface DatabaseAdapter {
   cleanupOldRecords(cutoffIso: string): Promise<void>;
 }
 
-export interface QueueJob {
-  type: 'expire_transaction' | 'process_watcher_task' | 'cleanup_records';
-  payload: Record<string, unknown>;
-}
+export type QueueJob =
+  | { type: 'expire_transaction'; payload: { transactionId: string } }
+  | { type: 'process_watcher_task'; payload: { watcherTaskId: string } }
+  | { type: 'cleanup_records'; payload: { retentionDays: number } };
 
 export interface QueueAdapter {
   enqueue(job: QueueJob): Promise<void>;

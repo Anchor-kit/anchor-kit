@@ -331,8 +331,9 @@ export interface OperationalConfig {
   address?: OperationalAddress;
 
   /**
-   * Transaction retention period in days
-   * @optional - defaults to 90
+   * Retention window in days for cleanup records. This setting takes precedence
+   * over framework.watchers.retentionDays.
+   * @optional - defaults to framework.watchers.retentionDays, then 90
    */
   transactionRetentionDays?: number;
 }
@@ -447,7 +448,8 @@ export interface FrameworkConfig {
     transactionTimeoutMs?: number;
 
     /**
-     * Retention window in days for watcher logs and operational records.
+     * Legacy fallback retention window in days. Used when
+     * operational.transactionRetentionDays is not configured.
      * @optional - defaults to 90
      */
     retentionDays?: number;

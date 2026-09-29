@@ -588,3 +588,277 @@ describe('Email Validation (#607)', () => {
     expect(ValidationUtils.isValidEmail(email)).toBe(false);
   });
 });
+
+describe('Documentation URLs Validation (#549)', () => {
+  const baseConfig: AnchorKitConfig = {
+    network: { network: 'testnet' },
+    server: { port: 3000 },
+    security: {
+      sep10SigningKey: 'secret-key-10',
+      interactiveJwtSecret: 'jwt-secret',
+      distributionAccountSecret: 'dist-secret',
+    },
+    assets: {
+      assets: [
+        {
+          code: 'USDC',
+          issuer: 'GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5',
+        },
+      ],
+    },
+    framework: {
+      database: {
+        provider: 'postgres',
+        url: 'postgresql://localhost:5432/anchor',
+      },
+    },
+  };
+
+  it('should accept valid HTTPS URL for apiDocs', () => {
+    const config: AnchorKitConfig = {
+      ...baseConfig,
+      metadata: {
+        documentationUrls: {
+          apiDocs: 'https://docs.example.com/api',
+        },
+      },
+    };
+    const anchor = new AnchorConfig(config);
+    expect(() => anchor.validate()).not.toThrow();
+  });
+
+  it('should accept valid HTTP URL for apiDocs', () => {
+    const config: AnchorKitConfig = {
+      ...baseConfig,
+      metadata: {
+        documentationUrls: {
+          apiDocs: 'http://docs.example.com/api',
+        },
+      },
+    };
+    const anchor = new AnchorConfig(config);
+    expect(() => anchor.validate()).not.toThrow();
+  });
+
+  it('should accept valid HTTPS URL for support', () => {
+    const config: AnchorKitConfig = {
+      ...baseConfig,
+      metadata: {
+        documentationUrls: {
+          support: 'https://support.example.com',
+        },
+      },
+    };
+    const anchor = new AnchorConfig(config);
+    expect(() => anchor.validate()).not.toThrow();
+  });
+
+  it('should accept valid HTTP URL for support', () => {
+    const config: AnchorKitConfig = {
+      ...baseConfig,
+      metadata: {
+        documentationUrls: {
+          support: 'http://support.example.com',
+        },
+      },
+    };
+    const anchor = new AnchorConfig(config);
+    expect(() => anchor.validate()).not.toThrow();
+  });
+
+  it('should accept valid HTTPS URL for terms', () => {
+    const config: AnchorKitConfig = {
+      ...baseConfig,
+      metadata: {
+        documentationUrls: {
+          terms: 'https://example.com/terms',
+        },
+      },
+    };
+    const anchor = new AnchorConfig(config);
+    expect(() => anchor.validate()).not.toThrow();
+  });
+
+  it('should accept valid HTTP URL for terms', () => {
+    const config: AnchorKitConfig = {
+      ...baseConfig,
+      metadata: {
+        documentationUrls: {
+          terms: 'http://example.com/terms',
+        },
+      },
+    };
+    const anchor = new AnchorConfig(config);
+    expect(() => anchor.validate()).not.toThrow();
+  });
+
+  it('should accept config without documentationUrls (optional field)', () => {
+    const config: AnchorKitConfig = {
+      ...baseConfig,
+      metadata: {
+        tomlUrl: 'https://example.com/stellar.toml',
+      },
+    };
+    const anchor = new AnchorConfig(config);
+    expect(() => anchor.validate()).not.toThrow();
+  });
+
+  it('should accept config with empty documentationUrls object', () => {
+    const config: AnchorKitConfig = {
+      ...baseConfig,
+      metadata: {
+        documentationUrls: {},
+      },
+    };
+    const anchor = new AnchorConfig(config);
+    expect(() => anchor.validate()).not.toThrow();
+  });
+
+  it('should accept config with partial documentationUrls', () => {
+    const config: AnchorKitConfig = {
+      ...baseConfig,
+      metadata: {
+        documentationUrls: {
+          apiDocs: 'https://docs.example.com/api',
+        },
+      },
+    };
+    const anchor = new AnchorConfig(config);
+    expect(() => anchor.validate()).not.toThrow();
+  });
+
+  it('should accept all three valid documentation URLs', () => {
+    const config: AnchorKitConfig = {
+      ...baseConfig,
+      metadata: {
+        documentationUrls: {
+          apiDocs: 'https://docs.example.com/api',
+          support: 'https://support.example.com',
+          terms: 'https://example.com/terms',
+        },
+      },
+    };
+    const anchor = new AnchorConfig(config);
+    expect(() => anchor.validate()).not.toThrow();
+  });
+
+  it('should reject malformed URL for apiDocs', () => {
+    const config: AnchorKitConfig = {
+      ...baseConfig,
+      metadata: {
+        documentationUrls: {
+          apiDocs: 'not-a-valid-url',
+        },
+      },
+    };
+    const anchor = new AnchorConfig(config);
+    expect(() => anchor.validate()).toThrow(
+      /Invalid URL format for metadata.documentationUrls.apiDocs/,
+    );
+  });
+
+  it('should reject malformed URL for support', () => {
+    const config: AnchorKitConfig = {
+      ...baseConfig,
+      metadata: {
+        documentationUrls: {
+          support: 'not-a-valid-url',
+        },
+      },
+    };
+    const anchor = new AnchorConfig(config);
+    expect(() => anchor.validate()).toThrow(
+      /Invalid URL format for metadata.documentationUrls.support/,
+    );
+  });
+
+  it('should reject malformed URL for terms', () => {
+    const config: AnchorKitConfig = {
+      ...baseConfig,
+      metadata: {
+        documentationUrls: {
+          terms: 'not-a-valid-url',
+        },
+      },
+    };
+    const anchor = new AnchorConfig(config);
+    expect(() => anchor.validate()).toThrow(
+      /Invalid URL format for metadata.documentationUrls.terms/,
+    );
+  });
+
+  it('should reject FTP scheme for apiDocs', () => {
+    const config: AnchorKitConfig = {
+      ...baseConfig,
+      metadata: {
+        documentationUrls: {
+          apiDocs: 'ftp://docs.example.com/api',
+        },
+      },
+    };
+    const anchor = new AnchorConfig(config);
+    expect(() => anchor.validate()).toThrow(
+      /Invalid URL format for metadata.documentationUrls.apiDocs/,
+    );
+  });
+
+  it('should reject javascript: scheme for support', () => {
+    const config: AnchorKitConfig = {
+      ...baseConfig,
+      metadata: {
+        documentationUrls: {
+          support: 'javascript:alert(1)',
+        },
+      },
+    };
+    const anchor = new AnchorConfig(config);
+    expect(() => anchor.validate()).toThrow(
+      /Invalid URL format for metadata.documentationUrls.support/,
+    );
+  });
+
+  it('should reject data: scheme for terms', () => {
+    const config: AnchorKitConfig = {
+      ...baseConfig,
+      metadata: {
+        documentationUrls: {
+          terms: 'data:text/html,<script>alert(1)</script>',
+        },
+      },
+    };
+    const anchor = new AnchorConfig(config);
+    expect(() => anchor.validate()).toThrow(
+      /Invalid URL format for metadata.documentationUrls.terms/,
+    );
+  });
+
+  it('should reject file: scheme for apiDocs', () => {
+    const config: AnchorKitConfig = {
+      ...baseConfig,
+      metadata: {
+        documentationUrls: {
+          apiDocs: 'file:///etc/passwd',
+        },
+      },
+    };
+    const anchor = new AnchorConfig(config);
+    expect(() => anchor.validate()).toThrow(
+      /Invalid URL format for metadata.documentationUrls.apiDocs/,
+    );
+  });
+
+  it('should reject mailto: scheme for support', () => {
+    const config: AnchorKitConfig = {
+      ...baseConfig,
+      metadata: {
+        documentationUrls: {
+          support: 'mailto:support@example.com',
+        },
+      },
+    };
+    const anchor = new AnchorConfig(config);
+    expect(() => anchor.validate()).toThrow(
+      /Invalid URL format for metadata.documentationUrls.support/,
+    );
+  });
+});

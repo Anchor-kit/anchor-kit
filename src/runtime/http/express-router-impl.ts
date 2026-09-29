@@ -1,7 +1,8 @@
 import type { AnchorConfig } from '@/core/config.ts';
-import { PayloadTooLargeError, ValidationError } from '@/core/errors.ts';
+import { ConfigError, PayloadTooLargeError, ValidationError } from '@/core/errors.ts';
 import { InMemoryRateLimiter, type RateLimitRule } from '@/runtime/http/rate-limiter.ts';
 import type { DatabaseAdapter, WebhookProcessor } from '@/runtime/interfaces.ts';
+import type { PluginRouteContext, RouteDefinition } from '@/types/foundation.ts';
 import { IdempotencyUtils } from '@/utils/idempotency.ts';
 import {
   Account,
@@ -44,6 +45,7 @@ export interface ExpressRouterContext {
   requestTimeout: number;
   rateLimiter: InMemoryRateLimiter;
   rateRules: Record<'auth_challenge' | 'auth_token' | 'webhook' | 'deposit', RateLimitRule>;
+  pluginRoutes?: Array<{ pluginId: string; route: RouteDefinition }>;
 }
 
 interface AuthenticatedRequestData {
@@ -330,6 +332,103 @@ function endpointPath(req: IncomingMessage): string {
   return parseUrl(req).pathname;
 }
 
+const BUILT_IN_PATHS = new Set([
+  '/health',
+  '/info',
+  '/auth/challenge',
+  '/auth/token',
+  '/transactions/deposit/interactive',
+  '/webhooks/events',
+]);
+const BUILT_IN_TRANSACTION_PATH = /^\/transactions\/[^/]+$/;
+
+export function validatePluginRoutes(
+  routes: Array<{ pluginId: string; route: RouteDefinition }>,
+): void {
+  const registrations = new Map<string, string>();
+  for (const { pluginId, route } of routes) {
+    if (
+      !route.path.startsWith('/') ||
+      (route.path !== '/' && route.path.endsWith('/')) ||
+      route.path.includes('?') ||
+      route.path.includes('#') ||
+      route.path.includes('//') ||
+      route.path.split('/').some((segment) => segment === '.' || segment === '..')
+    ) {
+      throw new ConfigError(
+        `Plugin "${pluginId}" route path "${route.path}" must be an absolute normalized path without query or fragment`,
+      );
+    }
+    if (!['GET', 'POST', 'PUT', 'DELETE', 'PATCH'].includes(route.method)) {
+      throw new ConfigError(
+        `Plugin "${pluginId}" route for "${route.path}" has unsupported method "${route.method}"`,
+      );
+    }
+    if (BUILT_IN_PATHS.has(route.path) || BUILT_IN_TRANSACTION_PATH.test(route.path)) {
+      throw new ConfigError(
+        `Plugin "${pluginId}" route "${route.method} ${route.path}" conflicts with a built-in endpoint`,
+      );
+    }
+    const routeKey = `${route.method} ${route.path}`;
+    const existingPlugin = registrations.get(routeKey);
+    if (existingPlugin) {
+      throw new ConfigError(
+        `Plugin route "${routeKey}" is registered by both "${existingPlugin}" and "${pluginId}"`,
+      );
+    }
+    registrations.set(routeKey, pluginId);
+  }
+}
+
+function buildPluginRouteContext(
+  context: ExpressRouterContext,
+  req: IncomingMessage,
+  res: ServerResponse,
+  body: Record<string, unknown>,
+): PluginRouteContext {
+  const query: Record<string, string | Array<string>> = {};
+  for (const [key, value] of parseUrl(req).searchParams) {
+    const current = query[key];
+    if (current === undefined) query[key] = value;
+    else if (Array.isArray(current)) current.push(value);
+    else query[key] = [current, value];
+  }
+  return {
+    request: req,
+    response: res,
+    params: {},
+    query,
+    body,
+    config: context.config,
+    database: context.database,
+  };
+}
+
+async function handlePluginRoute(
+  context: ExpressRouterContext,
+  registeredRoute: { pluginId: string; route: RouteDefinition },
+  req: IncomingMessage,
+  res: ServerResponse,
+): Promise<void> {
+  let body: Record<string, unknown> = {};
+  if (registeredRoute.route.method !== 'GET') {
+    const parsedBody = await parsePostJsonBody(req, res, context.maxBodyBytes);
+    if (!parsedBody) return;
+    body = parsedBody.body;
+  }
+
+  const result = await registeredRoute.route.handler(
+    buildPluginRouteContext(context, req, res, body),
+  );
+  if (res.writableEnded || res.headersSent) return;
+  if (result === undefined) {
+    res.statusCode = 204;
+    res.end();
+    return;
+  }
+  sendJson(res, 200, { data: result }, (req.method ?? 'GET').toUpperCase());
+}
+
 export function isAuthChallengeExpired(expiresAt: string, nowMs = Date.now()): boolean {
   const expirationMs = Date.parse(expiresAt);
   return !Number.isFinite(expirationMs) || nowMs >= expirationMs;
@@ -443,12 +542,68 @@ async function handleHealth(res: ServerResponse, method = 'GET'): Promise<void> 
 
 async function handleInfo(context: ExpressRouterContext, res: ServerResponse): Promise<void> {
   const fullConfig = context.config.getConfig();
+  const metadata = fullConfig.metadata;
   const responseBody: Record<string, unknown> = {
     name: fullConfig.operational?.name ?? 'Anchor-Kit Anchor',
     network: fullConfig.network.network,
     network_passphrase: context.networkPassphrase,
     assets: fullConfig.assets.assets,
     version,
+    metadata: {
+      ...(metadata?.tomlUrl === undefined ? {} : { tomlUrl: metadata.tomlUrl }),
+      ...(metadata?.protocols === undefined
+        ? {}
+        : {
+            protocols: {
+              ...(metadata.protocols.sep10 === undefined
+                ? {}
+                : { sep10: metadata.protocols.sep10 }),
+              ...(metadata.protocols.sep24 === undefined
+                ? {}
+                : { sep24: metadata.protocols.sep24 }),
+              ...(metadata.protocols.sep6 === undefined ? {} : { sep6: metadata.protocols.sep6 }),
+              ...(metadata.protocols.sep31 === undefined
+                ? {}
+                : { sep31: metadata.protocols.sep31 }),
+            },
+          }),
+      ...(metadata?.features === undefined
+        ? {}
+        : {
+            features: {
+              ...(metadata.features.supportsInteractiveDeposits === undefined
+                ? {}
+                : { supportsInteractiveDeposits: metadata.features.supportsInteractiveDeposits }),
+              ...(metadata.features.supportsInteractiveWithdrawals === undefined
+                ? {}
+                : {
+                    supportsInteractiveWithdrawals:
+                      metadata.features.supportsInteractiveWithdrawals,
+                  }),
+              ...(metadata.features.supportsAsyncTransactionStatus === undefined
+                ? {}
+                : {
+                    supportsAsyncTransactionStatus:
+                      metadata.features.supportsAsyncTransactionStatus,
+                  }),
+            },
+          }),
+      ...(metadata?.documentationUrls === undefined
+        ? {}
+        : {
+            documentationUrls: {
+              ...(metadata.documentationUrls.apiDocs === undefined
+                ? {}
+                : { apiDocs: metadata.documentationUrls.apiDocs }),
+              ...(metadata.documentationUrls.support === undefined
+                ? {}
+                : { support: metadata.documentationUrls.support }),
+              ...(metadata.documentationUrls.terms === undefined
+                ? {}
+                : { terms: metadata.documentationUrls.terms }),
+            },
+          }),
+    },
   };
 
   if (fullConfig.server.interactiveDomain) {
@@ -470,6 +625,85 @@ async function handleInfo(context: ExpressRouterContext, res: ServerResponse): P
   sendJson(res, 200, responseBody);
 }
 
+function allowedMethodsForPath(path: string): readonly string[] | undefined {
+  if (path === '/health' || path === '/info' || path === '/auth/challenge') return ['GET'];
+  if (
+    path === '/auth/token' ||
+    path === '/transactions/deposit/interactive' ||
+    path === '/webhooks/events'
+  ) {
+    return ['POST'];
+  }
+  if (/^\/transactions\/[^/]+$/.test(path)) return ['GET'];
+  return undefined;
+}
+
+function handleCorsPreflight(
+  context: ExpressRouterContext,
+  path: string,
+  req: IncomingMessage,
+  res: ServerResponse,
+): boolean {
+  const allowedMethods = allowedMethodsForPath(path);
+  if (!allowedMethods) return false;
+
+  const requestedMethodHeader = req.headers['access-control-request-method'];
+  if (requestedMethodHeader === undefined) {
+    res.statusCode = 204;
+    res.end();
+    return true;
+  }
+
+  const originHeader = req.headers.origin;
+  const requestedMethod =
+    typeof requestedMethodHeader === 'string' ? requestedMethodHeader.toUpperCase() : '';
+  const requestedHeadersHeader = req.headers['access-control-request-headers'];
+  const requestedHeaders =
+    typeof requestedHeadersHeader === 'string'
+      ? requestedHeadersHeader
+          .split(',')
+          .map((header) => header.trim())
+          .filter(Boolean)
+      : [];
+  const allowedHeaders = new Map([
+    ['authorization', 'Authorization'],
+    ['content-type', 'Content-Type'],
+    ['idempotency-key', 'Idempotency-Key'],
+    ['x-anchor-signature', 'X-Anchor-Signature'],
+    ['x-webhook-provider', 'X-Webhook-Provider'],
+  ]);
+  const corsOrigins = context.config.get('server').corsOrigins ?? [];
+
+  if (
+    typeof originHeader !== 'string' ||
+    !corsOrigins.includes(originHeader) ||
+    !allowedMethods.includes(requestedMethod) ||
+    requestedHeaders.some((header) => !allowedHeaders.has(header.toLowerCase()))
+  ) {
+    sendJson(res, 403, {
+      error: 'cors_preflight_denied',
+      message: 'CORS preflight request is not allowed',
+    });
+    return true;
+  }
+
+  res.statusCode = 204;
+  res.setHeader('access-control-allow-origin', originHeader);
+  res.setHeader('access-control-allow-methods', requestedMethod);
+  if (requestedHeaders.length > 0) {
+    res.setHeader(
+      'access-control-allow-headers',
+      requestedHeaders
+        .map((header) => allowedHeaders.get(header.toLowerCase()))
+        .filter((header): header is string => header !== undefined)
+        .join(', '),
+    );
+  }
+  res.setHeader('vary', 'Origin, Access-Control-Request-Method, Access-Control-Request-Headers');
+  res.end();
+  return true;
+}
+
 async function handleAuthChallenge(
   context: ExpressRouterContext,
   req: IncomingMessage,
@@ -480,7 +714,24 @@ async function handleAuthChallenge(
   }
 
   // Accept canonical Stellar public keys and treat surrounding whitespace as non-semantic.
-  const account = parseUrl(req).searchParams.get('account')?.trim() ?? '';
+  const accountParams = parseUrl(req).searchParams.getAll('account');
+  if (accountParams.length === 0) {
+    sendJson(res, 400, {
+      error: 'invalid_request',
+      message: 'Query param account is required',
+    });
+    return;
+  }
+
+  if (accountParams.length !== 1) {
+    sendJson(res, 400, {
+      error: 'invalid_request',
+      message: 'Query param account must be provided exactly once',
+    });
+    return;
+  }
+
+  const account = accountParams[0].trim();
   if (!account) {
     sendJson(res, 400, {
       error: 'invalid_request',
@@ -930,6 +1181,7 @@ async function handleTransaction(
 
   const transaction = await context.database.getInteractiveTransactionById(transactionId);
   if (!transaction) {
+    res.setHeader('Cache-Control', 'no-store');
     sendJson(res, 404, { error: 'not_found', message: 'Transaction not found' });
     return;
   }
@@ -970,6 +1222,7 @@ async function handleTransaction(
     );
   }
 
+  res.setHeader('Cache-Control', 'no-store');
   sendJson(res, 200, responseData);
 }
 
@@ -999,6 +1252,14 @@ async function handleWebhook(
   req: IncomingMessage,
   res: ServerResponse,
 ): Promise<void> {
+  if (context.config.get('operational')?.webhooksEnabled === false) {
+    sendJson(res, 503, {
+      error: 'webhooks_disabled',
+      message: 'Webhook processing is disabled',
+    });
+    return;
+  }
+
   if (!checkRateLimit(context, req, res, 'webhook')) {
     return;
   }
@@ -1093,8 +1354,10 @@ export async function handleExpressRouterRequest(
   setCorsHeaders(res, origin, context.corsOrigins);
 
   if (method === 'OPTIONS') {
-    res.statusCode = 204;
-    res.end();
+    if (!handleCorsPreflight(context, path, req, res)) {
+      res.statusCode = 204;
+      res.end();
+    }
     return;
   }
 
@@ -1164,6 +1427,17 @@ export async function handleExpressRouterRequest(
 
       if (method === 'POST' && path === '/webhooks/events') {
         await handleWebhook(context, req, res);
+        return;
+      }
+
+      const pluginRoutes = (context.pluginRoutes ?? []).filter(({ route }) => route.path === path);
+      if (pluginRoutes.length > 0) {
+        const pluginRoute = pluginRoutes.find(({ route }) => route.method === method);
+        if (pluginRoute) {
+          await handlePluginRoute(context, pluginRoute, req, res);
+        } else {
+          sendMethodNotAllowed(res, pluginRoutes.map(({ route }) => route.method).sort());
+        }
         return;
       }
 
