@@ -197,6 +197,15 @@ describe('example/express-app', () => {
     expect(response.body).toEqual({ status: 'ok', version });
   });
 
+  it('serves HEAD /anchor/health with status 200 and no body', async () => {
+    const response = await invokeExpress(harness.runtime.app, {
+      method: 'HEAD',
+      path: '/anchor/health',
+    });
+    expect(response.status).toBe(200);
+    expect(response.body).toEqual({});
+  });
+
   it('runs challenge -> token flow', async () => {
     const account = clientKeypair.publicKey();
 

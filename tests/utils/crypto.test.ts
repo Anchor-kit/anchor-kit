@@ -9,6 +9,16 @@ describe('CryptoUtils', () => {
       expect(result).toHaveLength(length);
     });
 
+    it('should return an empty string for zero length', () => {
+      expect(CryptoUtils.generateRandomString(0)).toBe('');
+    });
+
+    it.each([-1, 1.5, Number.MAX_SAFE_INTEGER + 1])('should reject invalid length %s', (length) => {
+      expect(() => CryptoUtils.generateRandomString(length)).toThrow(
+        'length must be a non-negative safe integer',
+      );
+    });
+
     it('should generate different strings on subsequent calls', () => {
       const str1 = CryptoUtils.generateRandomString(32);
       const str2 = CryptoUtils.generateRandomString(32);
@@ -53,6 +63,22 @@ describe('CryptoUtils', () => {
       expect(decoded).toMatchObject(payload);
       expect(decoded.iat).toBeDefined();
     });
+
+    it.each(['', '   ', '\t\n'])('should reject blank signing secret %j', async (blankSecret) => {
+      await expect(CryptoUtils.generateJwt(payload, blankSecret)).rejects.toThrow(
+        'secret must not be empty',
+      );
+    });
+
+    it.each(['', '   ', '\t\n'])(
+      'should reject blank verification secret %j',
+      async (blankSecret) => {
+        const token = await CryptoUtils.generateJwt(payload, secret);
+        await expect(CryptoUtils.verifyJwt(token, blankSecret)).rejects.toThrow(
+          'secret must not be empty',
+        );
+      },
+    );
 
     it('should work with expiration time', async () => {
       const token = await CryptoUtils.generateJwt(payload, secret, { expiresIn: '1h' });
