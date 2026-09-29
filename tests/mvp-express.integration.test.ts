@@ -1618,9 +1618,10 @@ describe('MVP Express-mounted integration', () => {
       headers: {
         'content-type': 'application/json',
         authorization: `Bearer ${accessToken}`,
+        'x-forwarded-for': '203.0.113.241',
         'idempotency-key': keyAtLimit,
       },
-      body: { asset_code: 'USDC', amount: '1' },
+      body: { asset_code: 'USDC', amount: '10' },
     });
 
     expect(response.status).toBe(201);
@@ -1635,9 +1636,10 @@ describe('MVP Express-mounted integration', () => {
       headers: {
         'content-type': 'application/json',
         authorization: `Bearer ${accessToken}`,
+        'x-forwarded-for': '203.0.113.242',
         'idempotency-key': keyOverLimit,
       },
-      body: { asset_code: 'USDC', amount: '1' },
+      body: { asset_code: 'USDC', amount: '10' },
     });
 
     expect(response.status).toBe(400);
@@ -1654,9 +1656,10 @@ describe('MVP Express-mounted integration', () => {
       headers: {
         'content-type': 'application/json',
         authorization: `Bearer ${accessToken}`,
+        'x-forwarded-for': '203.0.113.243',
         'idempotency-key': `  ${keyAtLimit}  `,
       },
-      body: { asset_code: 'USDC', amount: '2' },
+      body: { asset_code: 'USDC', amount: '10' },
     });
 
     // Key at limit after normalization — accepted (may be a replay of 6e-i if same account/key)
@@ -1670,9 +1673,10 @@ describe('MVP Express-mounted integration', () => {
       headers: {
         'content-type': 'application/json',
         authorization: `Bearer ${accessToken}`,
+        'x-forwarded-for': '203.0.113.244',
         'idempotency-key': `  ${keyOverLimit}  `,
       },
-      body: { asset_code: 'USDC', amount: '2' },
+      body: { asset_code: 'USDC', amount: '10' },
     });
 
     expect(responseRejected.status).toBe(400);
