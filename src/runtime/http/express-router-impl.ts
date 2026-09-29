@@ -563,15 +563,15 @@ function handleCorsPreflight(
     typeof requestedHeadersHeader === 'string'
       ? requestedHeadersHeader
           .split(',')
-          .map((header) => header.trim().toLowerCase())
+          .map((header) => header.trim())
           .filter(Boolean)
       : [];
-  const allowedHeaders = new Set([
-    'authorization',
-    'content-type',
-    'idempotency-key',
-    'x-anchor-signature',
-    'x-webhook-provider',
+  const allowedHeaders = new Map([
+    ['authorization', 'Authorization'],
+    ['content-type', 'Content-Type'],
+    ['idempotency-key', 'Idempotency-Key'],
+    ['x-anchor-signature', 'X-Anchor-Signature'],
+    ['x-webhook-provider', 'X-Webhook-Provider'],
   ]);
   const corsOrigins = context.config.get('server').corsOrigins ?? [];
 
@@ -579,7 +579,7 @@ function handleCorsPreflight(
     typeof originHeader !== 'string' ||
     !corsOrigins.includes(originHeader) ||
     !allowedMethods.includes(requestedMethod) ||
-    requestedHeaders.some((header) => !allowedHeaders.has(header))
+    requestedHeaders.some((header) => !allowedHeaders.has(header.toLowerCase()))
   ) {
     sendJson(res, 403, {
       error: 'cors_preflight_denied',
@@ -592,7 +592,13 @@ function handleCorsPreflight(
   res.setHeader('access-control-allow-origin', originHeader);
   res.setHeader('access-control-allow-methods', requestedMethod);
   if (requestedHeaders.length > 0) {
-    res.setHeader('access-control-allow-headers', requestedHeaders.join(', '));
+    res.setHeader(
+      'access-control-allow-headers',
+      requestedHeaders
+        .map((header) => allowedHeaders.get(header.toLowerCase()))
+        .filter((header): header is string => header !== undefined)
+        .join(', '),
+    );
   }
   res.setHeader('vary', 'Origin, Access-Control-Request-Method, Access-Control-Request-Headers');
   res.end();
@@ -1209,8 +1215,10 @@ export async function handleExpressRouterRequest(
   setCorsHeaders(res, origin, context.corsOrigins);
 
   if (method === 'OPTIONS') {
-    res.statusCode = 204;
-    res.end();
+    if (!handleCorsPreflight(context, path, req, res)) {
+      res.statusCode = 204;
+      res.end();
+    }
     return;
   }
 

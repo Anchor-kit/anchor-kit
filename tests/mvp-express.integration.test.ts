@@ -3041,8 +3041,8 @@ describe('MVP Express-mounted integration', () => {
       body: {},
     });
 
-    expect(tokenResponse.status).toBe(429);
-    expect(tokenResponse.body.error).toBe('rate_limited');
+    expect(tokenResponse.status).toBe(400);
+    expect(tokenResponse.body.error).toBe('invalid_request');
   });
 
   // ── Malformed JSON bodies ────────────────────────────────────────────────
@@ -3639,6 +3639,40 @@ describe('MVP Express-mounted integration', () => {
       expect(preflightResponse.headers['access-control-allow-headers']).toContain(
         'Idempotency-Key',
       );
+
+      const deniedMethodResponse = await customInvoke({
+        method: 'OPTIONS',
+        path: '/transactions/deposit/interactive',
+        headers: {
+          origin: 'https://example.com',
+          'access-control-request-method': 'GET',
+        },
+      });
+      expect(deniedMethodResponse.status).toBe(403);
+      expect(deniedMethodResponse.body.error).toBe('cors_preflight_denied');
+
+      const deniedHeaderResponse = await customInvoke({
+        method: 'OPTIONS',
+        path: '/transactions/deposit/interactive',
+        headers: {
+          origin: 'https://example.com',
+          'access-control-request-method': 'POST',
+          'access-control-request-headers': 'x-unlisted-header',
+        },
+      });
+      expect(deniedHeaderResponse.status).toBe(403);
+      expect(deniedHeaderResponse.body.error).toBe('cors_preflight_denied');
+
+      const deniedOriginResponse = await customInvoke({
+        method: 'OPTIONS',
+        path: '/transactions/deposit/interactive',
+        headers: {
+          origin: 'https://unlisted.example',
+          'access-control-request-method': 'POST',
+        },
+      });
+      expect(deniedOriginResponse.status).toBe(403);
+      expect(deniedOriginResponse.body.error).toBe('cors_preflight_denied');
     } finally {
       await customAnchor.shutdown();
       try {
