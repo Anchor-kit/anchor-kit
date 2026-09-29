@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { ServerConfigSchema, validateServerConfig } from '../../src/utils/validation';
+import { SecurityConfigSchema, ServerConfigSchema, validateServerConfig } from '../../src/utils/validation';
 
 describe('ServerConfigSchema', () => {
   it('is publicly importable from validation module', () => {
@@ -105,6 +105,50 @@ describe('ServerConfigSchema', () => {
       expect(ServerConfigSchema.requestTimeout.validate(-1)).toBe(false);
       expect(ServerConfigSchema.requestTimeout.validate(Number.POSITIVE_INFINITY)).toBe(false);
       expect(ServerConfigSchema.requestTimeout.validate('30000')).toBe(false);
+    });
+  });
+});
+
+describe('SecurityConfigSchema', () => {
+  describe('sep10SigningKey field', () => {
+    it('validates non-empty string secrets', () => {
+      expect(SecurityConfigSchema.sep10SigningKey.validate('SABCDEF123')).toBe(true);
+    });
+
+    it('rejects missing, empty, whitespace-only, and non-string secrets', () => {
+      expect(SecurityConfigSchema.sep10SigningKey.validate(undefined)).toBe(false);
+      expect(SecurityConfigSchema.sep10SigningKey.validate('')).toBe(false);
+      expect(SecurityConfigSchema.sep10SigningKey.validate('   ')).toBe(false);
+      expect(SecurityConfigSchema.sep10SigningKey.validate(123)).toBe(false);
+      expect(SecurityConfigSchema.sep10SigningKey.validate({})).toBe(false);
+    });
+  });
+
+  describe('interactiveJwtSecret field', () => {
+    it('validates non-empty string secrets', () => {
+      expect(SecurityConfigSchema.interactiveJwtSecret.validate('jwt-secret')).toBe(true);
+    });
+
+    it('rejects missing, empty, whitespace-only, and non-string secrets', () => {
+      expect(SecurityConfigSchema.interactiveJwtSecret.validate(undefined)).toBe(false);
+      expect(SecurityConfigSchema.interactiveJwtSecret.validate('')).toBe(false);
+      expect(SecurityConfigSchema.interactiveJwtSecret.validate('   ')).toBe(false);
+      expect(SecurityConfigSchema.interactiveJwtSecret.validate(123)).toBe(false);
+      expect(SecurityConfigSchema.interactiveJwtSecret.validate({})).toBe(false);
+    });
+  });
+
+  describe('distributionAccountSecret field', () => {
+    it('validates non-empty string secrets', () => {
+      expect(SecurityConfigSchema.distributionAccountSecret.validate('SABCDEF123')).toBe(true);
+    });
+
+    it('rejects missing, empty, whitespace-only, and non-string secrets', () => {
+      expect(SecurityConfigSchema.distributionAccountSecret.validate(undefined)).toBe(false);
+      expect(SecurityConfigSchema.distributionAccountSecret.validate('')).toBe(false);
+      expect(SecurityConfigSchema.distributionAccountSecret.validate('   ')).toBe(false);
+      expect(SecurityConfigSchema.distributionAccountSecret.validate(123)).toBe(false);
+      expect(SecurityConfigSchema.distributionAccountSecret.validate({})).toBe(false);
     });
   });
 });
