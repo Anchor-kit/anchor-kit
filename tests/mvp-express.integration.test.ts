@@ -19,7 +19,7 @@ interface TestResponse {
 interface TestRequestOptions {
   method?: string;
   path: string;
-  headers?: Record<string, string>;
+  headers?: Record<string, string | string[]>;
   body?: unknown;
   rawBody?: string | Buffer | Uint8Array;
 }
@@ -135,6 +135,7 @@ describe('MVP Express-mounted integration', () => {
         challengeExpirationSeconds: 300,
       },
       assets: {
+        defaultCurrency: 'USD',
         assets: [
           {
             code: 'USDC',
@@ -233,6 +234,7 @@ describe('MVP Express-mounted integration', () => {
     expect(response.body.version).toBe(version);
     expect(response.body.version).not.toBe('mvp');
     expect(response.body.interactive_domain).toBe('https://anchor.example.com');
+    expect(response.body.default_currency).toBe('USD');
   });
 
   it('2e) /info includes network_passphrase matching the configured network', async () => {
@@ -370,6 +372,7 @@ describe('MVP Express-mounted integration', () => {
     const response = await customInvoke({ path: '/info' });
     expect(response.status).toBe(200);
     expect(response.body).not.toHaveProperty('interactive_domain');
+    expect(response.body).not.toHaveProperty('default_currency');
 
     await customAnchor.shutdown();
     const customDbPath = customDbUrl.startsWith('file:')
@@ -503,6 +506,7 @@ describe('MVP Express-mounted integration', () => {
     expect(challengeXdr.length).toBeGreaterThan(0);
     const networkPassphrase = String(challengeResponse.body.network_passphrase ?? '');
     const challengeTx = new Transaction(challengeXdr, networkPassphrase);
+    expect(challengeTx.operations).toHaveLength(1);
     challengeTx.sign(clientKeypair);
     const signedChallengeXdr = challengeTx.toXDR();
 
@@ -528,6 +532,95 @@ describe('MVP Express-mounted integration', () => {
     expect(Number.isNaN(expiresAtTime)).toBe(false);
     const expectedExpiry = Date.now() + 3600 * 1000;
     expect(Math.abs(expiresAtTime - expectedExpiry)).toBeLessThan(5000);
+  });
+
+  it('3e) accepts one authorization header value and rejects ambiguous arrays', async () => {
+    const endpoint = {
+      method: 'GET',
+      path: '/transactions/00000000-0000-4000-8000-000000000000',
+      headers: {},
+    } as const;
+
+    const stringHeader = await invoke({
+      ...endpoint,
+      headers: { ...endpoint.headers, authorization: `Bearer ${accessToken}` },
+    });
+    const singleValueArray = await invoke({
+      ...endpoint,
+      headers: { ...endpoint.headers, authorization: [`Bearer ${accessToken}`] },
+    });
+    const conflictingArray = await invoke({
+      ...endpoint,
+      headers: { ...endpoint.headers, authorization: [`Bearer ${accessToken}`, 'Basic other'] },
+    });
+    const malformedValue = await invoke({
+      ...endpoint,
+      headers: { ...endpoint.headers, authorization: ['Bearer'] },
+    });
+
+    expect(stringHeader.status).toBe(404);
+    expect(singleValueArray.status).toBe(404);
+    expect(conflictingArray.status).toBe(401);
+    expect(malformedValue.status).toBe(401);
+  });
+
+  it('3f) adds SEP-10 client attribution to the challenge when enabled', async () => {
+    const clientDomainKeypair = Keypair.random();
+    const clientDbUrl = makeSqliteDbUrlForTests();
+    const clientAnchor = createAnchor({
+      network: { network: 'testnet' },
+      server: { corsOrigins: ['https://wallet.example.com'] },
+      security: {
+        sep10SigningKey: sep10ServerKeypair.secret(),
+        interactiveJwtSecret: 'client-domain-jwt-secret',
+        distributionAccountSecret: 'distribution-test-secret',
+        enableClientAttribution: true,
+        clientDomain: 'wallet.example.com',
+        clientDomainSigningKey: clientDomainKeypair.publicKey(),
+      },
+      assets: {
+        assets: [
+          {
+            code: 'USDC',
+            issuer: 'GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5',
+          },
+        ],
+      },
+      framework: { database: { provider: 'sqlite', url: clientDbUrl } },
+    });
+
+    try {
+      await clientAnchor.init();
+      const response = await createMountedInvoker(clientAnchor)({
+        path: `/auth/challenge?account=${clientKeypair.publicKey()}`,
+      });
+      expect(response.status).toBe(200);
+
+      const challengeTx = new Transaction(
+        String(response.body.challenge),
+        String(response.body.network_passphrase),
+      );
+      expect(challengeTx.operations).toHaveLength(2);
+      expect(challengeTx.operations[0]?.type).toBe('manageData');
+      expect(challengeTx.operations[1]).toMatchObject({
+        type: 'manageData',
+        name: 'client_domain',
+        source: clientDomainKeypair.publicKey(),
+      });
+      expect(
+        Buffer.from((challengeTx.operations[1] as { value: string | Uint8Array }).value).toString(),
+      ).toBe('wallet.example.com');
+    } finally {
+      await clientAnchor.shutdown();
+      const clientDbPath = clientDbUrl.startsWith('file:')
+        ? clientDbUrl.slice('file:'.length)
+        : clientDbUrl;
+      try {
+        unlinkSync(clientDbPath);
+      } catch {
+        // ignore cleanup errors in CI
+      }
+    }
   });
 
   it('3d) successful token response includes Cache-Control no-store (#449)', async () => {
