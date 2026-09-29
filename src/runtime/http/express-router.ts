@@ -1,6 +1,7 @@
 import type { AnchorConfig } from '@/core/config.ts';
 import { InMemoryRateLimiter, type RateLimitRule } from '@/runtime/http/rate-limiter.ts';
 import type { DatabaseAdapter, WebhookProcessor } from '@/runtime/interfaces.ts';
+import type { AnchorPluginHooks } from '@/types/plugin.ts';
 import { Keypair } from '@stellar/stellar-sdk';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { handleExpressRouterRequest, type ExpressRouterContext } from './express-router-impl.ts';
@@ -15,6 +16,8 @@ interface RouterDependencies {
   config: AnchorConfig;
   database: DatabaseAdapter;
   webhookProcessor: WebhookProcessor;
+  depositRequestHooks: NonNullable<AnchorPluginHooks['onDepositRequest']>[];
+  sep10ChallengeHooks: NonNullable<AnchorPluginHooks['onSep10Challenge']>[];
 }
 
 export class AnchorExpressRouter {
@@ -41,6 +44,8 @@ export class AnchorExpressRouter {
       config,
       database: dependencies.database,
       webhookProcessor: dependencies.webhookProcessor,
+      depositRequestHooks: dependencies.depositRequestHooks,
+      sep10ChallengeHooks: dependencies.sep10ChallengeHooks,
       sep10ServerKeypair,
       networkPassphrase,
       maxBodyBytes,

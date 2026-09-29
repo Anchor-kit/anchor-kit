@@ -1,5 +1,7 @@
 import { makeSqliteDbUrlForTests } from '@/core/factory.ts';
 import { createAnchor, type AnchorInstance } from '@/index.ts';
+import type { DatabaseAdapter } from '@/runtime/interfaces.ts';
+import type { AnchorPlugin } from '@/types/plugin.ts';
 import { Account, Keypair, Operation, Transaction, TransactionBuilder } from '@stellar/stellar-sdk';
 import { createHmac } from 'node:crypto';
 import { unlinkSync } from 'node:fs';
@@ -108,6 +110,34 @@ describe('MVP Express-mounted integration', () => {
   let accessToken = '';
   let transactionId = '';
   let depositInteractiveUrl = '';
+
+  async function createPluginTestAnchor(plugins: AnchorPlugin[]) {
+    const pluginDatabaseUrl = makeSqliteDbUrlForTests();
+    const config = anchor.config.getConfig();
+    const pluginAnchor = createAnchor({
+      ...config,
+      framework: {
+        ...config.framework,
+        database: { ...config.framework.database, url: pluginDatabaseUrl },
+      },
+    });
+
+    for (const plugin of plugins) pluginAnchor.use(plugin);
+    await pluginAnchor.init();
+
+    return {
+      invoke: createMountedInvoker(pluginAnchor),
+      database: (pluginAnchor as unknown as { database: DatabaseAdapter }).database,
+      async cleanup() {
+        await pluginAnchor.shutdown();
+        try {
+          unlinkSync(pluginDatabaseUrl.slice('file:'.length));
+        } catch {
+          // The adapter may already have removed the temporary database.
+        }
+      },
+    };
+  }
 
   beforeAll(async () => {
     anchor = createAnchor({
@@ -492,6 +522,177 @@ describe('MVP Express-mounted integration', () => {
     expect(Number.isNaN(expiresAtTime)).toBe(false);
     const expectedExpiry = Date.now() + 3600 * 1000;
     expect(Math.abs(expiresAtTime - expectedExpiry)).toBeLessThan(5000);
+  });
+
+  it('invokes one deposit hook with request, account, config, and selected asset context', async () => {
+    let observedContext: unknown;
+    let challengeHookCalled = false;
+    const pluginTest = await createPluginTestAnchor([
+      {
+        id: 'deposit-context',
+        hooks: {
+          onDepositRequest: async (context) => {
+            observedContext = context;
+          },
+          onSep10Challenge: async (transaction) => {
+            challengeHookCalled = true;
+            return transaction;
+          },
+        },
+      },
+    ]);
+
+    try {
+      const challengeResponse = await pluginTest.invoke({
+        path: `/auth/challenge?account=${clientKeypair.publicKey()}`,
+      });
+      expect(challengeResponse.status).toBe(200);
+      expect(challengeHookCalled).toBe(true);
+
+      const response = await pluginTest.invoke({
+        method: 'POST',
+        path: '/transactions/deposit/interactive',
+        headers: {
+          'content-type': 'application/json',
+          authorization: `Bearer ${accessToken}`,
+        },
+        body: { asset_code: 'USDC', amount: '25', note: 'bank transfer' },
+      });
+
+      expect(response.status).toBe(201);
+      expect(observedContext).toMatchObject({
+        config: { network: { network: 'testnet' } },
+        account: clientKeypair.publicKey(),
+        body: { asset_code: 'USDC', amount: '25', note: 'bank transfer' },
+        asset: { code: 'USDC' },
+      });
+    } finally {
+      await pluginTest.cleanup();
+    }
+  });
+
+  it('invokes multiple deposit and challenge hooks in registration order', async () => {
+    const hookOrder: string[] = [];
+    const pluginTest = await createPluginTestAnchor([
+      {
+        id: 'first-hook',
+        hooks: {
+          onDepositRequest: async () => {
+            hookOrder.push('deposit-first');
+          },
+          onSep10Challenge: async (transaction) => {
+            hookOrder.push('challenge-first');
+            return transaction;
+          },
+        },
+      },
+      {
+        id: 'second-hook',
+        hooks: {
+          onDepositRequest: async () => {
+            hookOrder.push('deposit-second');
+          },
+          onSep10Challenge: async (transaction) => {
+            hookOrder.push('challenge-second');
+            return transaction;
+          },
+        },
+      },
+    ]);
+
+    try {
+      const challengeResponse = await pluginTest.invoke({
+        path: `/auth/challenge?account=${clientKeypair.publicKey()}`,
+      });
+      expect(challengeResponse.status).toBe(200);
+      expect(hookOrder).toEqual(['challenge-first', 'challenge-second']);
+
+      const depositResponse = await pluginTest.invoke({
+        method: 'POST',
+        path: '/transactions/deposit/interactive',
+        headers: {
+          'content-type': 'application/json',
+          authorization: `Bearer ${accessToken}`,
+        },
+        body: { asset_code: 'USDC', amount: '25' },
+      });
+      expect(depositResponse.status).toBe(201);
+      expect(hookOrder).toEqual([
+        'challenge-first',
+        'challenge-second',
+        'deposit-first',
+        'deposit-second',
+      ]);
+    } finally {
+      await pluginTest.cleanup();
+    }
+  });
+
+  it('returns a documented rejection without writing deposit or idempotency records', async () => {
+    const pluginTest = await createPluginTestAnchor([
+      {
+        id: 'reject-deposit',
+        hooks: {
+          onDepositRequest: async () => {
+            throw new Error('request is not eligible');
+          },
+        },
+      },
+    ]);
+    const transactionInsert = vi.spyOn(pluginTest.database, 'insertInteractiveTransaction');
+    const idempotencyInsert = vi.spyOn(pluginTest.database, 'insertOrGetIdempotencyRecord');
+
+    try {
+      const response = await pluginTest.invoke({
+        method: 'POST',
+        path: '/transactions/deposit/interactive',
+        headers: {
+          'content-type': 'application/json',
+          authorization: `Bearer ${accessToken}`,
+          'idempotency-key': 'rejected-deposit',
+        },
+        body: { asset_code: 'USDC', amount: '25' },
+      });
+
+      expect(response.status).toBe(400);
+      expect(response.body).toEqual({
+        error: 'deposit_rejected',
+        message: 'Deposit request was rejected by a plugin',
+      });
+      expect(transactionInsert).not.toHaveBeenCalled();
+      expect(idempotencyInsert).not.toHaveBeenCalled();
+    } finally {
+      await pluginTest.cleanup();
+    }
+  });
+
+  it('does not persist an auth challenge when a challenge hook fails', async () => {
+    const pluginTest = await createPluginTestAnchor([
+      {
+        id: 'reject-challenge',
+        hooks: {
+          onSep10Challenge: async () => {
+            throw new Error('challenge rejected');
+          },
+        },
+      },
+    ]);
+    const challengeInsert = vi.spyOn(pluginTest.database, 'insertAuthChallenge');
+
+    try {
+      const response = await pluginTest.invoke({
+        path: `/auth/challenge?account=${clientKeypair.publicKey()}`,
+      });
+
+      expect(response.status).toBe(500);
+      expect(response.body).toEqual({
+        error: 'challenge_hook_failed',
+        message: 'SEP-10 challenge hook failed',
+      });
+      expect(challengeInsert).not.toHaveBeenCalled();
+    } finally {
+      await pluginTest.cleanup();
+    }
   });
 
   it('3a) rate limit response body includes retry_after_seconds matching header', async () => {

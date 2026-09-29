@@ -16,7 +16,7 @@ import { InMemoryQueueAdapter } from '@/runtime/queue/in-memory-queue.ts';
 import { TransactionWatcher } from '@/runtime/watchers/transaction-watcher.ts';
 import { DefaultWebhookProcessor } from '@/runtime/webhooks/default-webhook-processor.ts';
 import { AnchorKitConfig } from '@/types/config.ts';
-import { AnchorPlugin } from '@/types/plugin.ts';
+import type { AnchorPlugin, AnchorPluginHooks } from '@/types/plugin.ts';
 
 /**
  * AnchorInstance
@@ -94,6 +94,8 @@ export class AnchorInstance {
         config: this.config,
         database: this.database,
         webhookProcessor: this.webhookProcessor,
+        depositRequestHooks: this.getPluginHooks('onDepositRequest'),
+        sep10ChallengeHooks: this.getPluginHooks('onSep10Challenge'),
       }).getMiddleware();
 
       this.initialized = true;
@@ -117,13 +119,38 @@ export class AnchorInstance {
     this.ensureInitialized();
     if (this.backgroundJobsRunning) return;
 
-    await this.requireQueue().start(async (job) => this.processQueueJob(job));
+    const startedWatchers: Watcher[] = [];
+    let queueStarted = false;
 
-    for (const watcher of this.watchers) {
-      await watcher.start();
+    try {
+      await this.requireQueue().start(async (job) => this.processQueueJob(job));
+      queueStarted = true;
+
+      for (const watcher of this.watchers) {
+        await watcher.start();
+        startedWatchers.push(watcher);
+      }
+
+      this.backgroundJobsRunning = true;
+    } catch (startupError) {
+      for (const watcher of startedWatchers.reverse()) {
+        try {
+          await watcher.stop();
+        } catch {
+          // Preserve the startup error while best-effort cleanup continues.
+        }
+      }
+
+      if (queueStarted) {
+        try {
+          await this.requireQueue().stop();
+        } catch {
+          // Preserve the startup error while best-effort cleanup continues.
+        }
+      }
+
+      throw startupError;
     }
-
-    this.backgroundJobsRunning = true;
   }
 
   /**
@@ -214,6 +241,15 @@ export class AnchorInstance {
       throw new ConfigError('Queue adapter is not initialized');
     }
     return this.queue;
+  }
+
+  private getPluginHooks<K extends 'onDepositRequest' | 'onSep10Challenge'>(
+    hookName: K,
+  ): NonNullable<AnchorPluginHooks[K]>[] {
+    return [...this.plugins.values()].flatMap((plugin) => {
+      const hook = plugin.hooks?.[hookName];
+      return hook ? [hook] : [];
+    });
   }
 
   private async processQueueJob(job: QueueJob): Promise<void> {

@@ -2,6 +2,7 @@ import type { AnchorConfig } from '@/core/config.ts';
 import { PayloadTooLargeError, ValidationError } from '@/core/errors.ts';
 import { InMemoryRateLimiter, type RateLimitRule } from '@/runtime/http/rate-limiter.ts';
 import type { DatabaseAdapter, WebhookProcessor } from '@/runtime/interfaces.ts';
+import type { AnchorPluginHooks, DepositRequestBody } from '@/types/plugin.ts';
 import { IdempotencyUtils } from '@/utils/idempotency.ts';
 import {
   Account,
@@ -27,6 +28,8 @@ export interface ExpressRouterContext {
   maxBodyBytes: number;
   rateLimiter: InMemoryRateLimiter;
   rateRules: Record<'auth_challenge' | 'auth_token' | 'webhook' | 'deposit', RateLimitRule>;
+  depositRequestHooks: NonNullable<AnchorPluginHooks['onDepositRequest']>[];
+  sep10ChallengeHooks: NonNullable<AnchorPluginHooks['onSep10Challenge']>[];
 }
 
 interface AuthenticatedRequestData {
@@ -347,8 +350,29 @@ async function handleAuthChallenge(
     .setTimebounds(now, expiresAtUnix)
     .build();
 
-  challengeTx.sign(context.sep10ServerKeypair);
-  const challengeXdr = challengeTx.toXDR();
+  let hookedChallengeTx = challengeTx;
+  try {
+    for (const hook of context.sep10ChallengeHooks) {
+      hookedChallengeTx = await hook(hookedChallengeTx);
+    }
+  } catch {
+    sendJson(res, 500, {
+      error: 'challenge_hook_failed',
+      message: 'SEP-10 challenge hook failed',
+    });
+    return;
+  }
+
+  if (extractNonceFromChallenge(hookedChallengeTx) !== nonce) {
+    sendJson(res, 500, {
+      error: 'challenge_hook_failed',
+      message: 'SEP-10 challenge hook returned an invalid transaction',
+    });
+    return;
+  }
+
+  hookedChallengeTx.sign(context.sep10ServerKeypair);
+  const challengeXdr = hookedChallengeTx.toXDR();
   const expiresAt = new Date(expiresAtUnix * 1000).toISOString();
 
   await context.database.insertAuthChallenge({
@@ -559,6 +583,28 @@ async function handleDepositInteractive(
       error: 'invalid_amount',
       message: `Amount is below the minimum allowed of ${selectedAsset.min_amount}`,
       min_amount: selectedAsset.min_amount,
+    });
+    return;
+  }
+
+  const depositHookContext = {
+    config: context.config.getConfig(),
+    db: context.database,
+    params: {},
+    query: {},
+    body: parsedBody.body as DepositRequestBody,
+    account: auth.account,
+    asset: selectedAsset,
+  };
+
+  try {
+    for (const hook of context.depositRequestHooks) {
+      await hook(depositHookContext);
+    }
+  } catch {
+    sendJson(res, 400, {
+      error: 'deposit_rejected',
+      message: 'Deposit request was rejected by a plugin',
     });
     return;
   }

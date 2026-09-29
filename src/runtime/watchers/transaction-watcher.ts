@@ -19,6 +19,7 @@ export class TransactionWatcher implements Watcher {
   private timer: ReturnType<typeof setInterval> | null = null;
   private tickPromise: Promise<void> | null = null;
   private startPromise: Promise<void> | null = null;
+  private stopPromise: Promise<void> | null = null;
 
   constructor(database: DatabaseAdapter, queue: QueueAdapter, options: TransactionWatcherOptions) {
     this.database = database;
@@ -29,6 +30,11 @@ export class TransactionWatcher implements Watcher {
   }
 
   public async start(): Promise<void> {
+    if (this.stopPromise) {
+      await this.stopPromise;
+      return;
+    }
+
     // If already started, return immediately
     if (this.timer) return;
 
@@ -58,13 +64,41 @@ export class TransactionWatcher implements Watcher {
   }
 
   public async stop(): Promise<void> {
-    if (!this.timer) return;
-    clearInterval(this.timer);
-    this.timer = null;
+    if (this.stopPromise) {
+      await this.stopPromise;
+      return;
+    }
+
+    const stopping = this.performStop();
+    this.stopPromise = stopping;
+    try {
+      await stopping;
+    } finally {
+      this.stopPromise = null;
+    }
+  }
+
+  private async performStop(): Promise<void> {
+    if (this.startPromise) {
+      try {
+        await this.startPromise;
+      } catch {
+        // A failed initial tick must not prevent shutdown.
+      }
+    }
+
+    if (this.timer) {
+      clearInterval(this.timer);
+      this.timer = null;
+    }
 
     // Wait for any active tick to complete
     if (this.tickPromise) {
-      await this.tickPromise;
+      try {
+        await this.tickPromise;
+      } catch {
+        // Transient tick failures must not make shutdown fail.
+      }
     }
   }
 
