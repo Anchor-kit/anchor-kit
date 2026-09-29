@@ -127,7 +127,9 @@ function makeFakeDb(rejectOnIdempotency = false): {
       };
     },
     async updateIdempotencyRecord() {},
-    async reserveIdempotencyRecord(input): Promise<{ record: IdempotencyRecord; inserted: boolean }> {
+    async reserveIdempotencyRecord(
+      input,
+    ): Promise<{ record: IdempotencyRecord; inserted: boolean }> {
       if (rejectOnIdempotency) throw new Error('Should not be called');
       return {
         record: {
@@ -223,9 +225,7 @@ async function invokeDeposit(
   (emitter as unknown as { headers: Record<string, string> }).headers = {
     'content-type': 'application/json',
     authorization: `Bearer ${token}`,
-    ...(options.idempotencyKey !== undefined
-      ? { 'idempotency-key': options.idempotencyKey }
-      : {}),
+    ...(options.idempotencyKey !== undefined ? { 'idempotency-key': options.idempotencyKey } : {}),
   };
   (emitter as unknown as { rawBody: string }).rawBody = bodyStr;
 
