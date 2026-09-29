@@ -76,11 +76,26 @@ export const StellarUtils = {
    * @param xdr - Base64-encoded Stellar transaction XDR
    * @returns ParsedTransaction object with key details
    */
-  parseXdrTransaction(xdr: string): ParsedTransaction {
+  parseXdrTransaction(
+    xdr: string,
+    network: 'public' | 'testnet' | 'futurenet' = 'testnet',
+  ): ParsedTransaction {
     try {
-      // We don't know the network here, but for parsing core fields it might not matter
-      // unless we're verifying signatures. Defaulting to Testnet for parsing.
-      const tx = new Transaction(xdr, Networks.TESTNET);
+      const networkPassphrase =
+        network === 'testnet'
+          ? Networks.TESTNET
+          : network === 'public'
+            ? Networks.PUBLIC
+            : network === 'futurenet'
+              ? Networks.FUTURENET
+              : (() => {
+                  throw new Error(
+                    'Unsupported network: ' +
+                      network +
+                      '. Must be one of: public, testnet, futurenet',
+                  );
+                })();
+      const tx = new Transaction(xdr, networkPassphrase);
 
       let memo: Memo | undefined;
       if (tx.memo && tx.memo.type !== 'none') {

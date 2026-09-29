@@ -348,6 +348,26 @@ describe('StellarUtils', () => {
       expect(tx.operations.length).toBe(1);
     });
 
+    it.each(['testnet', 'public', 'futurenet'] as const)(
+      'should parse XDR with explicit %s network context',
+      async (network) => {
+        const xdr = await StellarUtils.buildPaymentXdr({
+          source: validAccountId,
+          destination: validAccountId,
+          amount: '1',
+          assetCode: 'XLM',
+          network,
+        });
+        expect(StellarUtils.parseXdrTransaction(xdr, network).source).toBe(validAccountId);
+      },
+    );
+
+    it('should reject unsupported parse network input', () => {
+      expect(() => StellarUtils.parseXdrTransaction('AAAA', 'invalid' as 'testnet')).toThrow(
+        'Unsupported network: invalid. Must be one of: public, testnet, futurenet',
+      );
+    });
+
     it('should reject unsupported network values instead of falling back to testnet', async () => {
       await expect(
         StellarUtils.buildPaymentXdr({
