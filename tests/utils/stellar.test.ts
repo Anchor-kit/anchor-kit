@@ -122,6 +122,32 @@ describe('StellarUtils', () => {
       },
     );
 
+    it.each(['0.00000001', '1.12345678'])(
+      'should reject payment amounts with excessive precision: %s',
+      async (amount) => {
+        await expect(
+          StellarUtils.buildPaymentXdr({
+            source: validAccountId,
+            destination: validAccountId,
+            amount,
+            assetCode: 'XLM',
+            network: 'testnet',
+          }),
+        ).rejects.toThrow('amount must have at most 7 decimal places');
+      },
+    );
+
+    it('should accept seven fractional places', async () => {
+      const xdr = await StellarUtils.buildPaymentXdr({
+        source: validAccountId,
+        destination: validAccountId,
+        amount: '1.1234567',
+        assetCode: 'XLM',
+        network: 'testnet',
+      });
+      expect(xdr).toBeTruthy();
+    });
+
     it('should preserve a valid positive decimal amount', async () => {
       await expect(
         StellarUtils.buildPaymentXdr({
@@ -320,6 +346,26 @@ describe('StellarUtils', () => {
       expect(tx.networkPassphrase).toBe(Networks.PUBLIC);
       expect(tx.source).toBe(params.source);
       expect(tx.operations.length).toBe(1);
+    });
+
+    it.each(['testnet', 'public', 'futurenet'] as const)(
+      'should parse XDR with explicit %s network context',
+      async (network) => {
+        const xdr = await StellarUtils.buildPaymentXdr({
+          source: validAccountId,
+          destination: validAccountId,
+          amount: '1',
+          assetCode: 'XLM',
+          network,
+        });
+        expect(StellarUtils.parseXdrTransaction(xdr, network).source).toBe(validAccountId);
+      },
+    );
+
+    it('should reject unsupported parse network input', () => {
+      expect(() => StellarUtils.parseXdrTransaction('AAAA', 'invalid' as 'testnet')).toThrow(
+        'Unsupported network: invalid. Must be one of: public, testnet, futurenet',
+      );
     });
 
     it('should reject unsupported network values instead of falling back to testnet', async () => {

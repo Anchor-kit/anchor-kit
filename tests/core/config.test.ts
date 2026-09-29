@@ -264,6 +264,50 @@ describe('AnchorConfig', () => {
       expect(() => config.validate()).not.toThrow();
     });
 
+    it('accepts each documented KYC level and exposes valid KYC settings through get()', () => {
+      for (const level of ['none', 'basic', 'strict'] as const) {
+        const kyc = {
+          level,
+          requireDocuments: true,
+          requireName: false,
+          requireAddress: true,
+          requireEmail: false,
+          requirePhoneNumber: true,
+          requireBirthDate: false,
+        };
+        const config = new AnchorConfig({ ...validBaseConfig, kyc });
+
+        expect(() => config.validate()).not.toThrow();
+        expect(config.get('kyc')).toEqual(kyc);
+      }
+    });
+
+    it('rejects unsupported KYC levels', () => {
+      const config = new AnchorConfig({
+        ...validBaseConfig,
+        // @ts-expect-error this is for runtime validation
+        kyc: { level: 'enhanced' },
+      });
+
+      expect(() => config.validate()).toThrow(ConfigError);
+      expect(() => config.validate()).toThrow(/kyc\.level must be one of/);
+    });
+
+    it.each([
+      'requireDocuments',
+      'requireName',
+      'requireAddress',
+      'requireEmail',
+      'requirePhoneNumber',
+      'requireBirthDate',
+    ] as const)('rejects a non-boolean kyc.%s value', (field) => {
+      const kyc = { [field]: 'true' } as unknown as NonNullable<AnchorKitConfig['kyc']>;
+      const config = new AnchorConfig({ ...validBaseConfig, kyc });
+
+      expect(() => config.validate()).toThrow(ConfigError);
+      expect(() => config.validate()).toThrow(new RegExp(`kyc\\.${field} must be a boolean`));
+    });
+
     it('should throw ConfigError if top-level network is missing', () => {
       // @ts-expect-error this is for test cases
       const invalidConfig: AnchorKitConfig = { ...validBaseConfig, network: undefined };
@@ -442,6 +486,72 @@ describe('AnchorConfig', () => {
         expect(() => config.validate()).toThrow(
           /Invalid email format for operational.supportEmail/,
         );
+      });
+    });
+
+    describe('operational flags preservation (#551)', () => {
+      it('should preserve webhooksEnabled when set to true', () => {
+        const config = new AnchorConfig({
+          ...validBaseConfig,
+          operational: { webhooksEnabled: true },
+        });
+        expect(config.get('operational')?.webhooksEnabled).toBe(true);
+        expect(() => config.validate()).not.toThrow();
+      });
+
+      it('should preserve webhooksEnabled when set to false', () => {
+        const config = new AnchorConfig({
+          ...validBaseConfig,
+          operational: { webhooksEnabled: false },
+        });
+        expect(config.get('operational')?.webhooksEnabled).toBe(false);
+        expect(() => config.validate()).not.toThrow();
+      });
+
+      it('should preserve corsEnabled when set to true', () => {
+        const config = new AnchorConfig({
+          ...validBaseConfig,
+          operational: { corsEnabled: true },
+        });
+        expect(config.get('operational')?.corsEnabled).toBe(true);
+        expect(() => config.validate()).not.toThrow();
+      });
+
+      it('should preserve corsEnabled when set to false', () => {
+        const config = new AnchorConfig({
+          ...validBaseConfig,
+          operational: { corsEnabled: false },
+        });
+        expect(config.get('operational')?.corsEnabled).toBe(false);
+        expect(() => config.validate()).not.toThrow();
+      });
+
+      it('should preserve both operational flags when both are set', () => {
+        const config = new AnchorConfig({
+          ...validBaseConfig,
+          operational: { webhooksEnabled: true, corsEnabled: false },
+        });
+        expect(config.get('operational')?.webhooksEnabled).toBe(true);
+        expect(config.get('operational')?.corsEnabled).toBe(false);
+        expect(() => config.validate()).not.toThrow();
+      });
+
+      it('should leave webhooksEnabled undefined when not specified', () => {
+        const config = new AnchorConfig({
+          ...validBaseConfig,
+          operational: { name: 'Test Anchor' },
+        });
+        expect(config.get('operational')?.webhooksEnabled).toBeUndefined();
+        expect(() => config.validate()).not.toThrow();
+      });
+
+      it('should leave corsEnabled undefined when not specified', () => {
+        const config = new AnchorConfig({
+          ...validBaseConfig,
+          operational: { name: 'Test Anchor' },
+        });
+        expect(config.get('operational')?.corsEnabled).toBeUndefined();
+        expect(() => config.validate()).not.toThrow();
       });
     });
 
