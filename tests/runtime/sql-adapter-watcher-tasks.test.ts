@@ -41,6 +41,13 @@ function insertWatcherRow(
     );
 }
 
+function listIndexes(db: DatabaseAdapter, table: string): string[] {
+  const rows = getSqlite(db)
+    .prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = ?")
+    .all(table) as { name: string }[];
+  return rows.map((row) => row.name);
+}
+
 describe('SqlDatabaseAdapter – watcher task persistence and processed counts', () => {
   const dbUrl = makeSqliteDbUrlForTests();
   const dbPath = dbUrl.startsWith('file:') ? dbUrl.slice('file:'.length) : dbUrl;
@@ -253,4 +260,19 @@ describe('SqlDatabaseAdapter – watcher task persistence and processed counts',
     const pending = await db.listPendingWatcherTasks(1);
     expect(pending.length).toBeLessThanOrEqual(1);
   });
-});
+
+  it('creates supporting indexes for watcher task queries', () => {
+    const indexes = listIndexes(db, 'watcher_tasks');
+    expect(indexes).toContain('IDX_watcher_tasks_status_created_at');
+  });
+
+  it('uses the status and created_at index for pending watcher task queries', () => {
+    const plan = getSqlite(db)
+      .prepare(
+        'EXPLAIN QUERY PLAN SELECT id, watcher_name, payload, status, error_message, processed_at, created_at FROM watcher_tasks WHERE status = ? ORDER BY created_at ASC LIMIT ?',
+      )
+      .all('pending', 10) as { detail: string }[];
+    const detail = plan.map((row) => row.detail).join('\n');
+    expect(detail).toContain('IDX_watcher_tasks_status_created_at');
+  });
+})

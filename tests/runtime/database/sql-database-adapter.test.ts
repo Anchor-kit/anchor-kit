@@ -114,6 +114,44 @@ describe('SqlDatabaseAdapter (sqlite)', () => {
     expect(pending[0]?.id).toBe('tx-old');
   });
 
+  it('creates indexes supporting watcher and retention queries', async () => {
+    const sqlite = (adapter as unknown as { sqlite: Database }).sqlite;
+    const rows = sqlite
+      .prepare("SELECT name FROM sqlite_master WHERE type = 'index'")
+      .all() as Array<{ name: string }>;
+    const indexNames = rows.map((row) => row.name);
+
+    expect(indexNames).toContain('idx_interactive_transactions_status_created_at');
+    expect(indexNames).toContain('idx_auth_challenges_expires_at');
+  });
+
+  it('uses the pending transactions index for the watcher query plan', async () => {
+    const sqlite = (adapter as unknown as { sqlite: Database }).sqlite;
+    const plan = sqlite
+      .prepare(
+        'EXPLAIN QUERY PLAN SELECT id FROM interactive_transactions WHERE status = ? AND created_at < ?',
+      )
+      .all('pending_user_transfer_start', '2024-01-02T00:00:00.000Z') as Array<{
+      detail: string;
+    }>;
+    const details = plan.map((row) => row.detail).join('\n');
+
+    expect(details).toContain('idx_interactive_transactions_status_created_at');
+  });
+
+  it('keeps indexes available after running migrations twice', async () => {
+    await expect(adapter.migrate()).resolves.toBeUndefined();
+
+    const sqlite = (adapter as unknown as { sqlite: Database }).sqlite;
+    const rows = sqlite
+      .prepare("SELECT name FROM sqlite_master WHERE type = 'index'")
+      .all() as Array<{ name: string }>;
+    const indexNames = rows.map((row) => row.name);
+
+    expect(indexNames).toContain('idx_interactive_transactions_status_created_at');
+    expect(indexNames).toContain('idx_auth_challenges_expires_at');
+  });
+
   it('updates an idempotency record without changing its identity fields', async () => {
     const initial = await adapter.insertOrGetIdempotencyRecord({
       id: 'idempotency-1',
