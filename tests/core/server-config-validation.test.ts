@@ -93,10 +93,18 @@ describe('server config validation', () => {
   it('accepts omitted security flags and both boolean values', () => {
     expect(() => SecurityConfigSchema.validate(baseConfig.security)).not.toThrow();
 
+    expect(() =>
+      SecurityConfigSchema.validate({ ...baseConfig.security, enableClientAttribution: false }),
+    ).not.toThrow();
+    expect(() =>
+      SecurityConfigSchema.validate({
+        ...baseConfig.security,
+        enableClientAttribution: true,
+        clientDomain: 'client.example',
+        clientDomainSigningKey: 'GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5',
+      }),
+    ).not.toThrow();
     for (const value of [true, false]) {
-      expect(() =>
-        SecurityConfigSchema.validate({ ...baseConfig.security, enableClientAttribution: value }),
-      ).not.toThrow();
       expect(() =>
         SecurityConfigSchema.validate({ ...baseConfig.security, verifyWebhookSignatures: value }),
       ).not.toThrow();

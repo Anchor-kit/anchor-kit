@@ -41,6 +41,16 @@ function isValidUrlString(url: string): boolean {
   }
 }
 
+function isValidClientDomain(value: unknown): value is string {
+  return (
+    typeof value === 'string' &&
+    value.length <= 64 &&
+    /^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)(?:\.(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?))*$/i.test(
+      value,
+    )
+  );
+}
+
 function isValidDatabaseUrlString(urlString: unknown): boolean {
   return (
     isString(urlString) &&
@@ -263,6 +273,24 @@ function validateFrameworkUrls(
   return true;
 }
 
+function validateMetadataFeatures(metadata: AnchorKitConfig['metadata']): boolean {
+  const features = metadata?.features;
+  if (!features) return true;
+
+  for (const key of [
+    'supportsInteractiveDeposits',
+    'supportsInteractiveWithdrawals',
+    'supportsAsyncTransactionStatus',
+  ] as const) {
+    const value = features[key];
+    if (value !== undefined && typeof value !== 'boolean') {
+      throw new Error(`metadata.features.${key} must be a boolean`);
+    }
+  }
+
+  return true;
+}
+
 function validateOperationalNumbers(operational: AnchorKitConfig['operational']): boolean {
   const retentionDays = operational?.transactionRetentionDays;
   if (retentionDays !== undefined && (!Number.isSafeInteger(retentionDays) || retentionDays <= 0)) {
@@ -296,6 +324,7 @@ function validateFrameworkConfig(
   validateFrameworkNumbers(framework);
   validateFrameworkRateLimit(framework);
   validateFrameworkUrls(metadata, server, operational);
+  validateMetadataFeatures(metadata);
   validateOperationalNumbers(operational);
   validateOperationalBooleans(operational);
   return true;
@@ -431,6 +460,29 @@ export const SecurityConfigSchema = {
     ) {
       throw new Error('security.enableClientAttribution must be a boolean');
     }
+    if (config.clientDomain !== undefined && !isValidClientDomain(config.clientDomain)) {
+      throw new Error(
+        'security.clientDomain must be a valid DNS hostname of at most 64 characters',
+      );
+    }
+    if (
+      config.clientDomainSigningKey !== undefined &&
+      !ValidationUtils.isValidStellarAddress(config.clientDomainSigningKey)
+    ) {
+      throw new Error('security.clientDomainSigningKey must be a valid Stellar public key');
+    }
+    if (config.enableClientAttribution) {
+      if (!config.clientDomain) {
+        throw new Error(
+          'security.clientDomain is required when security.enableClientAttribution is true',
+        );
+      }
+      if (!config.clientDomainSigningKey) {
+        throw new Error(
+          'security.clientDomainSigningKey is required when security.enableClientAttribution is true',
+        );
+      }
+    }
     if (
       config.verifyWebhookSignatures !== undefined &&
       typeof config.verifyWebhookSignatures !== 'boolean'
@@ -474,6 +526,14 @@ function validateAnchorKitConfig(config: AnchorKitConfig): boolean {
 
   NetworkConfigSchema.validate(network);
   SecurityConfigSchema.validate(security);
+  if (security.enableClientAttribution) {
+    const expectedOrigin = `https://${security.clientDomain?.toLowerCase()}`;
+    if (!Array.isArray(server.corsOrigins) || !server.corsOrigins.includes(expectedOrigin)) {
+      throw new Error(
+        `server.corsOrigins must include "${expectedOrigin}" when security.enableClientAttribution is true`,
+      );
+    }
+  }
   validateKycConfig(config.kyc);
 
   if (!assets.assets || !Array.isArray(assets.assets) || assets.assets.length === 0) {
