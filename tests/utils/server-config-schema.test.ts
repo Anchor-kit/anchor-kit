@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { ServerConfigSchema, validateServerConfig } from '../../src/utils/validation';
+import {
+  SecurityConfigSchema,
+  ServerConfigSchema,
+  validateServerConfig,
+} from '../../src/utils/validation';
 
 describe('ServerConfigSchema', () => {
   it('is publicly importable from validation module', () => {
@@ -156,4 +160,44 @@ describe('ServerConfigSchema public export', () => {
     const mod = await import('../../src/utils/index');
     expect(mod.ServerConfigSchema).toBeDefined();
   });
+});
+
+describe('SecurityConfigSchema', () => {
+  const requiredSecretFields = [
+    'sep10SigningKey',
+    'interactiveJwtSecret',
+    'distributionAccountSecret',
+  ] as const;
+
+  it('exposes the required secret fields', () => {
+    for (const field of requiredSecretFields) {
+      expect(SecurityConfigSchema).toHaveProperty(field);
+      expect(typeof SecurityConfigSchema[field].validate).toBe('function');
+    }
+  });
+
+  for (const field of requiredSecretFields) {
+    describe(`${field} field`, () => {
+      it('accepts a non-empty string without modifying it', () => {
+        const value = 's'.repeat(56);
+        expect(SecurityConfigSchema[field].validate(value)).toBe(true);
+        expect(value).toBe('s'.repeat(56));
+      });
+
+      it('rejects missing, empty, and whitespace-only values', () => {
+        expect(SecurityConfigSchema[field].validate(undefined)).toBe(false);
+        expect(SecurityConfigSchema[field].validate(null)).toBe(false);
+        expect(SecurityConfigSchema[field].validate('')).toBe(false);
+        expect(SecurityConfigSchema[field].validate('   ')).toBe(false);
+        expect(SecurityConfigSchema[field].validate('\t\n')).toBe(false);
+      });
+
+      it('rejects non-string values', () => {
+        expect(SecurityConfigSchema[field].validate(123)).toBe(false);
+        expect(SecurityConfigSchema[field].validate(true)).toBe(false);
+        expect(SecurityConfigSchema[field].validate({})).toBe(false);
+        expect(SecurityConfigSchema[field].validate([])).toBe(false);
+      });
+    });
+  }
 });

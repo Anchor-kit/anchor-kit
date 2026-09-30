@@ -33,6 +33,20 @@ describe('SqlDatabaseAdapter – cleanupOldRecords (sqlite)', () => {
     }
   });
 
+  it('creates supporting indexes for watcher and retention queries', () => {
+    const indexes = raw
+      .prepare(
+        `SELECT name, tbl_name FROM sqlite_master WHERE type = 'index' AND name LIKE 'idx_%' ORDER BY name`,
+      )
+      .all() as Array<{ name: string; tbl_name: string }>;
+    const byName = new Map(indexes.map((i) => [i.name, i.tbl_name]));
+
+    expect(byName.get('idx_watcher_tasks_status_created_at')).toBe('watcher_tasks');
+    expect(byName.get('idx_webhook_events_status_created_at')).toBe('webhook_events');
+    expect(byName.get('idx_auth_challenges_expires_at')).toBe('auth_challenges');
+    expect(byName.get('idx_idempotency_keys_created_at')).toBe('idempotency_keys');
+  });
+
   it('retains rows exactly on the cleanup cutoff while removing strictly older rows', async () => {
     const challengeExpired = `challenge-expired-${randomUUID()}`;
     const challengeKept = `challenge-kept-${randomUUID()}`;

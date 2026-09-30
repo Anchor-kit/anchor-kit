@@ -159,7 +159,13 @@ export type QueueJob =
   | { type: 'process_watcher_task'; payload: { watcherTaskId: string } }
   | { type: 'cleanup_records'; payload: { retentionDays: number } };
 
+export interface QueueDrainStatus {
+  readonly pending: number;
+  readonly active: number;
+}
+
 export interface QueueAdapter {
+  readonly status?: QueueDrainStatus;
   enqueue(job: QueueJob): Promise<void>;
   start(worker: (job: QueueJob) => Promise<void>): Promise<void>;
   stop(): Promise<void>;
@@ -178,5 +184,10 @@ export interface WebhookProcessor {
     payload: Record<string, unknown>;
     rawBody: string | Buffer | Uint8Array;
     signature?: string;
-  }): Promise<{ duplicate: boolean; eventId: string; provider: string }>;
+  }): Promise<{
+    duplicate: boolean;
+    eventId: string;
+    provider: string;
+    status?: WebhookEventRecord['status'];
+  }>;
 }

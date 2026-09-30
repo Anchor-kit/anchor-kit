@@ -10,6 +10,7 @@ import type {
   DatabaseAdapter,
   InteractiveTransactionRecord,
   QueueAdapter,
+  QueueDrainStatus,
   Watcher,
   WebhookProcessor,
 } from '@/runtime/interfaces.ts';
@@ -17,7 +18,7 @@ import { InMemoryQueueAdapter } from '@/runtime/queue/in-memory-queue.ts';
 import { TransactionWatcher } from '@/runtime/watchers/transaction-watcher.ts';
 import { DefaultWebhookProcessor } from '@/runtime/webhooks/default-webhook-processor.ts';
 import { AnchorKitConfig } from '@/types/config.ts';
-import { AnchorPlugin } from '@/types/plugin.ts';
+import type { AnchorPlugin, AnchorPluginHooks } from '@/types/plugin.ts';
 
 /**
  * AnchorInstance
@@ -38,6 +39,7 @@ export class AnchorInstance {
   private initPromise: Promise<void> | null = null;
   private shutdownPromise: Promise<void> | null = null;
   private backgroundJobsPromise: Promise<void> | null = null;
+  private backgroundJobsStopPromise: Promise<void> | null = null;
 
   constructor(config: Partial<AnchorKitConfig>) {
     this.config = new AnchorConfig(config);
@@ -61,9 +63,14 @@ export class AnchorInstance {
   }
 
   /**
-   * Initialize registered plugins and all runtime services.
+   * Initialize registered plugins and runtime services. Concurrent calls share
+   * one initialization attempt; calls made during shutdown run afterward.
    */
   public async init(): Promise<void> {
+    if (this.shutdownPromise) {
+      await this.shutdownPromise;
+      return this.init();
+    }
     if (this.initialized) return;
     if (this.initPromise) return this.initPromise;
 
@@ -75,7 +82,7 @@ export class AnchorInstance {
 
       try {
         validatePluginRoutes(pluginRoutes);
-        this.database = createSqlDatabaseAdapter(frameworkConfig.database);
+        this.database = this.createDatabaseAdapter();
         await this.database.connect();
         await this.database.migrate();
 
@@ -106,10 +113,23 @@ export class AnchorInstance {
           ];
         }
 
+        const depositRequestHooks: NonNullable<AnchorPluginHooks['onDepositRequest']>[] = [];
+        const sep10ChallengeHooks: NonNullable<AnchorPluginHooks['onSep10Challenge']>[] = [];
+        for (const plugin of this.plugins.values()) {
+          if (plugin.hooks?.onDepositRequest) {
+            depositRequestHooks.push(plugin.hooks.onDepositRequest);
+          }
+          if (plugin.hooks?.onSep10Challenge) {
+            sep10ChallengeHooks.push(plugin.hooks.onSep10Challenge);
+          }
+        }
+
         this.expressRouter = new AnchorExpressRouter({
           config: this.config,
           database: this.database,
           webhookProcessor: this.webhookProcessor,
+          depositRequestHooks,
+          sep10ChallengeHooks,
           pluginRoutes,
         }).getMiddleware();
 
@@ -159,25 +179,43 @@ export class AnchorInstance {
    * Stop watcher services and queue workers.
    */
   public async stopBackgroundJobs(): Promise<void> {
+    if (this.backgroundJobsStopPromise) return this.backgroundJobsStopPromise;
+    if (this.backgroundJobsPromise) await this.backgroundJobsPromise;
+    if (this.backgroundJobsStopPromise) return this.backgroundJobsStopPromise;
     if (!this.initialized || !this.backgroundJobsRunning) return;
 
-    for (const watcher of this.watchers) {
-      await watcher.stop();
-    }
+    this.backgroundJobsStopPromise = (async () => {
+      try {
+        for (const watcher of this.watchers) {
+          await watcher.stop();
+        }
 
-    await this.requireQueue().stop();
-    this.backgroundJobsRunning = false;
+        await this.requireQueue().stop();
+        this.backgroundJobsRunning = false;
+      } finally {
+        this.backgroundJobsStopPromise = null;
+      }
+    })();
+
+    return this.backgroundJobsStopPromise;
+  }
+
+  /** Return pending and active queue counts without exposing job payloads. */
+  public getQueueStatus(): QueueDrainStatus {
+    return this.queue?.status ?? { pending: 0, active: 0 };
   }
 
   /**
-   * Cleanly shutdown all services.
+   * Cleanly shut down all services. If initialization is pending, shutdown waits
+   * for it to settle before releasing resources. The instance can then be initialized again.
    */
   public async shutdown(): Promise<void> {
-    if (!this.initialized && !this.shutdownPromise) return;
+    if (!this.initialized && !this.initPromise && !this.shutdownPromise) return;
     if (this.shutdownPromise) return this.shutdownPromise;
 
     this.shutdownPromise = (async () => {
       try {
+        await this.initPromise?.catch(() => undefined);
         if (!this.initialized) return;
 
         await this.stopBackgroundJobs();
@@ -195,6 +233,10 @@ export class AnchorInstance {
     })();
 
     return this.shutdownPromise;
+  }
+
+  protected createDatabaseAdapter(): DatabaseAdapter {
+    return createSqlDatabaseAdapter(this.config.get('framework').database);
   }
 
   /**

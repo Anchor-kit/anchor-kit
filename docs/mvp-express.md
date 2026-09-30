@@ -181,6 +181,8 @@ const response = await fetch('https://anchor.example.com/anchor/info', {
 
 Your callback receives provider-agnostic payload as `event.payload`.
 
+The `x-webhook-provider` header takes precedence over `provider` in the JSON body. The body value is used when the header is missing or blank, and `generic` is used when neither source has a value. Duplicate webhook responses include the stored event `status` (`pending`, `processed`, or `failed`); first-delivery responses keep their existing shape.
+
 ## 6) Background jobs lifecycle
 
 - `await anchor.init()`

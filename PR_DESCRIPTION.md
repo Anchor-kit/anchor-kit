@@ -1,23 +1,28 @@
-# PR Summary
+## What does this PR do?
 
-Adds focused tests for three behaviors:
+This PR makes background startup and watcher shutdown recoverable, and invokes the declared deposit and SEP-10 challenge plugin hooks.
 
-- sqlite-backed `getInteractiveTransactionById()` returns `null` for unknown transaction IDs
-- `TransactionWatcher.stop()` before `start()` is a safe no-op
-- webhook route accepts an empty request body and returns a generated `event_id`
+- Stops the queue and earlier watchers after a later startup failure while preserving the original error.
+- Coordinates watcher start/stop races and tolerates in-flight tick failures during shutdown.
+- Runs deposit and challenge hooks in registration order with typed context; hook failures prevent persistence.
+- Adds focused lifecycle and HTTP integration tests.
 
-## How to test
+## How to test?
 
-- Run `bun test tests/runtime/sql-adapter-interactive-tx.test.ts tests/runtime/transaction-watcher.unit.test.ts tests/mvp-express.integration.test.ts`
-- Confirm all tests pass
+- Run `bun test` (434 tests pass across 45 files).
+- For focused coverage, run `bun test tests/runtime/background-lifecycle.test.ts tests/runtime/transaction-watcher.unit.test.ts tests/mvp-express.integration.test.ts`.
 
 ## Checklist
 
-- [x] My code follows the code style of this project.
+- [ ] My code follows the code style of this project.
 - [x] I have added tests for my changes.
-- [ ] I have updated the documentation accordingly.
-- [x] I have run `bun test` locally.
+- [x] I have updated the hook contract documentation.
+- [x] I have run `bun run test` locally.
+- [ ] I have run `bun run lint` locally.
 
 ## Issue Reference
 
-Closes #243, #240, and #245
+Closes #584
+Closes #585
+Closes #589
+Closes #590

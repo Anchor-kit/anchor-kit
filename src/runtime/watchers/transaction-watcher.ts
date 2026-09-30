@@ -19,6 +19,7 @@ export class TransactionWatcher implements Watcher {
   private timer: ReturnType<typeof setInterval> | null = null;
   private tickPromise: Promise<void> | null = null;
   private startPromise: Promise<void> | null = null;
+  private stopPromise: Promise<void> | null = null;
 
   constructor(database: DatabaseAdapter, queue: QueueAdapter, options: TransactionWatcherOptions) {
     this.database = database;
@@ -29,6 +30,11 @@ export class TransactionWatcher implements Watcher {
   }
 
   public async start(): Promise<void> {
+    if (this.stopPromise) {
+      await this.stopPromise;
+      return;
+    }
+
     // If already started, return immediately
     if (this.timer) return;
 
@@ -58,22 +64,53 @@ export class TransactionWatcher implements Watcher {
   }
 
   public async stop(): Promise<void> {
-    if (this.timer) {
-      clearInterval(this.timer);
-      this.timer = null;
-    }
+    if (this.stopPromise) return this.stopPromise;
 
-    const activeTick = this.tickPromise;
-    if (activeTick) {
-      try {
-        await activeTick;
-      } catch {
-        // Ignore transient tick failures during shutdown so timers and lifecycle state can settle.
+    this.stopPromise = (async () => {
+      if (this.timer) {
+        clearInterval(this.timer);
+        this.timer = null;
       }
-    }
 
-    this.isTickInProgress = false;
-    this.tickPromise = null;
+      const activeStart = this.startPromise;
+      if (activeStart) {
+        try {
+          await activeStart;
+        } catch {
+          // A failed initial tick should not prevent shutdown from settling.
+        }
+      }
+
+      if (this.timer) {
+        clearInterval(this.timer);
+        this.timer = null;
+      }
+
+      const activeTick = this.tickPromise;
+      if (activeTick) {
+        try {
+          await activeTick;
+        } catch {
+          // Ignore transient tick failures during shutdown so timers and lifecycle state can settle.
+        }
+      }
+
+      // An initial tick can finish after the first timer check and create the
+      // interval while shutdown is waiting for that tick.
+      if (this.timer) {
+        clearInterval(this.timer);
+        this.timer = null;
+      }
+
+      this.isTickInProgress = false;
+      this.tickPromise = null;
+    })();
+
+    try {
+      await this.stopPromise;
+    } finally {
+      this.stopPromise = null;
+    }
   }
 
   private async tick(): Promise<void> {
