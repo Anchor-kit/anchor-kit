@@ -61,9 +61,14 @@ export class AnchorInstance {
   }
 
   /**
-   * Initialize registered plugins and all runtime services.
+   * Initialize registered plugins and runtime services. Concurrent calls share
+   * one initialization attempt; calls made during shutdown run afterward.
    */
   public async init(): Promise<void> {
+    if (this.shutdownPromise) {
+      await this.shutdownPromise;
+      return this.init();
+    }
     if (this.initialized) return;
     if (this.initPromise) return this.initPromise;
 
@@ -75,7 +80,7 @@ export class AnchorInstance {
 
       try {
         validatePluginRoutes(pluginRoutes);
-        this.database = createSqlDatabaseAdapter(frameworkConfig.database);
+        this.database = this.createDatabaseAdapter();
         await this.database.connect();
         await this.database.migrate();
 
@@ -183,14 +188,16 @@ export class AnchorInstance {
   }
 
   /**
-   * Cleanly shutdown all services.
+   * Cleanly shut down all services. If initialization is pending, shutdown waits
+   * for it to settle before releasing resources. The instance can then be initialized again.
    */
   public async shutdown(): Promise<void> {
-    if (!this.initialized && !this.shutdownPromise) return;
+    if (!this.initialized && !this.initPromise && !this.shutdownPromise) return;
     if (this.shutdownPromise) return this.shutdownPromise;
 
     this.shutdownPromise = (async () => {
       try {
+        await this.initPromise?.catch(() => undefined);
         if (!this.initialized) return;
 
         await this.stopBackgroundJobs();
@@ -208,6 +215,10 @@ export class AnchorInstance {
     })();
 
     return this.shutdownPromise;
+  }
+
+  protected createDatabaseAdapter(): DatabaseAdapter {
+    return createSqlDatabaseAdapter(this.config.get('framework').database);
   }
 
   /**

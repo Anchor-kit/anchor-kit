@@ -3,10 +3,14 @@ import type { QueueAdapter, QueueJob } from '@/runtime/interfaces.ts';
 
 interface InMemoryQueueOptions {
   concurrency: number;
+  maxPendingJobs?: number;
+  onError?: (job: QueueJob, error: unknown) => void | Promise<void>;
 }
 
 export class InMemoryQueueAdapter implements QueueAdapter {
   private readonly concurrency: number;
+  private readonly maxPendingJobs: number | undefined;
+  private readonly onError: InMemoryQueueOptions['onError'];
   private readonly jobs: QueueJob[] = [];
   private running = false;
   private activeWorkers = 0;
@@ -18,11 +22,29 @@ export class InMemoryQueueAdapter implements QueueAdapter {
     if (!Number.isSafeInteger(options.concurrency) || options.concurrency < 1) {
       throw new ConfigError('InMemoryQueueAdapter concurrency must be a positive safe integer');
     }
+    if (
+      options.maxPendingJobs !== undefined &&
+      (!Number.isSafeInteger(options.maxPendingJobs) || options.maxPendingJobs < 1)
+    ) {
+      throw new ConfigError('InMemoryQueueAdapter maxPendingJobs must be a positive safe integer');
+    }
 
     this.concurrency = options.concurrency;
+    this.maxPendingJobs = options.maxPendingJobs;
+    this.onError = options.onError;
   }
 
   public async enqueue(job: QueueJob): Promise<void> {
+    const canStartImmediately =
+      this.running && this.worker && this.activeWorkers < this.concurrency;
+    if (
+      this.maxPendingJobs !== undefined &&
+      this.jobs.length >= this.maxPendingJobs &&
+      !canStartImmediately
+    ) {
+      throw new Error('In-memory queue is full');
+    }
+
     this.jobs.push(job);
     this.kick();
   }
@@ -80,8 +102,12 @@ export class InMemoryQueueAdapter implements QueueAdapter {
       (async () => {
         try {
           await worker(job);
-        } catch {
-          // Best-effort queue for MVP: job errors are handled by worker logic.
+        } catch (error) {
+          try {
+            await this.onError?.(job, error);
+          } catch {
+            // Reporting failures must not prevent other queued jobs from running.
+          }
         } finally {
           this.activeWorkers -= 1;
 

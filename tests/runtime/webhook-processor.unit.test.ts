@@ -40,14 +40,13 @@ describe('DefaultWebhookProcessor Unit Tests', () => {
       rawBody: '{}',
     };
 
-    // Should rethrow the error
-    await expect(processor.process(input)).rejects.toThrow('Callback failed');
+    await expect(processor.process(input)).rejects.toThrow('Webhook processing failed');
 
     // Should have updated status to failed with error message
     expect(mockDatabase.updateWebhookEventStatus).toHaveBeenCalledWith({
       id: 'internal-id',
       status: 'failed',
-      errorMessage: 'Callback failed',
+      errorMessage: 'Webhook callback failed',
     });
   });
 

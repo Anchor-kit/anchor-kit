@@ -30,6 +30,17 @@ describe('AnchorConfig', () => {
     },
   };
 
+  it('requires a positive safe webhook callback timeout', () => {
+    for (const callbackTimeoutMs of [0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY]) {
+      expect(() =>
+        new AnchorConfig({
+          ...validBaseConfig,
+          webhooks: { callbackTimeoutMs },
+        }).validate(),
+      ).toThrow(/webhooks\.callbackTimeoutMs must be a positive safe integer/);
+    }
+  });
+
   function configWithPlugins(
     plugins: NonNullable<AnchorKitConfig['framework']['plugins']>,
   ): AnchorKitConfig {
