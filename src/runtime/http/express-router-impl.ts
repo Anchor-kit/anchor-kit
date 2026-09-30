@@ -5,6 +5,7 @@ import type { DatabaseAdapter, WebhookProcessor } from '@/runtime/interfaces.ts'
 import type { PluginRouteContext, RouteDefinition } from '@/types/foundation.ts';
 import type { AnchorPluginHooks, DepositRequestBody } from '@/types/plugin.ts';
 import { IdempotencyUtils } from '@/utils/idempotency.ts';
+import Big from 'big.js';
 import {
   Account,
   Keypair,
@@ -995,7 +996,13 @@ async function handleDepositInteractive(
     typeof parsedBody.body.asset_code === 'string' ? parsedBody.body.asset_code : '';
   const amountRaw = parsedBody.body.amount;
   const amount =
-    typeof amountRaw === 'number' || typeof amountRaw === 'string' ? `${amountRaw}` : '';
+    typeof amountRaw === 'number'
+      ? Number.isFinite(amountRaw)
+        ? new Big(amountRaw).toFixed()
+        : `${amountRaw}`
+      : typeof amountRaw === 'string'
+        ? amountRaw
+        : '';
 
   if (!assetCode || !amount) {
     sendJson(res, 400, {
@@ -1155,6 +1162,7 @@ async function handleDepositInteractive(
       account: auth.account,
       interactive_url: buildInteractiveUrl(serverConfig.interactiveDomain, transactionId),
       created_at: createdAt,
+      updated_at: createdAt,
     };
 
     try {
@@ -1207,6 +1215,7 @@ async function handleDepositInteractive(
     account: created.account,
     interactive_url: buildInteractiveUrl(serverConfig.interactiveDomain, created.id),
     created_at: created.createdAt,
+    updated_at: created.updatedAt,
   });
 }
 
@@ -1367,6 +1376,7 @@ async function handleWebhook(
       error: 'webhook_error',
       message: 'Webhook processing failed',
       event_id: eventId,
+      provider,
     });
   }
 }

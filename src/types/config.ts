@@ -657,6 +657,7 @@ export interface AnchorKitConfig {
       context: {
         receivedAt: string;
         signature?: string;
+        rawBody: string | Buffer | Uint8Array;
       },
     ) => Promise<void> | void;
   };

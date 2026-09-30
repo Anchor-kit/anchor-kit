@@ -125,6 +125,7 @@ describe('MVP Express-mounted integration', () => {
   const dbPath = dbUrl.startsWith('file:') ? dbUrl.slice('file:'.length) : dbUrl;
 
   let webhookCallbackCount = 0;
+  let lastWebhookRawBody: string | Buffer | Uint8Array | undefined;
   let anchor: AnchorInstance;
   let invoke: (options: TestRequestOptions) => Promise<TestResponse>;
   let accessToken = '';
@@ -230,8 +231,9 @@ describe('MVP Express-mounted integration', () => {
         },
       },
       webhooks: {
-        onEvent: async () => {
+        onEvent: async (_event, callbackContext) => {
           webhookCallbackCount += 1;
+          lastWebhookRawBody = callbackContext.rawBody;
         },
       },
     });
@@ -1545,12 +1547,14 @@ describe('MVP Express-mounted integration', () => {
         authorization: `Bearer ${accessToken}`,
         'idempotency-key': 'deposit-numeric-amount',
       },
-      body: { asset_code: 'USDC', amount: 50 },
+      rawBody: '{"asset_code":"USDC","amount":5e1}',
     });
 
     expect(response.status).toBe(201);
     expect(response.body.id).toBeTruthy();
     expect(response.body.status).toBe('pending_user_transfer_start');
+    expect(response.body.amount).toBe('50');
+    expect(response.body.updated_at).toBe(response.body.created_at);
   });
 
   it('6) authorized deposit interactive creates persistent transaction', async () => {
@@ -1592,6 +1596,7 @@ describe('MVP Express-mounted integration', () => {
 
     expect(createResponse.status).toBe(201);
     expect(createResponse.body.amount).toBe(submittedAmount);
+    expect(createResponse.body.updated_at).toBe(createResponse.body.created_at);
 
     const persistedTransaction = await (
       anchor as unknown as {
@@ -1616,6 +1621,7 @@ describe('MVP Express-mounted integration', () => {
 
     expect(lookupResponse.status).toBe(200);
     expect(lookupResponse.body.amount).toBe(submittedAmount);
+    expect(lookupResponse.body.updated_at).toBe(createResponse.body.updated_at);
   });
 
   it('6b) deposit with SAME idempotency-key but DIFFERENT body is rejected', async () => {
@@ -2160,6 +2166,7 @@ describe('MVP Express-mounted integration', () => {
       error: 'webhook_error',
       event_id: 'evt_misconfigured',
       message: 'Webhook processing failed',
+      provider: 'generic',
     });
 
     const signature = createHmac('sha256', 'any-secret')
@@ -2182,6 +2189,7 @@ describe('MVP Express-mounted integration', () => {
       error: 'webhook_error',
       event_id: 'evt_misconfigured',
       message: 'Webhook processing failed',
+      provider: 'generic',
     });
     expect(misconfiguredWebhookCallbackCount).toBe(0);
 
@@ -2352,6 +2360,7 @@ describe('MVP Express-mounted integration', () => {
     expect(response.body.received).toBe(true);
     expect(response.body.duplicate).toBe(false);
     expect(response.body.event_id).toBe('evt_buffer');
+    expect(lastWebhookRawBody).toEqual(Buffer.from(payloadText));
   });
 
   it('8h) webhook route treats whitespace-only ids as missing and generates an event id', async () => {
@@ -2594,6 +2603,7 @@ describe('MVP Express-mounted integration', () => {
     expect(response.status).toBe(400);
     expect(response.body.error).toBe('webhook_error');
     expect(response.body.event_id).toBe('evt_err_1');
+    expect(response.body.provider).toBe('generic');
 
     await customAnchor.shutdown();
     const customDbPath = customDbUrl.startsWith('file:')
@@ -3111,6 +3121,7 @@ describe('MVP Express-mounted integration', () => {
 
     expect(firstResponse.status).toBe(201);
     expect(firstResponse.body.account).toBe(clientKeypair.publicKey());
+    expect(firstResponse.body.updated_at).toBe(firstResponse.body.created_at);
     const firstTxId = firstResponse.body.id;
 
     const secondResponse = await invoke({
@@ -3126,6 +3137,7 @@ describe('MVP Express-mounted integration', () => {
 
     expect(secondResponse.status).toBe(201);
     expect(secondResponse.body.id).toBe(firstTxId);
+    expect(secondResponse.body.updated_at).toBe(firstResponse.body.updated_at);
   });
 
   it('12a) an in-flight idempotency reservation returns a retry response', async () => {
