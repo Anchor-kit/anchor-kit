@@ -37,7 +37,12 @@ export class DefaultWebhookProcessor implements WebhookProcessor {
     payload: Record<string, unknown>;
     rawBody: string | Buffer | Uint8Array;
     signature?: string;
-  }): Promise<{ duplicate: boolean; eventId: string; provider: string }> {
+  }): Promise<{
+    duplicate: boolean;
+    eventId: string;
+    provider: string;
+    status?: 'pending' | 'processed' | 'failed';
+  }> {
     this.verifySignatureIfEnabled(input);
 
     const insertion = await this.database.insertOrGetWebhookEvent({
@@ -52,6 +57,7 @@ export class DefaultWebhookProcessor implements WebhookProcessor {
         duplicate: true,
         eventId: insertion.record.eventId,
         provider: insertion.record.provider,
+        status: insertion.record.status,
       };
     }
 

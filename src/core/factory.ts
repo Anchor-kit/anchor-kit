@@ -10,6 +10,7 @@ import type {
   DatabaseAdapter,
   InteractiveTransactionRecord,
   QueueAdapter,
+  QueueDrainStatus,
   Watcher,
   WebhookProcessor,
 } from '@/runtime/interfaces.ts';
@@ -161,6 +162,8 @@ export class AnchorInstance {
    */
   public async stopBackgroundJobs(): Promise<void> {
     if (this.backgroundJobsStopPromise) return this.backgroundJobsStopPromise;
+    if (this.backgroundJobsPromise) await this.backgroundJobsPromise;
+    if (this.backgroundJobsStopPromise) return this.backgroundJobsStopPromise;
     if (!this.initialized || !this.backgroundJobsRunning) return;
 
     this.backgroundJobsStopPromise = (async () => {
@@ -177,6 +180,11 @@ export class AnchorInstance {
     })();
 
     return this.backgroundJobsStopPromise;
+  }
+
+  /** Return pending and active queue counts without exposing job payloads. */
+  public getQueueStatus(): QueueDrainStatus {
+    return this.queue?.status ?? { pending: 0, active: 0 };
   }
 
   /**

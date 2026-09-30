@@ -1,5 +1,6 @@
 import { Keypair } from '@stellar/stellar-sdk';
 import type { QueueAdapter, QueueJob } from '@/runtime/interfaces.ts';
+import { InMemoryQueueAdapter } from '@/runtime/queue/in-memory-queue.ts';
 import { TransactionWatcher } from '@/runtime/watchers/transaction-watcher.ts';
 import { describe, expect, it } from 'vitest';
 import { createAnchor } from '@/index.ts';
@@ -62,6 +63,61 @@ class MockWatcher {
 }
 
 describe('AnchorInstance concurrent background startup', () => {
+  it('exposes queue counts without exposing queued job payloads', async () => {
+    const anchor = createAnchor({
+      network: { network: 'testnet' },
+      server: { interactiveDomain: 'https://anchor.example.com' },
+      security: {
+        sep10SigningKey: Keypair.random().secret(),
+        interactiveJwtSecret: 'jwt-test-secret',
+        distributionAccountSecret: 'distribution-test-secret',
+      },
+      assets: {
+        assets: [
+          {
+            code: 'USDC',
+            issuer: 'GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5',
+          },
+        ],
+      },
+      framework: {
+        database: { provider: 'sqlite', url: 'file::memory:' },
+        watchers: { enabled: false },
+      },
+    });
+    await anchor.init();
+
+    const queue = new InMemoryQueueAdapter({ concurrency: 1 });
+    (anchor as unknown as { queue: InMemoryQueueAdapter }).queue = queue;
+    expect(anchor.getQueueStatus()).toEqual({ pending: 0, active: 0 });
+
+    await queue.enqueue({
+      type: 'expire_transaction',
+      payload: { transactionId: 'private-transaction-id' },
+    });
+    expect(anchor.getQueueStatus()).toEqual({ pending: 1, active: 0 });
+
+    let releaseWorker: (() => void) | undefined;
+    const workerGate = new Promise<void>((resolve) => {
+      releaseWorker = resolve;
+    });
+    let signalStarted: (() => void) | undefined;
+    const workerStarted = new Promise<void>((resolve) => {
+      signalStarted = resolve;
+    });
+    await queue.start(async () => {
+      signalStarted?.();
+      await workerGate;
+    });
+    await workerStarted;
+    expect(anchor.getQueueStatus()).toEqual({ pending: 0, active: 1 });
+
+    releaseWorker?.();
+    await queue.stop();
+    expect(anchor.getQueueStatus()).toEqual({ pending: 0, active: 0 });
+    await anchor.shutdown();
+  });
+
   it.each([
     ['uses the operational retention value when both settings are configured', 21, 45, 21],
     ['uses the watcher retention value when the operational setting is absent', undefined, 45, 45],

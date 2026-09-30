@@ -1313,7 +1313,9 @@ async function handleWebhook(
       event_id: result.eventId,
       received_at: new Date().toISOString(),
       provider: result.provider,
-    });
+    };
+    if (result.duplicate && result.status) response.status = result.status;
+    sendJson(res, 200, response);
   } catch {
     sendJson(res, 400, {
       error: 'webhook_error',
