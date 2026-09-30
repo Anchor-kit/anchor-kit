@@ -1,6 +1,7 @@
 import { makeSqliteDbUrlForTests } from '@/core/factory.ts';
 import { createAnchor, type AnchorInstance } from '@/index.ts';
 import type { DatabaseAdapter } from '@/runtime/interfaces.ts';
+import type { AnchorPlugin } from '@/types/plugin.ts';
 import { ACCESS_TOKEN_AUDIENCE, ACCESS_TOKEN_ISSUER } from '@/runtime/http/express-router-impl.ts';
 import { Account, Keypair, Operation, Transaction, TransactionBuilder } from '@stellar/stellar-sdk';
 import { createHash, createHmac } from 'node:crypto';
@@ -129,6 +130,51 @@ describe('MVP Express-mounted integration', () => {
   let accessToken = '';
   let transactionId = '';
   let depositInteractiveUrl = '';
+
+  async function createPluginTestAnchor(plugins: AnchorPlugin[]) {
+    const pluginDatabaseUrl = makeSqliteDbUrlForTests();
+    const config = anchor.config.getConfig();
+    const pluginAnchor = createAnchor({
+      ...config,
+      server: {
+        ...config.server,
+        corsOrigins: config.server.corsOrigins ? [...config.server.corsOrigins] : undefined,
+      },
+      assets: {
+        ...config.assets,
+        assets: config.assets.assets.map((asset) => ({ ...asset })),
+      },
+      kycRequired: config.kycRequired
+        ? Object.fromEntries(
+            Object.entries(config.kycRequired).map(([key, requirements]) => [
+              key,
+              [...requirements],
+            ]),
+          )
+        : undefined,
+      framework: {
+        ...config.framework,
+        plugins: config.framework.plugins?.map((plugin) => ({ ...plugin })),
+        database: { ...config.framework.database, url: pluginDatabaseUrl },
+      },
+    });
+
+    for (const plugin of plugins) pluginAnchor.use(plugin);
+    await pluginAnchor.init();
+
+    return {
+      invoke: createMountedInvoker(pluginAnchor),
+      database: (pluginAnchor as unknown as { database: DatabaseAdapter }).database,
+      async cleanup() {
+        await pluginAnchor.shutdown();
+        try {
+          unlinkSync(pluginDatabaseUrl.slice('file:'.length));
+        } catch {
+          // The adapter may already have removed the temporary database.
+        }
+      },
+    };
+  }
 
   beforeAll(async () => {
     anchor = createAnchor({
@@ -4070,5 +4116,101 @@ describe('MVP Express-mounted integration', () => {
     expect(response.status).toBe(400);
     expect(response.body.error).toBe('invalid_amount');
     expect(response.body.message).toContain('maximum allowed');
+  });
+
+  it('runs deposit hooks in registration order and stops before persistence on rejection', async () => {
+    const order: string[] = [];
+    const harness = await createPluginTestAnchor([
+      {
+        id: 'deposit-hook-first',
+        hooks: { onDepositRequest: async () => void order.push('first') },
+      },
+      {
+        id: 'deposit-hook-second',
+        hooks: { onDepositRequest: async () => void order.push('second') },
+      },
+    ]);
+
+    const response = await harness.invoke({
+      method: 'POST',
+      path: '/transactions/deposit/interactive',
+      headers: {
+        'content-type': 'application/json',
+        authorization: `Bearer ${accessToken}`,
+      },
+      body: { asset_code: 'USDC', amount: '25.5' },
+    });
+
+    expect(response.status).toBe(201);
+    expect(order).toEqual(['first', 'second']);
+    await harness.cleanup();
+
+    let rejectedAccount: string | undefined;
+    let rejectedAssetCode: string | undefined;
+    const rejected = await createPluginTestAnchor([
+      {
+        id: 'deposit-hook-reject',
+        hooks: {
+          onDepositRequest: async (context) => {
+            rejectedAccount = context.account;
+            rejectedAssetCode = context.asset.code;
+            throw new Error('reject');
+          },
+        },
+      },
+    ]);
+    const insertSpy = vi.spyOn(rejected.database, 'insertInteractiveTransaction');
+    const rejectedResponse = await rejected.invoke({
+      method: 'POST',
+      path: '/transactions/deposit/interactive',
+      headers: {
+        'content-type': 'application/json',
+        authorization: `Bearer ${accessToken}`,
+      },
+      body: { asset_code: 'USDC', amount: '25.5' },
+    });
+
+    expect(rejectedResponse.status).toBe(400);
+    expect(rejectedResponse.body.error).toBe('deposit_rejected');
+    expect(rejectedAccount).toBe(clientKeypair.publicKey());
+    expect(rejectedAssetCode).toBe('USDC');
+    expect(insertSpy).not.toHaveBeenCalled();
+    await rejected.cleanup();
+  });
+
+  it('runs SEP-10 challenge hooks and does not persist after a hook failure', async () => {
+    let hookCalls = 0;
+    const harness = await createPluginTestAnchor([
+      {
+        id: 'challenge-hook',
+        hooks: {
+          onSep10Challenge: async (transaction) => {
+            hookCalls += 1;
+            return transaction;
+          },
+        },
+      },
+    ]);
+    const response = await harness.invoke({
+      path: `/auth/challenge?account=${clientKeypair.publicKey()}`,
+    });
+    expect(response.status).toBe(200);
+    expect(hookCalls).toBe(1);
+    await harness.cleanup();
+
+    const failing = await createPluginTestAnchor([
+      {
+        id: 'challenge-hook-failure',
+        hooks: { onSep10Challenge: async () => Promise.reject(new Error('reject')) },
+      },
+    ]);
+    const insertSpy = vi.spyOn(failing.database, 'insertAuthChallenge');
+    const failedResponse = await failing.invoke({
+      path: `/auth/challenge?account=${clientKeypair.publicKey()}`,
+    });
+    expect(failedResponse.status).toBe(500);
+    expect(failedResponse.body.error).toBe('challenge_hook_failed');
+    expect(insertSpy).not.toHaveBeenCalled();
+    await failing.cleanup();
   });
 });

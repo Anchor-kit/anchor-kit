@@ -17,7 +17,7 @@ import { InMemoryQueueAdapter } from '@/runtime/queue/in-memory-queue.ts';
 import { TransactionWatcher } from '@/runtime/watchers/transaction-watcher.ts';
 import { DefaultWebhookProcessor } from '@/runtime/webhooks/default-webhook-processor.ts';
 import { AnchorKitConfig } from '@/types/config.ts';
-import { AnchorPlugin } from '@/types/plugin.ts';
+import type { AnchorPlugin, AnchorPluginHooks } from '@/types/plugin.ts';
 
 /**
  * AnchorInstance
@@ -106,10 +106,23 @@ export class AnchorInstance {
           ];
         }
 
+        const depositRequestHooks: NonNullable<AnchorPluginHooks['onDepositRequest']>[] = [];
+        const sep10ChallengeHooks: NonNullable<AnchorPluginHooks['onSep10Challenge']>[] = [];
+        for (const plugin of this.plugins.values()) {
+          if (plugin.hooks?.onDepositRequest) {
+            depositRequestHooks.push(plugin.hooks.onDepositRequest);
+          }
+          if (plugin.hooks?.onSep10Challenge) {
+            sep10ChallengeHooks.push(plugin.hooks.onSep10Challenge);
+          }
+        }
+
         this.expressRouter = new AnchorExpressRouter({
           config: this.config,
           database: this.database,
           webhookProcessor: this.webhookProcessor,
+          depositRequestHooks,
+          sep10ChallengeHooks,
           pluginRoutes,
         }).getMiddleware();
 
