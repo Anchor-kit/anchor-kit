@@ -28,6 +28,7 @@ export type {
   QueueDrainStatus,
   QueueAdapter,
   Watcher,
+  WebhookEventRecord,
   WebhookProcessor,
   WatcherTaskRecord,
 } from './runtime/interfaces.ts';
