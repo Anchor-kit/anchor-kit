@@ -61,6 +61,7 @@ export class DefaultWebhookProcessor implements WebhookProcessor {
         duplicate: true,
         eventId: insertion.record.eventId,
         provider: insertion.record.provider,
+        status: insertion.record.status,
       };
     }
 

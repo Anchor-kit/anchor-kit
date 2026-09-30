@@ -25,6 +25,7 @@ export type {
   IdempotencyRecord,
   InteractiveTransactionRecord,
   QueueJob,
+  QueueDrainStatus,
   QueueAdapter,
   Watcher,
   WebhookProcessor,

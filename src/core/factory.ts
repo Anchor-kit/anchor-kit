@@ -10,6 +10,7 @@ import type {
   DatabaseAdapter,
   InteractiveTransactionRecord,
   QueueAdapter,
+  QueueDrainStatus,
   Watcher,
   WebhookProcessor,
 } from '@/runtime/interfaces.ts';
@@ -38,6 +39,7 @@ export class AnchorInstance {
   private initPromise: Promise<void> | null = null;
   private shutdownPromise: Promise<void> | null = null;
   private backgroundJobsPromise: Promise<void> | null = null;
+  private backgroundJobsStopPromise: Promise<void> | null = null;
 
   constructor(config: Partial<AnchorKitConfig>) {
     this.config = new AnchorConfig(config);
@@ -177,14 +179,30 @@ export class AnchorInstance {
    * Stop watcher services and queue workers.
    */
   public async stopBackgroundJobs(): Promise<void> {
+    if (this.backgroundJobsStopPromise) return this.backgroundJobsStopPromise;
+    if (this.backgroundJobsPromise) await this.backgroundJobsPromise;
+    if (this.backgroundJobsStopPromise) return this.backgroundJobsStopPromise;
     if (!this.initialized || !this.backgroundJobsRunning) return;
 
-    for (const watcher of this.watchers) {
-      await watcher.stop();
-    }
+    this.backgroundJobsStopPromise = (async () => {
+      try {
+        for (const watcher of this.watchers) {
+          await watcher.stop();
+        }
 
-    await this.requireQueue().stop();
-    this.backgroundJobsRunning = false;
+        await this.requireQueue().stop();
+        this.backgroundJobsRunning = false;
+      } finally {
+        this.backgroundJobsStopPromise = null;
+      }
+    })();
+
+    return this.backgroundJobsStopPromise;
+  }
+
+  /** Return pending and active queue counts without exposing job payloads. */
+  public getQueueStatus(): QueueDrainStatus {
+    return this.queue?.status ?? { pending: 0, active: 0 };
   }
 
   /**

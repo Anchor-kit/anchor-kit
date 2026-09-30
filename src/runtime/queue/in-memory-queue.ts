@@ -1,5 +1,5 @@
 import { ConfigError } from '@/core/errors.ts';
-import type { QueueAdapter, QueueJob } from '@/runtime/interfaces.ts';
+import type { QueueAdapter, QueueDrainStatus, QueueJob } from '@/runtime/interfaces.ts';
 
 interface InMemoryQueueOptions {
   concurrency: number;
@@ -32,6 +32,10 @@ export class InMemoryQueueAdapter implements QueueAdapter {
     this.concurrency = options.concurrency;
     this.maxPendingJobs = options.maxPendingJobs;
     this.onError = options.onError;
+  }
+
+  public get status(): QueueDrainStatus {
+    return { pending: this.jobs.length, active: this.activeWorkers };
   }
 
   public async enqueue(job: QueueJob): Promise<void> {
