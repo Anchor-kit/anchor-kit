@@ -186,6 +186,8 @@ curl -s \
   -d '{"asset_code":"USDC","amount":"25"}'
 ```
 
+Decimal strings are stored exactly as provided and must use plain decimal notation. JSON numeric amounts are stored as non-exponent decimal strings; unsafe integer values are rejected.
+
 Look up a transaction by id:
 
 ```bash

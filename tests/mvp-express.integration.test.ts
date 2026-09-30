@@ -107,6 +107,7 @@ describe('MVP Express-mounted integration', () => {
   let accessToken = '';
   let transactionId = '';
   let depositInteractiveUrl = '';
+  let transactionCreatedAt = '';
 
   beforeAll(async () => {
     anchor = createAnchor({
@@ -480,6 +481,74 @@ describe('MVP Express-mounted integration', () => {
     expect(response.body.message).toContain('minimum allowed of 10');
   });
 
+  it('5f) deposit amount strings stay exact and numeric amounts are canonicalized', async () => {
+    const stringAmountResponse = await invoke({
+      method: 'POST',
+      path: '/transactions/deposit/interactive',
+      headers: {
+        'content-type': 'application/json',
+        authorization: `Bearer ${accessToken}`,
+      },
+      body: { asset_code: 'USDC', amount: '25.500' },
+    });
+
+    expect(stringAmountResponse.status).toBe(201);
+    expect(stringAmountResponse.body.amount).toBe('25.500');
+
+    const integerAmountResponse = await invoke({
+      method: 'POST',
+      path: '/transactions/deposit/interactive',
+      headers: {
+        'content-type': 'application/json',
+        authorization: `Bearer ${accessToken}`,
+      },
+      body: { asset_code: 'USDC', amount: 30 },
+    });
+
+    expect(integerAmountResponse.status).toBe(201);
+    expect(integerAmountResponse.body.amount).toBe('30');
+
+    const numericAmountResponse = await invoke({
+      method: 'POST',
+      path: '/transactions/deposit/interactive',
+      headers: {
+        'content-type': 'application/json',
+        authorization: `Bearer ${accessToken}`,
+      },
+      body: { asset_code: 'USDC', amount: 25.5 },
+    });
+
+    expect(numericAmountResponse.status).toBe(201);
+    expect(numericAmountResponse.body.amount).toBe('25.5');
+
+    const exponentAmountResponse = await invoke({
+      method: 'POST',
+      path: '/transactions/deposit/interactive',
+      headers: {
+        'content-type': 'application/json',
+        authorization: `Bearer ${accessToken}`,
+      },
+      body: { asset_code: 'USDC', amount: 1e2 },
+    });
+
+    expect(exponentAmountResponse.status).toBe(201);
+    expect(exponentAmountResponse.body.amount).toBe('100');
+
+    for (const amount of ['1e2', 9007199254740992]) {
+      const response = await invoke({
+        method: 'POST',
+        path: '/transactions/deposit/interactive',
+        headers: {
+          'content-type': 'application/json',
+          authorization: `Bearer ${accessToken}`,
+        },
+        body: { asset_code: 'USDC', amount },
+      });
+
+      expect(response.status).toBe(400);
+    }
+  });
+
   it('5c) deposit with unknown asset_code is rejected', async () => {
     const response = await invoke({
       method: 'POST',
@@ -596,7 +665,9 @@ describe('MVP Express-mounted integration', () => {
     expect(response.status).toBe(201);
     transactionId = String(response.body.id ?? '');
     depositInteractiveUrl = String(response.body.interactive_url ?? '');
+    transactionCreatedAt = String(response.body.created_at ?? '');
     expect(transactionId.length).toBeGreaterThan(0);
+    expect(response.body.updated_at).toBe(transactionCreatedAt);
     expect(response.body.status).toBe('pending_user_transfer_start');
     expect(response.body.asset_issuer).toBe(
       'GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5',
@@ -635,6 +706,8 @@ describe('MVP Express-mounted integration', () => {
     expect(response.status).toBe(201);
     expect(response.body.id).toBe(transactionId);
     expect(response.body.interactive_url).toBe(depositInteractiveUrl);
+    expect(response.body.created_at).toBe(transactionCreatedAt);
+    expect(response.body.updated_at).toBe(transactionCreatedAt);
     expect(response.body.status).toBe('pending_user_transfer_start');
     expect(response.body.idempotency_replay).toBe(true);
   });
@@ -650,6 +723,8 @@ describe('MVP Express-mounted integration', () => {
 
     expect(response.status).toBe(200);
     expect(response.body.id).toBe(transactionId);
+    expect(response.body.created_at).toBe(transactionCreatedAt);
+    expect(response.body.updated_at).toBe(transactionCreatedAt);
     expect(response.body.asset_code).toBe('USDC');
     expect(response.body.asset_issuer).toBe(
       'GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5',

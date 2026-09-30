@@ -96,6 +96,7 @@ describe('Webhook Provider Fallback', () => {
   const dbPath = dbUrl.startsWith('file:') ? dbUrl.slice('file:'.length) : dbUrl;
 
   let lastProvider = '';
+  let failWebhookCallback = false;
   let anchor: AnchorInstance;
   let invoke: (options: TestRequestOptions) => Promise<TestResponse>;
 
@@ -121,6 +122,9 @@ describe('Webhook Provider Fallback', () => {
       webhooks: {
         onEvent: async (event) => {
           lastProvider = event.provider;
+          if (failWebhookCallback) {
+            throw new Error('private callback details');
+          }
         },
       },
     });
@@ -240,4 +244,44 @@ describe('Webhook Provider Fallback', () => {
     expect(response.status).toBe(200);
     expect(lastProvider).toBe('body-provider');
   });
+
+  it.each([
+    ['header', { 'x-webhook-provider': 'header-provider' }, undefined, 'header-provider'],
+    ['body', {}, 'body-provider', 'body-provider'],
+    ['default', {}, undefined, 'generic'],
+  ])(
+    'Failure response includes provider from %s',
+    async (source, headers, bodyProvider, provider) => {
+      const eventId = `evt_failure_${source}`;
+      const payload = {
+        id: eventId,
+        type: 'test',
+        ...(bodyProvider ? { provider: bodyProvider } : {}),
+      };
+      const signature = createHmac('sha256', 'webhook-test-secret')
+        .update(JSON.stringify(payload))
+        .digest('hex');
+
+      failWebhookCallback = true;
+      const response = await invoke({
+        method: 'POST',
+        path: '/webhooks/events',
+        headers: {
+          'content-type': 'application/json',
+          ...headers,
+          'x-anchor-signature': signature,
+        },
+        body: payload,
+      });
+      failWebhookCallback = false;
+
+      expect(response.status).toBe(400);
+      expect(response.body).toEqual({
+        error: 'webhook_error',
+        message: 'Webhook processing failed',
+        event_id: eventId,
+        provider,
+      });
+    },
+  );
 });

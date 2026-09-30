@@ -1,4 +1,5 @@
 import { version } from '../../../package.json';
+import Big from 'big.js';
 import type { AnchorConfig } from '@/core/config.ts';
 import { ValidationError } from '@/core/errors.ts';
 import { InMemoryRateLimiter, type RateLimitRule } from '@/runtime/http/rate-limiter.ts';
@@ -104,6 +105,22 @@ function jsonParseObject(rawBody: string): Record<string, unknown> {
 
 function sha256(input: string): string {
   return createHash('sha256').update(input).digest('hex');
+}
+
+function normalizeDepositAmount(value: unknown): string | null {
+  if (typeof value === 'string') {
+    return value;
+  }
+
+  if (
+    typeof value !== 'number' ||
+    !Number.isFinite(value) ||
+    (Number.isInteger(value) && !Number.isSafeInteger(value))
+  ) {
+    return null;
+  }
+
+  return new Big(value).toFixed();
 }
 
 function readBearerToken(req: IncomingMessage): string | null {
@@ -453,11 +470,9 @@ export class AnchorExpressRouter {
       const rawBody = await readRawBody(req, this.maxBodyBytes);
       const body = jsonParseObject(rawBody);
       const assetCode = typeof body.asset_code === 'string' ? body.asset_code : '';
-      const amountRaw = body.amount;
-      const amount =
-        typeof amountRaw === 'string' || typeof amountRaw === 'number' ? `${amountRaw}` : '';
+      const amount = normalizeDepositAmount(body.amount);
 
-      if (!assetCode || !amount) {
+      if (!assetCode || amount === null || !amount) {
         sendJson(res, 400, {
           error: 'invalid_request',
           message: 'Body must include asset_code and amount',
@@ -472,7 +487,11 @@ export class AnchorExpressRouter {
       }
 
       const numericAmount = toNumber(amount);
-      if (!Number.isFinite(numericAmount) || numericAmount <= 0) {
+      if (
+        !/^-?\d+(\.\d+)?$/.test(amount) ||
+        !Number.isFinite(numericAmount) ||
+        numericAmount <= 0
+      ) {
         sendJson(res, 400, {
           error: 'invalid_amount',
           message: 'Amount must be a positive number',
@@ -516,8 +535,10 @@ export class AnchorExpressRouter {
             return;
           }
 
+          const cachedResponse = JSON.parse(existing.responseBody) as Record<string, unknown>;
           sendJson(res, existing.statusCode, {
-            ...(JSON.parse(existing.responseBody) as Record<string, unknown>),
+            ...cachedResponse,
+            updated_at: cachedResponse.updated_at ?? cachedResponse.created_at,
             idempotency_replay: true,
           });
           return;
@@ -545,6 +566,7 @@ export class AnchorExpressRouter {
           asset_issuer: selectedAsset.issuer,
           interactive_url: `${this.config.get('server').interactiveDomain ?? 'http://localhost:3000'}/deposit/${created.id}`,
           created_at: created.createdAt,
+          updated_at: created.updatedAt,
         },
       };
 
@@ -652,6 +674,8 @@ export class AnchorExpressRouter {
         sendJson(res, 400, {
           error: 'webhook_error',
           message: 'Webhook processing failed',
+          event_id: eventId,
+          provider,
         });
       }
       return;

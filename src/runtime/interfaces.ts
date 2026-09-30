@@ -134,7 +134,7 @@ export interface WebhookProcessor {
     eventId: string;
     provider: string;
     payload: Record<string, unknown>;
-    rawBody: string;
+    rawBody: string | Buffer | Uint8Array;
     signature?: string;
   }): Promise<{ duplicate: boolean; eventId: string }>;
 }
