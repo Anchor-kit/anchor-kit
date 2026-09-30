@@ -186,12 +186,12 @@ describe('SqlDatabaseAdapter – cleanupOldRecords (sqlite)', () => {
     raw
       .prepare(
         `INSERT INTO webhook_events (id, event_id, provider, payload, status, error_message, processed_at, created_at)
-         VALUES (?, ?, ?, ?, 'processed', NULL, ?, ?)` ,
+         VALUES (?, ?, ?, ?, 'processed', NULL, ?, ?)`,
       )
       .run(invalidRowId, eventId, 'test', '{not valid json}', CUTOFF, CUTOFF);
 
     await expect(
-      db.insertWebhookEvent({
+      db.insertOrGetWebhookEvent({
         id: randomUUID(),
         eventId,
         provider: 'test',

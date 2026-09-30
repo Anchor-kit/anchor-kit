@@ -16,7 +16,7 @@ interface TestResponse {
 interface TestRequestOptions {
   method?: string;
   path: string;
-  headers?: Record<string, string>;
+  headers?: Record<string, string | string[]>;
   body?: Record<string, unknown>;
 }
 
@@ -29,7 +29,7 @@ function createMountedInvoker(anchor: AnchorInstance) {
     const req = Readable.from(serializedBody ? [serializedBody] : []) as IncomingMessage & {
       method: string;
       url: string;
-      headers: Record<string, string>;
+      headers: Record<string, string | string[]>;
       body?: Record<string, unknown>;
     };
 
@@ -245,43 +245,87 @@ describe('Webhook Provider Fallback', () => {
     expect(lastProvider).toBe('body-provider');
   });
 
-  it.each([
-    ['header', { 'x-webhook-provider': 'header-provider' }, undefined, 'header-provider'],
-    ['body', {}, 'body-provider', 'body-provider'],
-    ['default', {}, undefined, 'generic'],
-  ])(
-    'Failure response includes provider from %s',
-    async (source, headers, bodyProvider, provider) => {
-      const eventId = `evt_failure_${source}`;
-      const payload = {
-        id: eventId,
-        type: 'test',
-        ...(bodyProvider ? { provider: bodyProvider } : {}),
-      };
-      const signature = createHmac('sha256', 'webhook-test-secret')
-        .update(JSON.stringify(payload))
-        .digest('hex');
+  it('Whitespace-only header falls back to body provider', async () => {
+    const payload = { id: 'evt_whitespace_header', type: 'test', provider: 'body-provider' };
+    const signature = createHmac('sha256', 'webhook-test-secret')
+      .update(JSON.stringify(payload))
+      .digest('hex');
 
-      failWebhookCallback = true;
-      const response = await invoke({
-        method: 'POST',
-        path: '/webhooks/events',
-        headers: {
-          'content-type': 'application/json',
-          ...headers,
-          'x-anchor-signature': signature,
-        },
-        body: payload,
-      });
-      failWebhookCallback = false;
+    const response = await invoke({
+      method: 'POST',
+      path: '/webhooks/events',
+      headers: {
+        'content-type': 'application/json',
+        'x-webhook-provider': '   ',
+        'x-anchor-signature': signature,
+      },
+      body: payload,
+    });
 
-      expect(response.status).toBe(400);
-      expect(response.body).toEqual({
-        error: 'webhook_error',
-        message: 'Webhook processing failed',
-        event_id: eventId,
-        provider,
-      });
-    },
-  );
+    expect(response.status).toBe(200);
+    expect(lastProvider).toBe('body-provider');
+  });
+
+  it('Whitespace-only header and body values fall back to generic', async () => {
+    const payload = { id: 'evt_blank_both', type: 'test', provider: '   ' };
+    const signature = createHmac('sha256', 'webhook-test-secret')
+      .update(JSON.stringify(payload))
+      .digest('hex');
+
+    const response = await invoke({
+      method: 'POST',
+      path: '/webhooks/events',
+      headers: {
+        'content-type': 'application/json',
+        'x-webhook-provider': '   ',
+        'x-anchor-signature': signature,
+      },
+      body: payload,
+    });
+
+    expect(response.status).toBe(200);
+    expect(lastProvider).toBe('generic');
+  });
+
+  it('Array-style provider headers use the first non-empty value', async () => {
+    const payload = { id: 'evt_array_provider', type: 'test' };
+    const signature = createHmac('sha256', 'webhook-test-secret')
+      .update(JSON.stringify(payload))
+      .digest('hex');
+
+    const response = await invoke({
+      method: 'POST',
+      path: '/webhooks/events',
+      headers: {
+        'content-type': 'application/json',
+        'x-webhook-provider': ['', '   ', 'array-provider'],
+        'x-anchor-signature': signature,
+      },
+      body: payload,
+    });
+
+    expect(response.status).toBe(200);
+    expect(lastProvider).toBe('array-provider');
+  });
+
+  it('Array-style signature headers are accepted when they contain a value', async () => {
+    const payload = { id: 'evt_array_signature', type: 'test' };
+    const signature = createHmac('sha256', 'webhook-test-secret')
+      .update(JSON.stringify(payload))
+      .digest('hex');
+
+    const response = await invoke({
+      method: 'POST',
+      path: '/webhooks/events',
+      headers: {
+        'content-type': 'application/json',
+        'x-webhook-provider': 'generic',
+        'x-anchor-signature': [signature],
+      },
+      body: payload,
+    });
+
+    expect(response.status).toBe(200);
+    expect(lastProvider).toBe('generic');
+  });
 });

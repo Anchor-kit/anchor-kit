@@ -10,24 +10,26 @@ We are currently laying the groundwork for the SDK. The project structure, build
 - [x] CI/CD Pipeline (GitHub Actions)
 - [x] Initial Documentation (Architecture, Contributing)
 - [x] Core SDK Shell
+- [x] SEP-10 Authentication (server-side challenge generation and validation)
+- [x] SQL Database Adapter (SQLite reference implementation)
+- [x] SEP-24 Interactive Deposit (minimal hosted deposit flow)
 
 ## In Progress
 
-- [ ] SEP-10 Basic Authentication
-- [ ] Database Adapter Interface
 - [ ] Plugin System Architecture
 
 ## Planned Features
 
 ### Phase 2: Alpha (SEP-24)
 
-- [ ] **SEP-10**: Full Server-Side challenge generation and validation.
-- [ ] **SEP-24**: Hosted Deposit flow state machine.
+- [x] **SEP-10**: Full Server-Side challenge generation and validation.
+- [x] **SEP-24**: Hosted Deposit flow state machine.
 - [ ] **SEP-24**: Hosted Withdrawal flow state machine.
 - [ ] **Interactive Client**: React helper hooks for the interactive flow.
 
 ### Phase 3: Beta (Rails & Adapters)
 
+- [x] **Database Adapter**: SQL adapter interface with SQLite reference implementation.
 - [ ] **Postgres Adapter**: Robust reference implementation with Prisma.
 - [ ] **Flutterwave Plugin**: Webhook handling and payouts.
 - [ ] **MoneyGram Plugin**: (Investigation required).

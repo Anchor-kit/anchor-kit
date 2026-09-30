@@ -1,24 +1,23 @@
 name: Publish to npm
 
 on:
-  push:
-    branches:
-      - 'release/**'
-    tags:
-      - 'v*'
-  workflow_dispatch:
+  release:
+    types: [published]
 
 permissions:
   contents: read
   id-token: write
 
 jobs:
-  publish-beta:
-    if: startsWith(github.ref, 'refs/heads/release/')
+  publish:
+    if: github.repository == '0xNgoo/anchor-kit'
     runs-on: ubuntu-latest
+    environment: npm-publish
     steps:
-      - name: Checkout
+      - name: Checkout release tag
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.release.tag_name }}
 
       - name: Setup Node
         uses: actions/setup-node@v4
@@ -34,90 +33,40 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
-      - name: Validate
-        run: |
-          bun run lint
-          bun run typecheck
-          bun run test
+      - name: Lint
+        run: bun run lint
 
-      - name: Set beta version for this run
-        run: |
-          BASE_VERSION=$(node -p "require('./package.json').version.split('-')[0]")
-          NEXT_VERSION="${BASE_VERSION}-beta.${GITHUB_RUN_NUMBER}"
-          echo "Publishing beta version: ${NEXT_VERSION}"
-          NEXT_VERSION="${NEXT_VERSION}" node - <<'NODE'
-          const fs = require('fs');
-          const path = require('path');
-          const nextVersion = process.env.NEXT_VERSION;
+      - name: Type check
+        run: bun run typecheck
 
-          const pkgPath = path.resolve('package.json');
-          const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
-          pkg.version = nextVersion;
-          fs.writeFileSync(pkgPath, JSON.stringify(pkg, null, 2) + '\n');
+      - name: Test
+        run: bun run test
 
-          const lockPath = path.resolve('package-lock.json');
-          if (fs.existsSync(lockPath)) {
-            const lock = JSON.parse(fs.readFileSync(lockPath, 'utf8'));
-            lock.version = nextVersion;
-            if (lock.packages && lock.packages['']) {
-              lock.packages[''].version = nextVersion;
-            }
-            fs.writeFileSync(lockPath, JSON.stringify(lock, null, 2) + '\n');
-          }
-          NODE
-
-      - name: Build package
-        run: bun run build
-
-      - name: Publish beta
-        run: npm publish --tag beta --access public
+      - name: Verify release tag matches package version
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-
-  publish-latest:
-    if: startsWith(github.ref, 'refs/tags/v')
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          registry-url: https://registry.npmjs.org
-
-      - name: Setup Bun
-        uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: latest
-
-      - name: Install dependencies
-        run: bun install --frozen-lockfile
-
-      - name: Validate
+          TAG_NAME: ${{ github.event.release.tag_name }}
         run: |
-          bun run lint
-          bun run typecheck
-          bun run test
-
-      - name: Verify tag matches package version
-        run: |
-          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          TAG_VERSION="${TAG_NAME#v}"
           PKG_VERSION=$(node -p "require('./package.json').version")
 
-          echo "Tag version: ${TAG_VERSION}"
+          echo "Release tag: ${TAG_NAME}"
           echo "Package version: ${PKG_VERSION}"
 
           if [ "$TAG_VERSION" != "$PKG_VERSION" ]; then
-            echo "Tag/package version mismatch. Refusing publish."
+            echo "Release tag does not match package.json version. Refusing publish."
             exit 1
           fi
 
       - name: Build package
         run: bun run build
 
-      - name: Publish latest
-        run: npm publish --tag latest --access public
+      - name: Verify npm package contents
+        run: bun run check:pack
+
+      - name: Update npm for trusted publishing support
+        run: npm install -g npm@latest
+
+      - name: Publish to npm
+        run: npm publish --provenance --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

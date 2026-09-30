@@ -2,6 +2,17 @@
 
 Thank you for your interest in contributing to Anchor-Kit! We welcome contributions from the community to help make Stellar anchor development easier for everyone.
 
+## Claiming a good first issue
+
+New contributors are encouraged to start with issues labeled [`good first issue`](https://github.com/0xNgoo/anchor-kit/labels/good%20first%20issue). To claim one:
+
+1. Pick an unassigned issue from the `good first issue` list.
+2. Leave a comment on the issue saying you'd like to work on it (for example, "I'd like to take this one").
+3. Wait briefly for a maintainer to assign it to you so duplicated work is avoided.
+4. Once assigned, follow the Git Workflow below to open a pull request that references the issue with `Closes #<issue number>`.
+
+If no `good first issue` is open, feel free to open a new issue describing what you'd like to contribute before starting work.
+
 ## Development Environment Setup
 
 To get started, you'll need the following installed:

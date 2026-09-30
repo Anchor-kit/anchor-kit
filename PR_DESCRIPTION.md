@@ -1,6 +1,7 @@
 # PR Summary
 
 Adds focused tests for three behaviors:
+
 - sqlite-backed `getInteractiveTransactionById()` returns `null` for unknown transaction IDs
 - `TransactionWatcher.stop()` before `start()` is a safe no-op
 - webhook route accepts an empty request body and returns a generated `event_id`

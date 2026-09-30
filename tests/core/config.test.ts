@@ -1,7 +1,8 @@
 import { AnchorConfig } from '@/core/config.ts';
 import { ConfigError } from '@/core/errors.ts';
+import { createAnchor } from '@/core/factory.ts';
 import type { AnchorKitConfig } from '@/types/config.ts';
-import { Networks } from '@stellar/stellar-sdk';
+import { Keypair, Networks } from '@stellar/stellar-sdk';
 import { describe, expect, it } from 'vitest';
 
 describe('AnchorConfig', () => {
@@ -29,6 +30,15 @@ describe('AnchorConfig', () => {
     },
   };
 
+  function configWithPlugins(
+    plugins: NonNullable<AnchorKitConfig['framework']['plugins']>,
+  ): AnchorKitConfig {
+    return {
+      ...validBaseConfig,
+      framework: { ...validBaseConfig.framework, plugins },
+    };
+  }
+
   describe('Initialization and Getters', () => {
     it('should initialize and return specific config properties', () => {
       const config = new AnchorConfig(validBaseConfig);
@@ -41,9 +51,6 @@ describe('AnchorConfig', () => {
       const cfg = new AnchorConfig(validBaseConfig);
       const op = cfg.get('operational');
       expect(op).toBeDefined();
-      expect(op?.webhooksEnabled).toBe(true);
-      expect(op?.queueBackend).toBe('memory');
-      expect(op?.corsEnabled).toBe(true);
       expect(op?.transactionRetentionDays).toBe(90);
     });
 
@@ -58,7 +65,9 @@ describe('AnchorConfig', () => {
           },
         };
 
-        expect(() => new AnchorConfig(invalidConfig).validate()).toThrow(/transactionRetentionDays/);
+        expect(() => new AnchorConfig(invalidConfig).validate()).toThrow(
+          /transactionRetentionDays/,
+        );
       });
     });
 
@@ -72,6 +81,119 @@ describe('AnchorConfig', () => {
 
       expect(config.get('operational')?.transactionRetentionDays).toBe(30);
       expect(() => config.validate()).not.toThrow();
+    });
+  });
+
+  describe('Framework plugin configuration', () => {
+    it.each(['', ' ', ' plugin', 'plugin '])('rejects plugin ID %j', (id) => {
+      const config = new AnchorConfig(configWithPlugins([{ id }]));
+
+      expect(() => config.validate()).toThrow(/framework\.plugins\[0\]\.id/);
+    });
+
+    it('rejects duplicate plugin IDs', () => {
+      const config = new AnchorConfig(configWithPlugins([{ id: 'payments' }, { id: 'payments' }]));
+
+      expect(() => config.validate()).toThrow(/framework\.plugins\[1\]\.id duplicates "payments"/);
+    });
+
+    it('keeps valid plugin settings unchanged in the frozen config snapshot', () => {
+      const plugins = [
+        { id: 'payments', config: { provider: 'example', enabled: true } },
+        { id: 'identity', config: { fields: ['email'] } },
+      ];
+      const config = new AnchorConfig(configWithPlugins(plugins));
+
+      expect(() => config.validate()).not.toThrow();
+      expect(config.get('framework').plugins).toEqual(plugins);
+      expect(Object.isFrozen(config.get('framework').plugins)).toBe(true);
+      expect(Object.isFrozen(config.get('framework').plugins?.[0].config)).toBe(true);
+    });
+  });
+
+  describe('SEP-10 client attribution prerequisites', () => {
+    const clientDomainSigningKey = Keypair.random().publicKey();
+
+    it('keeps attribution disabled without client-domain configuration', () => {
+      const config = new AnchorConfig(validBaseConfig);
+      expect(() => config.validate()).not.toThrow();
+    });
+
+    it('requires a client domain when attribution is enabled', () => {
+      const invalidConfig = {
+        ...validBaseConfig,
+        security: { ...validBaseConfig.security, enableClientAttribution: true },
+      };
+      const config = new AnchorConfig(invalidConfig);
+      expect(() => config.validate()).toThrow(/security\.clientDomain is required/);
+      expect(() => createAnchor(invalidConfig)).toThrow(/security\.clientDomain is required/);
+    });
+
+    it('requires a client-domain signing key when attribution is enabled', () => {
+      const config = new AnchorConfig({
+        ...validBaseConfig,
+        server: { ...validBaseConfig.server, corsOrigins: ['https://wallet.example.com'] },
+        security: {
+          ...validBaseConfig.security,
+          enableClientAttribution: true,
+          clientDomain: 'wallet.example.com',
+        },
+      });
+      expect(() => config.validate()).toThrow(/security\.clientDomainSigningKey is required/);
+    });
+
+    it('accepts a valid domain, signing key, and matching HTTPS origin', () => {
+      const config = new AnchorConfig({
+        ...validBaseConfig,
+        server: { ...validBaseConfig.server, corsOrigins: ['https://wallet.example.com'] },
+        security: {
+          ...validBaseConfig.security,
+          enableClientAttribution: true,
+          clientDomain: 'wallet.example.com',
+          clientDomainSigningKey,
+        },
+      });
+      expect(() => config.validate()).not.toThrow();
+    });
+
+    it.each([
+      [
+        'malformed domain',
+        { clientDomain: 'https://wallet.example.com' },
+        /security\.clientDomain/,
+      ],
+      [
+        'malformed signing key',
+        { clientDomainSigningKey: 'not-a-stellar-key' },
+        /security\.clientDomainSigningKey/,
+      ],
+      [
+        'missing matching origin',
+        { clientDomain: 'wallet.example.com', clientDomainSigningKey },
+        /server\.corsOrigins/,
+      ],
+      [
+        'malformed origin policy',
+        { clientDomain: 'wallet.example.com', clientDomainSigningKey },
+        /server\.corsOrigins/,
+      ],
+    ])('rejects %s prerequisite values', (_label, securityOverrides, error) => {
+      const corsOrigins =
+        _label === 'malformed origin policy'
+          ? ('https://wallet.example.com' as unknown as string[])
+          : ['https://other.example.com'];
+      const config = new AnchorConfig({
+        ...validBaseConfig,
+        server: { ...validBaseConfig.server, corsOrigins },
+        security: {
+          ...validBaseConfig.security,
+          enableClientAttribution: true,
+          clientDomain: 'wallet.example.com',
+          clientDomainSigningKey,
+          ...securityOverrides,
+        },
+      });
+      expect(() => config.validate()).toThrow(error);
     });
   });
 
@@ -178,6 +300,50 @@ describe('AnchorConfig', () => {
       expect(() => config.validate()).not.toThrow();
     });
 
+    it('accepts each documented KYC level and exposes valid KYC settings through get()', () => {
+      for (const level of ['none', 'basic', 'strict'] as const) {
+        const kyc = {
+          level,
+          requireDocuments: true,
+          requireName: false,
+          requireAddress: true,
+          requireEmail: false,
+          requirePhoneNumber: true,
+          requireBirthDate: false,
+        };
+        const config = new AnchorConfig({ ...validBaseConfig, kyc });
+
+        expect(() => config.validate()).not.toThrow();
+        expect(config.get('kyc')).toEqual(kyc);
+      }
+    });
+
+    it('rejects unsupported KYC levels', () => {
+      const config = new AnchorConfig({
+        ...validBaseConfig,
+        // @ts-expect-error this is for runtime validation
+        kyc: { level: 'enhanced' },
+      });
+
+      expect(() => config.validate()).toThrow(ConfigError);
+      expect(() => config.validate()).toThrow(/kyc\.level must be one of/);
+    });
+
+    it.each([
+      'requireDocuments',
+      'requireName',
+      'requireAddress',
+      'requireEmail',
+      'requirePhoneNumber',
+      'requireBirthDate',
+    ] as const)('rejects a non-boolean kyc.%s value', (field) => {
+      const kyc = { [field]: 'true' } as unknown as NonNullable<AnchorKitConfig['kyc']>;
+      const config = new AnchorConfig({ ...validBaseConfig, kyc });
+
+      expect(() => config.validate()).toThrow(ConfigError);
+      expect(() => config.validate()).toThrow(new RegExp(`kyc\\.${field} must be a boolean`));
+    });
+
     it('should throw ConfigError if top-level network is missing', () => {
       // @ts-expect-error this is for test cases
       const invalidConfig: AnchorKitConfig = { ...validBaseConfig, network: undefined };
@@ -273,6 +439,19 @@ describe('AnchorConfig', () => {
       expect(() => config.validate()).not.toThrow();
     });
 
+    it('should accept valid challenge lifetime', () => {
+      const configWithChallengeTtl: AnchorKitConfig = {
+        ...validBaseConfig,
+        security: {
+          ...validBaseConfig.security,
+          challengeExpirationSeconds: 300,
+        },
+      };
+      const config = new AnchorConfig(configWithChallengeTtl);
+      expect(() => config.validate()).not.toThrow();
+      expect(config.get('security').challengeExpirationSeconds).toBe(300);
+    });
+
     it('should accept valid auth token lifetime', () => {
       const configWithTtl: AnchorKitConfig = {
         ...validBaseConfig,
@@ -291,30 +470,238 @@ describe('AnchorConfig', () => {
       expect(config.get('security').authTokenLifetimeSeconds).toBeUndefined();
     });
 
-    it('should reject invalid auth token lifetime (zero)', () => {
+    it.each([
+      ['challengeExpirationSeconds', 0],
+      ['challengeExpirationSeconds', -100],
+      ['challengeExpirationSeconds', 1.5],
+      ['challengeExpirationSeconds', Number.MAX_SAFE_INTEGER + 1],
+      ['challengeExpirationSeconds', Number.NaN],
+      ['challengeExpirationSeconds', Number.POSITIVE_INFINITY],
+      ['authTokenLifetimeSeconds', 0],
+      ['authTokenLifetimeSeconds', -100],
+      ['authTokenLifetimeSeconds', 1.5],
+      ['authTokenLifetimeSeconds', Number.MAX_SAFE_INTEGER + 1],
+      ['authTokenLifetimeSeconds', Number.NaN],
+      ['authTokenLifetimeSeconds', Number.POSITIVE_INFINITY],
+    ])('should reject invalid %s lifetime value %p', (key, value) => {
       const invalidConfig: AnchorKitConfig = {
         ...validBaseConfig,
         security: {
           ...validBaseConfig.security,
-          authTokenLifetimeSeconds: 0,
+          [key]: value,
         },
       };
       const config = new AnchorConfig(invalidConfig);
       expect(() => config.validate()).toThrow(ConfigError);
-      expect(() => config.validate()).toThrow(/authTokenLifetimeSeconds must be > 0/);
+      expect(() => config.validate()).toThrow(/must be a safe positive integer/);
     });
 
-    it('should reject invalid auth token lifetime (negative)', () => {
-      const invalidConfig: AnchorKitConfig = {
-        ...validBaseConfig,
-        security: {
-          ...validBaseConfig.security,
-          authTokenLifetimeSeconds: -100,
+    describe('operational supportEmail validation', () => {
+      it('should accept valid operational supportEmail', () => {
+        const config = new AnchorConfig({
+          ...validBaseConfig,
+          operational: { supportEmail: 'support@example.com' },
+        });
+        expect(() => config.validate()).not.toThrow();
+      });
+
+      it('should accept omitted operational supportEmail', () => {
+        const config = new AnchorConfig({
+          ...validBaseConfig,
+          operational: { name: 'Test Anchor' },
+        });
+        expect(() => config.validate()).not.toThrow();
+      });
+
+      it('should reject malformed operational supportEmail', () => {
+        const config = new AnchorConfig({
+          ...validBaseConfig,
+          operational: { supportEmail: 'invalid-email-address' },
+        });
+        expect(() => config.validate()).toThrow(ConfigError);
+        expect(() => config.validate()).toThrow(
+          /Invalid email format for operational.supportEmail/,
+        );
+      });
+    });
+
+    describe('operational flags preservation (#551)', () => {
+      it('should preserve webhooksEnabled when set to true', () => {
+        const config = new AnchorConfig({
+          ...validBaseConfig,
+          operational: { webhooksEnabled: true },
+        });
+        expect(config.get('operational')?.webhooksEnabled).toBe(true);
+        expect(() => config.validate()).not.toThrow();
+      });
+
+      it('should preserve webhooksEnabled when set to false', () => {
+        const config = new AnchorConfig({
+          ...validBaseConfig,
+          operational: { webhooksEnabled: false },
+        });
+        expect(config.get('operational')?.webhooksEnabled).toBe(false);
+        expect(() => config.validate()).not.toThrow();
+      });
+
+      it('should preserve corsEnabled when set to true', () => {
+        const config = new AnchorConfig({
+          ...validBaseConfig,
+          operational: { corsEnabled: true },
+        });
+        expect(config.get('operational')?.corsEnabled).toBe(true);
+        expect(() => config.validate()).not.toThrow();
+      });
+
+      it('should preserve corsEnabled when set to false', () => {
+        const config = new AnchorConfig({
+          ...validBaseConfig,
+          operational: { corsEnabled: false },
+        });
+        expect(config.get('operational')?.corsEnabled).toBe(false);
+        expect(() => config.validate()).not.toThrow();
+      });
+
+      it('should preserve both operational flags when both are set', () => {
+        const config = new AnchorConfig({
+          ...validBaseConfig,
+          operational: { webhooksEnabled: true, corsEnabled: false },
+        });
+        expect(config.get('operational')?.webhooksEnabled).toBe(true);
+        expect(config.get('operational')?.corsEnabled).toBe(false);
+        expect(() => config.validate()).not.toThrow();
+      });
+
+      it('should leave webhooksEnabled undefined when not specified', () => {
+        const config = new AnchorConfig({
+          ...validBaseConfig,
+          operational: { name: 'Test Anchor' },
+        });
+        expect(config.get('operational')?.webhooksEnabled).toBeUndefined();
+        expect(() => config.validate()).not.toThrow();
+      });
+
+      it('should leave corsEnabled undefined when not specified', () => {
+        const config = new AnchorConfig({
+          ...validBaseConfig,
+          operational: { name: 'Test Anchor' },
+        });
+        expect(config.get('operational')?.corsEnabled).toBeUndefined();
+        expect(() => config.validate()).not.toThrow();
+      });
+    });
+
+    describe('KYC age bounds validation', () => {
+      it.each([
+        { kyc: { minAge: 18 }, name: 'minimum age only' },
+        { kyc: { maxAge: 120 }, name: 'maximum age only' },
+        { kyc: { minAge: 18, maxAge: 120 }, name: 'ordered age range' },
+        { kyc: { minAge: 0, maxAge: 0 }, name: 'zero age bounds' },
+      ])('should accept valid KYC $name', ({ kyc }) => {
+        const config = new AnchorConfig({
+          ...validBaseConfig,
+          kyc,
+        });
+
+        expect(() => config.validate()).not.toThrow();
+      });
+
+      it.each([
+        { kyc: { minAge: -1 }, message: /kyc\.minAge must be a finite non-negative integer/ },
+        { kyc: { maxAge: -1 }, message: /kyc\.maxAge must be a finite non-negative integer/ },
+        { kyc: { minAge: 18.5 }, message: /kyc\.minAge must be a finite non-negative integer/ },
+        {
+          kyc: { maxAge: Number.NaN },
+          message: /kyc\.maxAge must be a finite non-negative integer/,
         },
-      };
-      const config = new AnchorConfig(invalidConfig);
-      expect(() => config.validate()).toThrow(ConfigError);
-      expect(() => config.validate()).toThrow(/authTokenLifetimeSeconds must be > 0/);
+        {
+          kyc: { minAge: Number.POSITIVE_INFINITY },
+          message: /kyc\.minAge must be a finite non-negative integer/,
+        },
+        {
+          kyc: { minAge: 65, maxAge: 18 },
+          message: /kyc\.minAge must be less than or equal to kyc\.maxAge/,
+        },
+      ])('should reject invalid KYC age bounds %#', ({ kyc, message }) => {
+        const config = new AnchorConfig({
+          ...validBaseConfig,
+          kyc,
+        });
+
+        expect(() => config.validate()).toThrow(ConfigError);
+        expect(() => config.validate()).toThrow(message);
+      });
+    });
+
+    describe('operational supportEmail validation', () => {
+      it('should accept valid operational supportEmail', () => {
+        const config = new AnchorConfig({
+          ...validBaseConfig,
+          operational: { supportEmail: 'support@example.com' },
+        });
+        expect(() => config.validate()).not.toThrow();
+      });
+
+      it('should accept omitted operational supportEmail', () => {
+        const config = new AnchorConfig({
+          ...validBaseConfig,
+          operational: { name: 'Test Anchor' },
+        });
+        expect(() => config.validate()).not.toThrow();
+      });
+
+      it('should reject malformed operational supportEmail', () => {
+        const config = new AnchorConfig({
+          ...validBaseConfig,
+          operational: { supportEmail: 'invalid-email-address' },
+        });
+        expect(() => config.validate()).toThrow(ConfigError);
+        expect(() => config.validate()).toThrow(
+          /Invalid email format for operational.supportEmail/,
+        );
+      });
+    });
+
+    describe('KYC age bounds validation', () => {
+      it.each([
+        { kyc: { minAge: 18 }, name: 'minimum age only' },
+        { kyc: { maxAge: 120 }, name: 'maximum age only' },
+        { kyc: { minAge: 18, maxAge: 120 }, name: 'ordered age range' },
+        { kyc: { minAge: 0, maxAge: 0 }, name: 'zero age bounds' },
+      ])('should accept valid KYC $name', ({ kyc }) => {
+        const config = new AnchorConfig({
+          ...validBaseConfig,
+          kyc,
+        });
+
+        expect(() => config.validate()).not.toThrow();
+      });
+
+      it.each([
+        { kyc: { minAge: -1 }, message: /kyc\.minAge must be a finite non-negative integer/ },
+        { kyc: { maxAge: -1 }, message: /kyc\.maxAge must be a finite non-negative integer/ },
+        { kyc: { minAge: 18.5 }, message: /kyc\.minAge must be a finite non-negative integer/ },
+        {
+          kyc: { maxAge: Number.NaN },
+          message: /kyc\.maxAge must be a finite non-negative integer/,
+        },
+        {
+          kyc: { minAge: Number.POSITIVE_INFINITY },
+          message: /kyc\.minAge must be a finite non-negative integer/,
+        },
+        {
+          kyc: { minAge: 65, maxAge: 18 },
+          message: /kyc\.minAge must be less than or equal to kyc\.maxAge/,
+        },
+      ])('should reject invalid KYC age bounds %#', ({ kyc, message }) => {
+        const config = new AnchorConfig({
+          ...validBaseConfig,
+          kyc,
+        });
+
+        expect(() => config.validate()).toThrow(ConfigError);
+        expect(() => config.validate()).toThrow(message);
+      });
     });
   });
 });
