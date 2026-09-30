@@ -309,6 +309,7 @@ curl -s \
 ## Docs
 
 - [Configuration Reference](./docs/configuration-reference.md) – Complete guide to all configuration options, their status, and usage
+- [Graceful Shutdown](./docs/graceful-shutdown.md) – Draining the HTTP server and releasing Anchor-Kit resources in order
 - [Architecture Overview](./ARCHITECTURE.md)
 - [Contributing Guide](./CONTRIBUTING.md)
 - [Roadmap](./ROADMAP.md)
