@@ -499,14 +499,41 @@ export const NetworkConfigSchema = {
 /**
  * SecurityConfigSchema - Public validation helper for security configuration.
  */
-export const SecurityConfigSchema = {
+type RequiredSecuritySecret =
+  | 'sep10SigningKey'
+  | 'interactiveJwtSecret'
+  | 'distributionAccountSecret';
+
+type SecurityConfigSchemaDefinition = Record<RequiredSecuritySecret, SchemaField> & {
+  validate(config: SecurityConfig): void;
+};
+
+export const SecurityConfigSchema: SecurityConfigSchemaDefinition = {
+  sep10SigningKey: {
+    type: 'string',
+    required: true,
+    description: 'SEP-10 server signing secret.',
+    validate: (value) => typeof value === 'string' && value.trim().length > 0,
+  },
+  interactiveJwtSecret: {
+    type: 'string',
+    required: true,
+    description: 'Secret used to sign interactive JWTs.',
+    validate: (value) => typeof value === 'string' && value.trim().length > 0,
+  },
+  distributionAccountSecret: {
+    type: 'string',
+    required: true,
+    description: 'Distribution account secret.',
+    validate: (value) => typeof value === 'string' && value.trim().length > 0,
+  },
   validate(config: SecurityConfig): void {
     if (!config) throw new Error('Missing required field: security');
-    if (!config.sep10SigningKey)
+    if (!SecurityConfigSchema.sep10SigningKey.validate(config.sep10SigningKey))
       throw new Error('Missing required secret: security.sep10SigningKey');
-    if (!config.interactiveJwtSecret)
+    if (!SecurityConfigSchema.interactiveJwtSecret.validate(config.interactiveJwtSecret))
       throw new Error('Missing required secret: security.interactiveJwtSecret');
-    if (!config.distributionAccountSecret)
+    if (!SecurityConfigSchema.distributionAccountSecret.validate(config.distributionAccountSecret))
       throw new Error('Missing required secret: security.distributionAccountSecret');
     if (
       config.enableClientAttribution !== undefined &&

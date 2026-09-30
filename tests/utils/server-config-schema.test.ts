@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { ServerConfigSchema, validateServerConfig } from '../../src/utils/validation';
+import {
+  SecurityConfigSchema,
+  ServerConfigSchema,
+  validateServerConfig,
+} from '../../src/utils/validation';
 
 describe('ServerConfigSchema', () => {
   it('is publicly importable from validation module', () => {
