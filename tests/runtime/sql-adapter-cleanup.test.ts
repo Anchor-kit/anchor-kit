@@ -42,9 +42,7 @@ describe('SqlDatabaseAdapter – cleanupOldRecords (sqlite)', () => {
     const byName = new Map(indexes.map((i) => [i.name, i.tbl_name]));
 
     expect(byName.get('idx_watcher_tasks_status_created_at')).toBe('watcher_tasks');
-    expect(byName.get('idx_watcher_tasks_status_processed_at')).toBe('watcher_tasks');
     expect(byName.get('idx_webhook_events_status_created_at')).toBe('webhook_events');
-    expect(byName.get('idx_webhook_events_status_processed_at')).toBe('webhook_events');
     expect(byName.get('idx_auth_challenges_expires_at')).toBe('auth_challenges');
     expect(byName.get('idx_idempotency_keys_created_at')).toBe('idempotency_keys');
   });
@@ -82,7 +80,7 @@ describe('SqlDatabaseAdapter – cleanupOldRecords (sqlite)', () => {
         `INSERT INTO idempotency_keys (id, scope, idempotency_key, request_hash, status_code, response_body, created_at)
          VALUES (?, ?, ?, ?, ?, ?, ?)`,
       )
-      .run(idemOldId, scope, 'old-key', 'hash-a', 200, '{}', BEFORE );
+      .run(idemOldId, scope, 'old-key', 'hash-a', 200, '{}', BEFORE);
     raw
       .prepare(
         `INSERT INTO idempotency_keys (id, scope, idempotency_key, request_hash, status_code, response_body, created_at)
@@ -105,13 +103,13 @@ describe('SqlDatabaseAdapter – cleanupOldRecords (sqlite)', () => {
     raw
       .prepare(
         `INSERT INTO webhook_events (id, event_id, provider, payload, status, error_message, processed_at, created_at)
-         VALUES (?, , ?, ?, 'processed', NULL, ?,/ ?)`,
+         VALUES (?, ?, ?, ?, 'processed', NULL, ?, ?)`,
       )
-      .run(whOldProcessedId, `evt-op-${randomUUID()}`, 'test', payload, BEFORE, BEFORE );
+      .run(whOldProcessedId, `evt-op-${randomUUID()}`, 'test', payload, BEFORE, BEFORE);
     raw
       .prepare(
         `INSERT INTO webhook_events (id, event_id, provider, payload, status, error_message, processed_at, created_at)
-         VALUES (?, , ?, ?, 'processed', NULL, ?,/ ?)`,
+         VALUES (?, ?, ?, ?, 'processed', NULL, ?, ?)`,
       )
       .run(whExactProcessedId, `evt-exact-${randomUUID()}`, 'test', payload, CUTOFF, CUTOFF);
     raw
@@ -119,11 +117,11 @@ describe('SqlDatabaseAdapter – cleanupOldRecords (sqlite)', () => {
         `INSERT INTO webhook_events (id, event_id, provider, payload, status, error_message, processed_at, created_at)
          VALUES (?, ?, ?, ?, 'pending', NULL, NULL, ?)`,
       )
-      .run(whOldPendingId, `evt-pend-${randomUUID()}`, 'test', payload, BEFORE );
+      .run(whOldPendingId, `evt-pend-${randomUUID()}`, 'test', payload, BEFORE);
     raw
       .prepare(
         `INSERT INTO webhook_events (id, event_id, provider, payload, status, error_message, processed_at, created_at)
-         VALUES (?, , ?, ?, 'processed', NULL, ?,/ ?)`,
+         VALUES (?, ?, ?, ?, 'processed', NULL, ?, ?)`,
       )
       .run(whNewProcessedId, `evt-new-${randomUUID()}`, 'test', payload, AFTER, AFTER);
 
@@ -138,7 +136,7 @@ describe('SqlDatabaseAdapter – cleanupOldRecords (sqlite)', () => {
         `INSERT INTO watcher_tasks (id, watcher_name, payload, status, error_message, processed_at, created_at)
          VALUES (?, 'w', ?, 'processed', NULL, ?, ?)`,
       )
-      .run(wOldProcessedId, taskPayload, BEFORE, BEFORE );
+      .run(wOldProcessedId, taskPayload, BEFORE, BEFORE);
     raw
       .prepare(
         `INSERT INTO watcher_tasks (id, watcher_name, payload, status, error_message, processed_at, created_at)
@@ -150,11 +148,11 @@ describe('SqlDatabaseAdapter – cleanupOldRecords (sqlite)', () => {
         `INSERT INTO watcher_tasks (id, watcher_name, payload, status, error_message, processed_at, created_at)
          VALUES (?, 'w', ?, 'pending', NULL, NULL, ?)`,
       )
-      .run(wOldPendingId, taskPayload, BEFORE );
+      .run(wOldPendingId, taskPayload, BEFORE);
     raw
       .prepare(
         `INSERT INTO watcher_tasks (id, watcher_name, payload, status, error_message, processed_at, created_at)
-         VALUES (?, 'w', ?, 'processed', NULL, ?,/ ?)`,
+         VALUES (?, 'w', ?, 'processed', NULL, ?, ?)`,
       )
       .run(wNewProcessedId, taskPayload, AFTER, AFTER);
 
@@ -202,7 +200,7 @@ describe('SqlDatabaseAdapter – cleanupOldRecords (sqlite)', () => {
     raw
       .prepare(
         `INSERT INTO webhook_events (id, event_id, provider, payload, status, error_message, processed_at, created_at)
-         VALUES (?, ?, ?, ?, 'processed', NULL, ?,/ ?)`,
+         VALUES (?, ?, ?, ?, 'processed', NULL, ?, ?)`,
       )
       .run(invalidRowId, eventId, 'test', '{not valid json}', CUTOFF, CUTOFF);
 

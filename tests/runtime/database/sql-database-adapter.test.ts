@@ -146,7 +146,8 @@ describe('SqlDatabaseAdapter (sqlite)', () => {
       .all() as Array<{ name: string }>;
     const indexNames = indexes.map((row) => row.name);
 
-    expect(indexNames).toContain('idx_interactive_transactions_status_created_at');
+    expect(indexNames).toContain('idx_watcher_tasks_status_created_at');
+    expect(indexNames).toContain('idx_webhook_events_status_created_at');
     expect(indexNames).toContain('idx_auth_challenges_expires_at');
   });
 
