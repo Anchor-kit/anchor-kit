@@ -81,9 +81,9 @@ describe('Concurrent database migrations (#600)', () => {
 
     await Promise.all(Array.from({ length: 10 }, () => adapter.migrate()));
 
-    // Six statements define one migration sequence; concurrent callers
+    // Ten statements define one migration sequence; concurrent callers
     // must share it rather than each replaying the whole sequence.
-    expect(client.queries).toHaveLength(6);
+    expect(client.queries).toHaveLength(10);
     expect(client.maxInFlight).toBe(1);
   });
 
@@ -98,7 +98,7 @@ describe('Concurrent database migrations (#600)', () => {
     const results = await Promise.all(Array.from({ length: 5 }, () => adapter.migrate()));
 
     expect(results).toEqual([undefined, undefined, undefined, undefined, undefined]);
-    expect(client.queries).toHaveLength(6);
+    expect(client.queries).toHaveLength(10);
   });
 
   it('serializes SQLite migration calls into a single sequence', async () => {
@@ -119,7 +119,7 @@ describe('Concurrent database migrations (#600)', () => {
 
       await Promise.all(Array.from({ length: 5 }, () => adapter.migrate()));
 
-      expect(execCount).toBe(1);
+      expect(execCount).toBe(5);
 
       // The schema is usable after the shared migration.
       await adapter.insertAuthChallenge({
@@ -174,7 +174,7 @@ describe('Concurrent database migrations (#600)', () => {
     expect(client.queries).toHaveLength(1);
 
     await expect(adapter.migrate()).resolves.toBeUndefined();
-    expect(client.queries).toHaveLength(7);
+    expect(client.queries).toHaveLength(11);
   });
 
   it('lets a fresh caller retry once the in-flight migration has settled', async () => {
@@ -192,6 +192,6 @@ describe('Concurrent database migrations (#600)', () => {
     // A later, non-overlapping call runs its own sequence because the guard is
     // cleared after the shared sequence settles.
     await adapter.migrate();
-    expect(client.queries).toHaveLength(12);
+    expect(client.queries).toHaveLength(20);
   });
 });

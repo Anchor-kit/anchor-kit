@@ -7,7 +7,10 @@ import type { DatabaseAdapter } from '@/runtime/interfaces.ts';
 
 interface SqliteHandle {
   exec(sql: string): void;
-  prepare(sql: string): { run(...params: unknown[]): unknown };
+  prepare(sql: string): {
+    run(...params: unknown[]): unknown;
+    all(...params: unknown[]): unknown[];
+  };
 }
 
 function getSqlite(db: DatabaseAdapter): SqliteHandle {
@@ -39,6 +42,13 @@ function insertWatcherRow(
       fields.status,
       fields.createdAt,
     );
+}
+
+function listIndexes(db: DatabaseAdapter, table: string): string[] {
+  const rows = getSqlite(db)
+    .prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = ?")
+    .all(table) as Array<{ name: string }>;
+  return rows.map((row) => row.name);
 }
 
 describe('SqlDatabaseAdapter – watcher task persistence and processed counts', () => {
@@ -252,5 +262,21 @@ describe('SqlDatabaseAdapter – watcher task persistence and processed counts',
   it('accepts a pending task limit of one', async () => {
     const pending = await db.listPendingWatcherTasks(1);
     expect(pending.length).toBeLessThanOrEqual(1);
+  });
+
+  it('creates supporting indexes for watcher task queries', () => {
+    const indexes = listIndexes(db, 'watcher_tasks');
+    expect(indexes).toContain('idx_watcher_tasks_status_created_at');
+  });
+
+  it('uses the pending status index for watcher task lookups', () => {
+    const plan = getSqlite(db)
+      .prepare(
+        "EXPLAIN QUERY PLAN SELECT id, created_at FROM watcher_tasks WHERE status = 'pending' ORDER BY created_at ASC LIMIT 1",
+      )
+      .all() as Array<{ detail: string }>;
+    expect(plan.some((row) => row.detail.includes('idx_watcher_tasks_status_created_at'))).toBe(
+      true,
+    );
   });
 });
