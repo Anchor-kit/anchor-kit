@@ -113,7 +113,9 @@ describe('TransactionWatcher Unit Tests', () => {
       let resolveScheduledTick!: (transactions: InteractiveTransactionRecord[]) => void;
       const pendingScheduledTick = vi.fn(
         () =>
-          new Promise<InteractiveTransactionRecord[]>((resolve) => (resolveScheduledTick = resolve)),
+          new Promise<InteractiveTransactionRecord[]>(
+            (resolve) => (resolveScheduledTick = resolve),
+          ),
       );
       mockDatabase.listPendingTransactionsBefore = pendingScheduledTick;
       vi.advanceTimersByTime(1000);

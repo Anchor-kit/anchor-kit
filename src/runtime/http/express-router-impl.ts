@@ -3,6 +3,7 @@ import { ConfigError, PayloadTooLargeError, ValidationError } from '@/core/error
 import { InMemoryRateLimiter, type RateLimitRule } from '@/runtime/http/rate-limiter.ts';
 import type { DatabaseAdapter, WebhookProcessor } from '@/runtime/interfaces.ts';
 import type { PluginRouteContext, RouteDefinition } from '@/types/foundation.ts';
+import type { AnchorPluginHooks, DepositRequestBody } from '@/types/plugin.ts';
 import { IdempotencyUtils } from '@/utils/idempotency.ts';
 import {
   Account,
@@ -45,6 +46,8 @@ export interface ExpressRouterContext {
   requestTimeout: number;
   rateLimiter: InMemoryRateLimiter;
   rateRules: Record<'auth_challenge' | 'auth_token' | 'webhook' | 'deposit', RateLimitRule>;
+  depositRequestHooks?: NonNullable<AnchorPluginHooks['onDepositRequest']>[];
+  sep10ChallengeHooks?: NonNullable<AnchorPluginHooks['onSep10Challenge']>[];
   pluginRoutes?: Array<{ pluginId: string; route: RouteDefinition }>;
 }
 
@@ -784,7 +787,7 @@ async function handleAuthChallenge(
 
   let hookedChallengeTx = challengeTx;
   try {
-    for (const hook of context.sep10ChallengeHooks) {
+    for (const hook of context.sep10ChallengeHooks ?? []) {
       hookedChallengeTx = await hook(hookedChallengeTx);
     }
   } catch {
@@ -1061,7 +1064,7 @@ async function handleDepositInteractive(
   };
 
   try {
-    for (const hook of context.depositRequestHooks) {
+    for (const hook of context.depositRequestHooks ?? []) {
       await hook(depositHookContext);
     }
   } catch {

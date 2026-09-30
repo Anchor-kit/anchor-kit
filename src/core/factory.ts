@@ -106,10 +106,23 @@ export class AnchorInstance {
           ];
         }
 
+        const depositRequestHooks: NonNullable<AnchorPluginHooks['onDepositRequest']>[] = [];
+        const sep10ChallengeHooks: NonNullable<AnchorPluginHooks['onSep10Challenge']>[] = [];
+        for (const plugin of this.plugins.values()) {
+          if (plugin.hooks?.onDepositRequest) {
+            depositRequestHooks.push(plugin.hooks.onDepositRequest);
+          }
+          if (plugin.hooks?.onSep10Challenge) {
+            sep10ChallengeHooks.push(plugin.hooks.onSep10Challenge);
+          }
+        }
+
         this.expressRouter = new AnchorExpressRouter({
           config: this.config,
           database: this.database,
           webhookProcessor: this.webhookProcessor,
+          depositRequestHooks,
+          sep10ChallengeHooks,
           pluginRoutes,
         }).getMiddleware();
 

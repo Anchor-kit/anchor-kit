@@ -2,7 +2,7 @@ import { createAnchor, makeSqliteDbUrlForTests } from '@/core/factory.ts';
 import type { AnchorPlugin } from '@/types/plugin.ts';
 import { Keypair } from '@stellar/stellar-sdk';
 import { unlinkSync } from 'node:fs';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 
 const databaseUrls: string[] = [];
 
