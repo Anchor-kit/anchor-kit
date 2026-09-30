@@ -22,6 +22,12 @@ export class InMemoryQueueAdapter implements QueueAdapter {
     if (!Number.isSafeInteger(options.concurrency) || options.concurrency < 1) {
       throw new ConfigError('InMemoryQueueAdapter concurrency must be a positive safe integer');
     }
+    if (
+      options.maxPendingJobs !== undefined &&
+      (!Number.isSafeInteger(options.maxPendingJobs) || options.maxPendingJobs < 1)
+    ) {
+      throw new ConfigError('InMemoryQueueAdapter maxPendingJobs must be a positive safe integer');
+    }
 
     this.concurrency = options.concurrency;
     this.maxPendingJobs = options.maxPendingJobs;
@@ -29,7 +35,8 @@ export class InMemoryQueueAdapter implements QueueAdapter {
   }
 
   public async enqueue(job: QueueJob): Promise<void> {
-    const canStartImmediately = this.running && this.worker && this.activeWorkers < this.concurrency;
+    const canStartImmediately =
+      this.running && this.worker && this.activeWorkers < this.concurrency;
     if (
       this.maxPendingJobs !== undefined &&
       this.jobs.length >= this.maxPendingJobs &&

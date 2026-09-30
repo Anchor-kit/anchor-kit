@@ -499,20 +499,19 @@ describe('InMemoryQueueAdapter', () => {
     });
 
     await queue.start(async (job) => {
-      const id = job.payload.id as string;
-      if (id === 'fail') throw new Error('worker failed');
-      completed.push(id);
+      if (job.type === 'process_watcher_task') throw new Error('worker failed');
+      completed.push(job.type);
       resolveCompleted?.();
     });
-    await queue.enqueue({ type: 'process_watcher_task', payload: { id: 'fail' } });
-    await queue.enqueue({ type: 'cleanup_records', payload: { id: 'succeed' } });
+    await queue.enqueue({ type: 'process_watcher_task', payload: { watcherTaskId: 'fail' } });
+    await queue.enqueue({ type: 'cleanup_records', payload: { retentionDays: 90 } });
     await completedPromise;
     await queue.stop();
 
     expect(failures).toHaveLength(1);
     expect(failures[0]?.job.type).toBe('process_watcher_task');
     expect(failures[0]?.error).toEqual(new Error('worker failed'));
-    expect(completed).toEqual(['succeed']);
+    expect(completed).toEqual(['cleanup_records']);
   });
 
   it('limits pending jobs and accepts more after the queue drains', async () => {
@@ -523,9 +522,9 @@ describe('InMemoryQueueAdapter', () => {
       resolveDrained = resolve;
     });
 
-    await queue.enqueue({ type: 'cleanup_records', payload: { id: 1 } });
+    await queue.enqueue({ type: 'cleanup_records', payload: { retentionDays: 1 } });
     await expect(
-      queue.enqueue({ type: 'cleanup_records', payload: { id: 2 } }),
+      queue.enqueue({ type: 'cleanup_records', payload: { retentionDays: 2 } }),
     ).rejects.toThrow('In-memory queue is full');
 
     await queue.start(async () => {
@@ -533,7 +532,7 @@ describe('InMemoryQueueAdapter', () => {
       if (completedCount === 2) resolveDrained?.();
     });
     await new Promise<void>((resolve) => setTimeout(resolve, 0));
-    await queue.enqueue({ type: 'cleanup_records', payload: { id: 3 } });
+    await queue.enqueue({ type: 'cleanup_records', payload: { retentionDays: 3 } });
     await drained;
     await queue.stop();
 
@@ -557,27 +556,34 @@ describe('InMemoryQueueAdapter', () => {
     const completed: string[] = [];
 
     await queue.start(async (job) => {
-      const id = job.payload.id as string;
-      if (id === 'in-flight') {
+      if (job.type === 'process_watcher_task') {
         signalWorkerStarted?.();
         await workerGate;
       }
-      completed.push(id);
-      if (id === 'pending-1') signalPendingComplete?.();
+      completed.push(
+        job.type === 'process_watcher_task'
+          ? 'in-flight'
+          : job.type === 'cleanup_records'
+            ? `${job.payload.retentionDays}`
+            : 'unexpected',
+      );
+      if (job.type === 'cleanup_records' && job.payload.retentionDays === 1) {
+        signalPendingComplete?.();
+      }
     });
-    await queue.enqueue({ type: 'cleanup_records', payload: { id: 'in-flight' } });
+    await queue.enqueue({ type: 'process_watcher_task', payload: { watcherTaskId: 'in-flight' } });
     await workerStarted;
 
     const enqueueResults = await Promise.allSettled([
-      queue.enqueue({ type: 'cleanup_records', payload: { id: 'pending-1' } }),
-      queue.enqueue({ type: 'cleanup_records', payload: { id: 'pending-2' } }),
+      queue.enqueue({ type: 'cleanup_records', payload: { retentionDays: 1 } }),
+      queue.enqueue({ type: 'cleanup_records', payload: { retentionDays: 2 } }),
     ]);
     expect(enqueueResults.map((result) => result.status)).toEqual(['fulfilled', 'rejected']);
 
     releaseWorker?.();
-  await pendingComplete;
+    await pendingComplete;
     await queue.stop();
 
-    expect(completed).toEqual(['in-flight', 'pending-1']);
+    expect(completed).toEqual(['in-flight', '1']);
   });
 });

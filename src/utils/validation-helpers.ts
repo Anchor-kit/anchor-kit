@@ -578,6 +578,13 @@ function validateAnchorKitConfig(config: AnchorKitConfig): boolean {
   if (!assets) throw new Error('Missing required top-level field: assets');
   if (!framework) throw new Error('Missing required top-level field: framework');
 
+  if (
+    config.webhooks?.callbackTimeoutMs !== undefined &&
+    !isPositiveSafeInteger(config.webhooks.callbackTimeoutMs)
+  ) {
+    throw new Error('webhooks.callbackTimeoutMs must be a positive safe integer');
+  }
+
   NetworkConfigSchema.validate(network);
   SecurityConfigSchema.validate(security);
   if (security.enableClientAttribution) {

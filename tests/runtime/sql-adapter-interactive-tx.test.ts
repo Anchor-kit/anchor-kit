@@ -3,7 +3,6 @@ import { createSqlDatabaseAdapter } from '@/runtime/database/sql-database-adapte
 import { randomUUID } from 'node:crypto';
 import { unlinkSync } from 'node:fs';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { mock } from 'bun:test';
 import type { DatabaseAdapter } from '@/runtime/interfaces.ts';
 
 describe('SqlDatabaseAdapter – interactive transaction status updates', () => {

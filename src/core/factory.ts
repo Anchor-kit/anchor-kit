@@ -80,7 +80,7 @@ export class AnchorInstance {
 
       try {
         validatePluginRoutes(pluginRoutes);
-        this.database = createSqlDatabaseAdapter(frameworkConfig.database);
+        this.database = this.createDatabaseAdapter();
         await this.database.connect();
         await this.database.migrate();
 
@@ -175,15 +175,16 @@ export class AnchorInstance {
   }
 
   /**
-  * Cleanly shut down all services. If initialization is pending, shutdown waits
-  * for it to settle before releasing resources. The instance can then be initialized again.
+   * Cleanly shut down all services. If initialization is pending, shutdown waits
+   * for it to settle before releasing resources. The instance can then be initialized again.
    */
   public async shutdown(): Promise<void> {
-    if (!this.initialized && !this.shutdownPromise) return;
+    if (!this.initialized && !this.initPromise && !this.shutdownPromise) return;
     if (this.shutdownPromise) return this.shutdownPromise;
 
     this.shutdownPromise = (async () => {
       try {
+        await this.initPromise?.catch(() => undefined);
         if (!this.initialized) return;
 
         await this.stopBackgroundJobs();
@@ -201,6 +202,10 @@ export class AnchorInstance {
     })();
 
     return this.shutdownPromise;
+  }
+
+  protected createDatabaseAdapter(): DatabaseAdapter {
+    return createSqlDatabaseAdapter(this.config.get('framework').database);
   }
 
   /**

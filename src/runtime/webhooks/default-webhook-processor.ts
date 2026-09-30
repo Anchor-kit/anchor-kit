@@ -41,7 +41,12 @@ export class DefaultWebhookProcessor implements WebhookProcessor {
     payload: Record<string, unknown>;
     rawBody: string | Buffer | Uint8Array;
     signature?: string;
-  }): Promise<{ duplicate: boolean; eventId: string; provider: string }> {
+  }): Promise<{
+    duplicate: boolean;
+    eventId: string;
+    provider: string;
+    status?: 'pending' | 'processed' | 'failed';
+  }> {
     this.verifySignatureIfEnabled(input);
 
     const insertion = await this.database.insertOrGetWebhookEvent({
@@ -105,7 +110,7 @@ export class DefaultWebhookProcessor implements WebhookProcessor {
         status: 'failed',
         errorMessage: message,
       });
-      throw new Error('Webhook processing failed');
+      throw new Error('Webhook processing failed', { cause: error });
     }
 
     return {
