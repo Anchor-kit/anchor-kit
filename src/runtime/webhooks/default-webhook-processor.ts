@@ -82,6 +82,7 @@ export class DefaultWebhookProcessor implements WebhookProcessor {
                 {
                   receivedAt: insertion.record.createdAt,
                   signature: input.signature,
+                  rawBody: input.rawBody,
                 },
               ),
             ),
