@@ -1,3 +1,7 @@
+import type { AnchorConfig } from '@/core/config.ts';
+import type { DatabaseAdapter } from '@/runtime/interfaces.ts';
+import type { IncomingMessage, ServerResponse } from 'node:http';
+
 /**
  * Foundation types for unified spec
  * Includes KYC/customer related types used across SEPs
@@ -75,7 +79,22 @@ export type SepErrorCode =
 export interface RouteDefinition {
   method: 'GET' | 'POST' | 'PUT' | 'DELETE' | 'PATCH';
   path: string;
-  handler: (ctx: unknown) => Promise<unknown> | unknown;
+  handler: (ctx: PluginRouteContext) => Promise<unknown> | unknown;
+}
+
+/**
+ * Context supplied to plugin handlers. Paths are exact and static, so params
+ * is empty. Returned values become `{ data }` JSON responses; undefined means
+ * 204. A handler may write directly to response to choose its own status/body.
+ */
+export interface PluginRouteContext {
+  request: IncomingMessage;
+  response: ServerResponse;
+  params: Record<string, string>;
+  query: Record<string, string | Array<string>>;
+  body: Record<string, unknown>;
+  config: AnchorConfig;
+  database: DatabaseAdapter;
 }
 
 /**

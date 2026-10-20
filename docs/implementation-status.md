@@ -2,6 +2,8 @@
 
 This file tracks where the codebase currently aligns or diverges from the canonical spec (`anchor-kit-unified.md`) and supporting planning docs (`anchor-kit-trd.md`, `anchor-kit SDK Plan.md`, `anchor-kit-plan.md`).
 
+**For a comprehensive configuration reference with implementation status and usage guidance, see [Configuration Reference](configuration-reference.md).**
+
 ## Implemented Now (Foundation)
 
 - Factory and core instance lifecycle: `createAnchor`, `AnchorInstance`.

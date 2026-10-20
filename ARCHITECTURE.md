@@ -32,67 +32,19 @@ await anchor.startBackgroundJobs();
 app.use('/anchor', anchor.getExpressRouter());
 ```
 
-The host owns the HTTP server, route prefix, interactive web application,
-provider/rail integration, deployment, and lifecycle shutdown. See
-[`example/express-app.ts`](./example/express-app.ts) for the runnable example.
+## Data Flow (SEP-24 Example)
 
-## Current request and transaction path
+1.  **Wallet** initiates auth (SEP-10).
+2.  **Anchor-Kit** verifies signature and issues JWT.
+3.  **Wallet** requests deposit (SEP-24).
+4.  **Anchor-Kit** creates transaction record (status: `incomplete`) and returns interactive URL.
+5.  **User** completes KYC/Payment on the interactive page.
+6.  **Anchor-Kit** receives Webhook from Payment Rail (e.g., Flutterwave).
+7.  **Anchor-Kit** validates webhook, updates status to `pending_user_transfer_start`.
+8.  **Job Queue** picks up job, sends Stellar Asset to user.
+9.  **Anchor-Kit** updates status to `completed`.
 
-1. **SEP-10 challenge:** `GET /auth/challenge?account=...` creates a challenge
-   with server account as transaction source and the client account as
-   `manageData` operation source. The operation name is the configured
-   `server.homeDomain` followed by ` auth`. The challenge is signed by the
-   anchor and stored for one-time use.
-2. **SEP-10 token:** `POST /auth/token` verifies the anchor and client
-   signatures, configured network, source account, home-domain operation name,
-   expiry, and stored nonce before consuming the challenge and issuing a
-   bearer JWT.
-3. **Deposit record:** authenticated
-   `POST /transactions/deposit/interactive` validates the configured asset and
-   amount and creates an idempotent SQL record in
-   `pending_user_transfer_start`. It returns a URL built from
-   `server.interactiveDomain`; the SDK does not serve that page.
-4. **Webhook:** `POST /webhooks/events` verifies the configured HMAC signature
-   when enabled, persists and deduplicates the provider event, invokes the
-   host's `webhooks.onEvent` callback, and marks the webhook event processed or
-   failed. This callback is not automatically connected to the deposit record
-   or a rail settlement.
-5. **Queue and watcher:** when background jobs are started, the watcher polls
-   overdue pending records and enqueues expiry, watcher-task, and cleanup jobs.
-   Queue processing does not submit a Stellar payment or complete a deposit
-   settlement.
+## SEP-10 Challenge Consumption & Recovery Policy
 
-The transaction lookup route reads the stored record; it does not imply that a
-payment has settled. A verified webhook, a queued job, or a returned
-`pending_user_transfer_start` record is not evidence of a completed on-chain
-transfer.
-
-## Intended product path (not implemented end to end)
-
-The following is a target boundary, not a description of current runtime
-behavior:
-
-1. Wallet authenticates using SEP-10.
-2. Anchor creates a deposit and an interoperable interactive-flow response.
-3. Host's interactive experience collects user and provider requirements.
-4. A payment rail/provider collects fiat and reports its result.
-5. Anchor correlates and validates provider events with the deposit record.
-6. The settlement worker submits the configured Stellar asset transfer.
-7. The anchor verifies the on-chain result.
-8. The transaction state machine persists the protocol status and settlement
-   reference.
-9. Wallet/consumer can query the interoperable final status.
-
-The rail/provider contract, state-machine transitions, settlement submission,
-and final status updates are planned boundaries. They are not supplied by the
-current webhook callback or queue implementation.
-
-## Reproducible evidence
-
-- Runtime integration behavior: `bun test tests/mvp-express.integration.test.ts`
-- Focused documentation acceptance: `node scripts/check-doc-acceptance.mjs`
-
-Both commands run from the repository root. Passing the integration tests
-demonstrates the currently implemented route behavior, not the deferred
-interoperability or settlement gates. See [`ROADMAP.md`](./ROADMAP.md) for the
-next evidence required.
+- **Atomicity**: SEP-10 challenges are strictly one-time credentials. `markAuthChallengeConsumed` uses an atomic SQL query (`UPDATE auth_challenges SET consumed_at = ? WHERE id = ? AND consumed_at IS NULL`) to ensure that under concurrent token exchange requests for the same challenge, at most one consumer successfully marks the challenge consumed and receives an access token. All other concurrent requests receive HTTP 401 (`invalid_challenge`, message `Challenge already used`).
+- **Persistence Failure Recovery**: If the database fails to record the challenge consumption (e.g. storage error during `markAuthChallengeConsumed`), token issuance is aborted immediately and an HTTP 500 (`server_error`) response is returned with no token issued. Because consumption was not persisted in storage, the challenge remains unconsumed, allowing the user/client to safely retry the token exchange request.

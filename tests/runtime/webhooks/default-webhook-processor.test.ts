@@ -1,7 +1,7 @@
 import { createHmac } from 'node:crypto';
+import type { DatabaseAdapter, WebhookEventRecord } from '../../../src/runtime/interfaces.ts';
 import { DefaultWebhookProcessor } from '../../../src/runtime/webhooks/default-webhook-processor.ts';
 import type { AnchorKitConfig } from '../../../src/types/config.ts';
-import type { DatabaseAdapter, WebhookEventRecord } from '../../../src/runtime/interfaces.ts';
 
 describe('DefaultWebhookProcessor', () => {
   let processor: DefaultWebhookProcessor;
@@ -78,6 +78,7 @@ describe('DefaultWebhookProcessor', () => {
 
     expect(result.duplicate).toBe(false);
     expect(result.eventId).toBe('evt_new');
+    expect(result.provider).toBe('test-provider');
     expect(callbackInvokedCount).toBe(1);
   });
 
@@ -91,6 +92,21 @@ describe('DefaultWebhookProcessor', () => {
 
     expect(result.duplicate).toBe(true);
     expect(result.eventId).toBe('evt_duplicate');
+    expect(result.provider).toBe('test-provider');
+    expect(callbackInvokedCount).toBe(0);
+  });
+
+  test('duplicate event with conflicting provider returns persisted provider', async () => {
+    const result = await processor.process({
+      eventId: 'evt_duplicate',
+      provider: 'different-provider', // Conflicting provider
+      payload: { type: 'test' },
+      rawBody: '{}',
+    });
+
+    expect(result.duplicate).toBe(true);
+    expect(result.eventId).toBe('evt_duplicate');
+    expect(result.provider).toBe('test-provider'); // Should return the persisted provider, not the request provider
     expect(callbackInvokedCount).toBe(0);
   });
 
@@ -210,6 +226,7 @@ describe('DefaultWebhookProcessor', () => {
 
     expect(result.duplicate).toBe(false);
     expect(result.eventId).toBe('evt_valid_signature');
+    expect(result.provider).toBe('test-provider');
     expect(callbackInvokedCount).toBe(1);
   });
 });

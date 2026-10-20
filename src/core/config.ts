@@ -1,5 +1,5 @@
 import { ConfigError } from '@/core/errors.ts';
-import type { AnchorKitConfig, Asset } from '@/types/config.ts';
+import type { AnchorKitConfig, Asset, AnchorKitConfigSnapshot } from '@/types/config.ts';
 import { AnchorKitConfigSchema, DatabaseUrlSchema } from '@/utils/validation.ts';
 import { Networks } from '@stellar/stellar-sdk';
 import { mergeAnchorConfigWithDefaults } from './config-defaults.ts';
@@ -44,7 +44,7 @@ export class AnchorConfig {
   /**
    * Return the raw configuration object
    */
-  public getConfig(): AnchorKitConfig {
+  public getConfig(): AnchorKitConfigSnapshot {
     return this.config;
   }
 

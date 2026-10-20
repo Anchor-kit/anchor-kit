@@ -38,6 +38,8 @@ export type {
   AnchorPlugin,
   AnchorPluginContext,
   AnchorPluginHooks,
+  DepositRequestBody,
+  DepositRequestHookContext,
   Context as PluginContext,
 } from './plugin';
 export type { RouteDefinition, SchemaDefinition, SepErrorCode } from './foundation';
