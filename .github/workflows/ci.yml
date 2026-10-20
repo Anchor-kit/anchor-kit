@@ -9,6 +9,23 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    env:
+      DATABASE_URL: postgres://anchor_kit:anchor_kit@localhost:5432/anchor_kit_test
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: anchor_kit
+          POSTGRES_PASSWORD: anchor_kit
+          POSTGRES_DB: anchor_kit_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U anchor_kit -d anchor_kit_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
 
     steps:
       - uses: actions/checkout@v4
@@ -25,6 +42,14 @@ jobs:
 
       - name: Install dependencies
         run: bun install --frozen-lockfile
+
+      - name: Verify PostgreSQL test service
+        run: |
+          test -n "$DATABASE_URL"
+          bun -e 'const { Client } = await import("pg"); const client = new Client({ connectionString: process.env.DATABASE_URL }); await client.connect(); await client.query("SELECT 1"); await client.end();'
+
+      - name: PostgreSQL adapter assertions
+        run: bun test tests/runtime/postgres-adapter.integration.test.ts
 
       - name: Lint
         run: bun run lint

@@ -63,6 +63,39 @@ export function isTerminalTransactionStatus(
 /** Union of all pending transaction statuses. */
 export type PendingTransactionStatus = Extract<TransactionStatus, `pending_${string}`>;
 
+const DEPOSIT_TRANSACTION_TRANSITIONS = {
+  incomplete: ['pending_user', 'pending_anchor', 'pending_user_transfer_start', 'error', 'expired'],
+  pending_user: ['pending_anchor', 'error', 'expired'],
+  pending_anchor: ['pending_user', 'pending_user_transfer_start', 'error', 'expired'],
+  pending_user_transfer_start: [
+    'pending_user_transfer_complete',
+    'pending_external',
+    'error',
+    'expired',
+  ],
+  pending_user_transfer_complete: ['pending_external', 'pending_stellar', 'error', 'expired'],
+  pending_external: ['pending_stellar', 'error', 'expired'],
+  pending_stellar: ['pending_trust', 'completed', 'error', 'expired'],
+  pending_trust: ['pending_stellar', 'error', 'expired'],
+  completed: [],
+  refunded: [],
+  expired: [],
+  error: [],
+  no_market: [],
+  too_small: [],
+  too_large: [],
+} as const satisfies Record<TransactionStatus, readonly TransactionStatus[]>;
+
+/**
+ * Returns the next statuses supported by the initial deposit lifecycle.
+ * Terminal statuses and SEP-24 states outside this deposit slice return no next states.
+ */
+export function getAllowedNextTransactionStatuses(
+  status: TransactionStatus,
+): readonly TransactionStatus[] {
+  return DEPOSIT_TRANSACTION_TRANSITIONS[status];
+}
+
 const PENDING_TRANSACTION_STATUSES: ReadonlySet<TransactionStatus> = new Set([
   'pending_anchor',
   'pending_user_transfer_start',

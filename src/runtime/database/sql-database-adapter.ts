@@ -503,17 +503,8 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
       return { record: this.mapWebhookRow(inserted), inserted: true };
     }
 
-    const existingPg = await this.requirePostgres().query<Record<string, unknown>>(
-      'SELECT * FROM webhook_events WHERE event_id = $1 LIMIT 1',
-      [input.eventId],
-    );
-
-    if (existingPg.rows[0]) {
-      return { record: this.mapWebhookRow(existingPg.rows[0]), inserted: false };
-    }
-
-    await this.requirePostgres().query(
-      'INSERT INTO webhook_events (id, event_id, provider, payload, status, error_message, processed_at, created_at) VALUES ($1, $2, $3, $4::jsonb, $5, NULL, NULL, $6)',
+    const insertedPg = await this.requirePostgres().query<Record<string, unknown>>(
+      'INSERT INTO webhook_events (id, event_id, provider, payload, status, error_message, processed_at, created_at) VALUES ($1, $2, $3, $4::jsonb, $5, NULL, NULL, $6) ON CONFLICT (event_id) DO NOTHING RETURNING *',
       [
         input.id,
         input.eventId,
@@ -524,17 +515,23 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
       ],
     );
 
-    const insertedPg = await this.requirePostgres().query<Record<string, unknown>>(
-      'SELECT * FROM webhook_events WHERE id = $1 LIMIT 1',
-      [input.id],
-    );
-
-    const row = insertedPg.rows[0];
-    if (!row) {
-      throw new ConfigError('Failed to insert webhook event');
+    const insertedRow = insertedPg.rows[0];
+    if (insertedRow) {
+      return { record: this.mapWebhookRow(insertedRow), inserted: true };
     }
 
-    return { record: this.mapWebhookRow(row), inserted: true };
+    const existingPg = await this.requirePostgres().query<Record<string, unknown>>(
+      'SELECT * FROM webhook_events WHERE event_id = $1 LIMIT 1',
+      [input.eventId],
+    );
+    const row = existingPg.rows[0];
+    if (!row) {
+      throw new ConfigError(
+        'Webhook event conflict occurred but the existing record could not be found',
+      );
+    }
+
+    return { record: this.mapWebhookRow(row), inserted: false };
   }
 
   public async updateWebhookEventStatus(input: {

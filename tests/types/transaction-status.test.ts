@@ -1,4 +1,5 @@
 import {
+  getAllowedNextTransactionStatuses,
   isPendingTransactionStatus,
   isTerminalTransactionStatus,
   TRANSACTION_STATUSES,
@@ -108,6 +109,40 @@ describe('TransactionStatus', () => {
     }
 
     throw new Error('expected status to narrow to PendingTransactionStatus');
+  });
+
+  it('exposes the allowed first-deposit lifecycle transitions', () => {
+    expect(getAllowedNextTransactionStatuses('incomplete')).toEqual([
+      'pending_user',
+      'pending_anchor',
+      'pending_user_transfer_start',
+      'error',
+      'expired',
+    ]);
+    expect(getAllowedNextTransactionStatuses('pending_anchor')).toContain(
+      'pending_user_transfer_start',
+    );
+    expect(getAllowedNextTransactionStatuses('pending_user')).toContain('pending_anchor');
+    expect(getAllowedNextTransactionStatuses('pending_external')).toEqual([
+      'pending_stellar',
+      'error',
+      'expired',
+    ]);
+    expect(getAllowedNextTransactionStatuses('pending_stellar')).toContain('completed');
+    expect(getAllowedNextTransactionStatuses('pending_stellar')).toContain('pending_trust');
+    expect(getAllowedNextTransactionStatuses('pending_trust')).toContain('pending_stellar');
+  });
+
+  it('rejects regressions and transitions out of terminal statuses', () => {
+    expect(getAllowedNextTransactionStatuses('pending_stellar')).not.toContain('pending_external');
+    expect(getAllowedNextTransactionStatuses('completed')).toEqual([]);
+    expect(getAllowedNextTransactionStatuses('expired')).toEqual([]);
+  });
+
+  it('exposes allowed next statuses as a checked union', () => {
+    const allowed: readonly TransactionStatus[] =
+      getAllowedNextTransactionStatuses('pending_stellar');
+    expect(allowed).toContain('completed');
   });
 
   // -- compile-time checks (tsc catches these before tests even run) --

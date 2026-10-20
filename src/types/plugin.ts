@@ -1,4 +1,7 @@
 import { RouteDefinition, SchemaDefinition } from './foundation';
+import type { AnchorInstance } from '../core/factory.ts';
+import type { Transaction } from './transaction.ts';
+import type { TransactionStatus } from './transaction-status.ts';
 
 export interface AnchorPluginContext<
   TConfig = unknown,
@@ -19,8 +22,12 @@ export type Context = AnchorPluginContext;
 export interface AnchorPluginHooks {
   onDepositRequest?: (ctx: Context) => Promise<void>;
   onWithdrawalRequest?: (ctx: Context) => Promise<void>;
-  onSep10Challenge?: (tx: unknown) => Promise<unknown>;
-  onTransactionStatusChange?: (tx: unknown, oldStatus: string, newStatus: string) => Promise<void>;
+  onSep10Challenge?: (tx: Transaction) => Promise<Transaction>;
+  onTransactionStatusChange?: (
+    tx: Transaction,
+    oldStatus: TransactionStatus,
+    newStatus: TransactionStatus,
+  ) => Promise<void>;
 }
 
 export interface AnchorPlugin {
@@ -46,5 +53,5 @@ export interface AnchorPlugin {
   /**
    * Plugin initialization lifecycle
    */
-  init?: (instance: unknown) => Promise<void> | void;
+  init?: (instance: AnchorInstance) => Promise<void> | void;
 }

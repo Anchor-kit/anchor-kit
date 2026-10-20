@@ -1,3 +1,36 @@
+# Anchor-Kit Product Scope and Runtime Decisions
+
+This section is the authoritative current scope for contributors. The design material below is retained as a long-term reference; examples and future-state descriptions in it are not evidence that a feature is implemented.
+
+## Runtime and integration decisions
+
+- **Bun is the supported runtime today.** Bun is required for development and tests, and the SQLite adapter imports `bun:sqlite`. Node.js is not a supported runtime target until that dependency is isolated or replaced and Node compatibility is tested.
+- **Express is the only supported HTTP integration.** Anchor-Kit provides an Express-compatible router; the host application owns the HTTP server lifecycle.
+- **Persistence uses raw SQL.** The built-in adapter supports SQLite for development/tests and PostgreSQL for deployment. No ORM is used.
+- **Custom database, queue, signer, KYC, and rail adapters are not public extension points yet.** Do not document or rely on adapter substitution as a shipped capability.
+
+## Milestones and gates
+
+1. **Foundation and MVP (current):** configuration, core instance lifecycle, Express routes, minimal SEP-10 challenge/token behavior, a minimal SEP-24 interactive deposit, SQL persistence, webhook processing, and in-process background processing. Treat protocol and provider coverage as partial; production readiness is not implied.
+2. **Typed lifecycle and persistence proof:** plugin contracts and the first deposit status graph are typed; required CI connects to PostgreSQL, migrates its disposable database, and verifies adapter persistence and duplicate-delivery behavior.
+3. **Protocol and provider expansion (deferred):** implement only with explicit scope, current official protocol/provider contracts, and maintainer review for financial or concurrency-sensitive behavior.
+
+## Explicitly deferred
+
+- Hono, Fastify, Deno, and Node.js runtime support.
+- SEP-6, SEP-31, and SEP-38 protocol flows, plus complete SEP-24 coverage.
+- Withdrawals.
+- Enterprise signing, live KYC-provider integration, and production provider/rail integrations.
+- Public custom-adapter APIs and ORM-based persistence.
+
+Deferred work must remain labeled planned until the corresponding implementation and acceptance tests land.
+
+## Focused acceptance checks
+
+- `bun test tests/types/transaction-status.test.ts tests/types/plugin.test.ts` — passes; checks the typed deposit transitions and plugin contracts, including compile-time rejection fixtures.
+- `bun test tests/runtime/postgres-adapter.integration.test.ts` — with `DATABASE_URL` pointing at a disposable PostgreSQL database, passes migration, persistence, and concurrent duplicate-delivery assertions. Without the variable the focused suite is skipped; CI sets it and separately fails if PostgreSQL setup or connectivity fails.
+- `bun run typecheck` — passes TypeScript and lint checks.
+
 # **Architecting the Financial Bridge: A Technical Specification for the Anchor-in-a-Box SDK**
 
 ##
