@@ -69,3 +69,8 @@ anchor-kit/
 7.  **Anchor-Kit** validates webhook, updates status to `pending_user_transfer_start`.
 8.  **Job Queue** picks up job, sends Stellar Asset to user.
 9.  **Anchor-Kit** updates status to `completed`.
+
+## SEP-10 Challenge Consumption & Recovery Policy
+
+- **Atomicity**: SEP-10 challenges are strictly one-time credentials. `markAuthChallengeConsumed` uses an atomic SQL query (`UPDATE auth_challenges SET consumed_at = ? WHERE id = ? AND consumed_at IS NULL`) to ensure that under concurrent token exchange requests for the same challenge, at most one consumer successfully marks the challenge consumed and receives an access token. All other concurrent requests receive HTTP 401 (`invalid_challenge`, message `Challenge already used`).
+- **Persistence Failure Recovery**: If the database fails to record the challenge consumption (e.g. storage error during `markAuthChallengeConsumed`), token issuance is aborted immediately and an HTTP 500 (`server_error`) response is returned with no token issued. Because consumption was not persisted in storage, the challenge remains unconsumed, allowing the user/client to safely retry the token exchange request.

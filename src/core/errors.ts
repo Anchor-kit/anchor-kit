@@ -46,6 +46,18 @@ export class ValidationError extends AnchorKitError {
 }
 
 /**
+ * Error raised when a request body exceeds the configured size limit.
+ */
+export class PayloadTooLargeError extends AnchorKitError {
+  public readonly statusCode = 413;
+  public readonly errorCode = 'PAYLOAD_TOO_LARGE';
+
+  constructor(message: string, context?: Record<string, unknown>) {
+    super(message, context);
+  }
+}
+
+/**
  * Error representing a standard SEP protocol error.
  */
 export class SepProtocolError extends AnchorKitError {

@@ -1,12 +1,36 @@
+import type { WatcherTaskRecord } from '@/index.ts';
+import { describe, expect, it } from 'vitest';
+import type { Memo as RootMemo } from '../index';
+import type {
+  AuthChallengeRecord,
+  IdempotencyRecord,
+  InteractiveTransactionRecord,
+  TransactionKind,
+} from '../src/index';
 import {
   AssetSchema,
   DatabaseUrlSchema,
   SecurityConfigSchema,
+  ValidationUtils,
   makeSqliteDbUrlForTests,
   utils,
 } from '../src/index';
-import type { AuthChallengeRecord, InteractiveTransactionRecord, TransactionKind } from '../src/index';
-import { describe, expect, it } from 'vitest';
+
+describe('package root exports', () => {
+  it('exports WatcherTaskRecord for custom database adapters', () => {
+    const record: WatcherTaskRecord = {
+      id: 'task-1',
+      watcherName: 'transaction-watcher',
+      payload: { transactionId: 'tx-1' },
+      status: 'pending',
+      errorMessage: null,
+      processedAt: null,
+      createdAt: new Date(0).toISOString(),
+    };
+
+    expect(record.watcherName).toBe('transaction-watcher');
+  });
+});
 
 describe('Export Verification', () => {
   it('should export TransactionKind at the top level', () => {
@@ -32,6 +56,17 @@ describe('Export Verification', () => {
     expect(typeof SecurityConfigSchema.validate).toBe('function');
   });
 
+  it('should export ValidationUtils at the top level', () => {
+    expect(ValidationUtils).toBeDefined();
+    expect(typeof ValidationUtils.isValidEmail).toBe('function');
+    expect(typeof ValidationUtils.isValidStellarAddress).toBe('function');
+  });
+
+  it('should still be available through utils.ValidationUtils', () => {
+    expect(utils.ValidationUtils).toBeDefined();
+    expect(utils.ValidationUtils).toBe(ValidationUtils);
+  });
+
   it('should still be available through utils.AssetSchema', () => {
     expect(utils.AssetSchema).toBeDefined();
     expect(utils.AssetSchema).toBe(AssetSchema);
@@ -46,6 +81,13 @@ describe('Export Verification', () => {
     expect(makeSqliteDbUrlForTests).toBeDefined();
     expect(typeof makeSqliteDbUrlForTests).toBe('function');
     expect(makeSqliteDbUrlForTests()).toMatch(/^file:/);
+  });
+
+  it('should export Memo at the package root entry point', () => {
+    const memo: RootMemo = { value: 'hello', type: 'text' };
+
+    expect(memo.value).toBe('hello');
+    expect(memo.type).toBe('text');
   });
 
   it('should export StellarUtils at the top level', async () => {
@@ -71,13 +113,28 @@ describe('Export Verification', () => {
       kind: 'deposit',
       assetCode: 'USDC',
       amount: '100',
-      status: 'pending',
+      status: 'pending_anchor',
       createdAt: '2026-07-27T00:00:00.000Z',
       updatedAt: '2026-07-27T00:00:00.000Z',
     };
 
     expect(authChallengeRecord.id).toBe('auth-1');
     expect(interactiveTransactionRecord.kind).toBe('deposit');
+  });
+
+  it('should export IdempotencyRecord for custom database adapters', () => {
+    const record: IdempotencyRecord = {
+      id: 'record-1',
+      scope: 'webhook',
+      idempotencyKey: 'key-1',
+      requestHash: 'hash-1',
+      status: 'completed',
+      statusCode: 200,
+      responseBody: '{}',
+      createdAt: new Date(0).toISOString(),
+    };
+
+    expect(record.idempotencyKey).toBe('key-1');
   });
 });
 
@@ -125,5 +182,52 @@ describe('AssetSchema Validation', () => {
       deposits_enabled: 'yes', // should be boolean
     };
     expect(AssetSchema.isValid(invalidAsset)).toBe(false);
+  });
+
+  // min_amount / max_amount relationship checks
+  it('should reject an asset where min_amount exceeds max_amount', () => {
+    const invalidAsset = {
+      code: 'USDC',
+      issuer: 'GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5',
+      min_amount: 1000,
+      max_amount: 100,
+    };
+    expect(AssetSchema.isValid(invalidAsset)).toBe(false);
+  });
+
+  it('should accept an asset where min_amount equals max_amount', () => {
+    const validAsset = {
+      code: 'USDC',
+      issuer: 'GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5',
+      min_amount: 500,
+      max_amount: 500,
+    };
+    expect(AssetSchema.isValid(validAsset)).toBe(true);
+  });
+
+  it('should accept an asset with only min_amount', () => {
+    const validAsset = {
+      code: 'USDC',
+      issuer: 'GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5',
+      min_amount: 10,
+    };
+    expect(AssetSchema.isValid(validAsset)).toBe(true);
+  });
+
+  it('should accept an asset with only max_amount', () => {
+    const validAsset = {
+      code: 'USDC',
+      issuer: 'GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5',
+      max_amount: 5000,
+    };
+    expect(AssetSchema.isValid(validAsset)).toBe(true);
+  });
+
+  it('should accept an asset with neither min_amount nor max_amount', () => {
+    const validAsset = {
+      code: 'USDC',
+      issuer: 'GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5',
+    };
+    expect(AssetSchema.isValid(validAsset)).toBe(true);
   });
 });

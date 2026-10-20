@@ -1,7 +1,8 @@
 import { RouteDefinition, SchemaDefinition } from './foundation';
-import type { AnchorInstance } from '../core/factory.ts';
-import type { Transaction } from './transaction.ts';
+import type { AnchorKitConfigSnapshot, Asset } from '@/types/config.ts';
 import type { TransactionStatus } from './transaction-status.ts';
+import type { DatabaseAdapter } from '@/runtime/interfaces.ts';
+import type { Transaction } from '@stellar/stellar-sdk';
 
 export interface AnchorPluginContext<
   TConfig = unknown,
@@ -19,12 +20,29 @@ export interface AnchorPluginContext<
 
 export type Context = AnchorPluginContext;
 
+export type DepositRequestBody = Record<string, unknown> & {
+  asset_code: string;
+  amount: string | number;
+};
+
+export interface DepositRequestHookContext extends AnchorPluginContext<
+  AnchorKitConfigSnapshot,
+  DatabaseAdapter,
+  DepositRequestBody,
+  Record<string, never>,
+  Record<string, never>
+> {
+  account: string;
+  asset: Asset;
+}
+
 export interface AnchorPluginHooks {
-  onDepositRequest?: (ctx: Context) => Promise<void>;
+  /** Throw to reject with HTTP 400 `deposit_rejected` before persistence. */
+  onDepositRequest?: (ctx: DepositRequestHookContext) => Promise<void>;
   onWithdrawalRequest?: (ctx: Context) => Promise<void>;
   onSep10Challenge?: (tx: Transaction) => Promise<Transaction>;
   onTransactionStatusChange?: (
-    tx: Transaction,
+    tx: unknown,
     oldStatus: TransactionStatus,
     newStatus: TransactionStatus,
   ) => Promise<void>;

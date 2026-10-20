@@ -9,7 +9,6 @@
     "declarationMap": false,
     "stripInternal": true,
     "outDir": "./dist",
-    "baseUrl": ".",
     "paths": {
       "@/*": ["./src/*"]
     },

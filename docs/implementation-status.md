@@ -2,7 +2,9 @@
 
 The current product scope and runtime decisions are defined in [`anchor-kit-trd.md`](../anchor-kit-trd.md). This document records implementation status; planning material elsewhere in the repository does not imply that planned behavior is shipped.
 
-## Implemented Now (Partial MVP)
+**For a comprehensive configuration reference with implementation status and usage guidance, see [Configuration Reference](configuration-reference.md).**
+
+## Implemented Now (Foundation)
 
 - Factory and core instance lifecycle: `createAnchor`, `AnchorInstance`, and plugin registration/initialization.
 - Configuration validation and public error/type surfaces.
@@ -11,9 +13,19 @@ The current product scope and runtime decisions are defined in [`anchor-kit-trd.
 - Webhook signature verification, persistence/deduplication, in-process queue, and watcher lifecycle.
 - Utility layer: validation, decimal math, cryptographic helpers, idempotency utilities, and Stellar helpers.
 
-These are partial implementations, not complete SEP compliance or production-ready provider integrations. The SQLite adapter's `bun:sqlite` dependency makes Bun the supported runtime.
+## Implemented Now (Runtime)
 
-## Planned (Not Yet Implemented)
+- SQL persistence through the `DatabaseAdapter` interface, with SQLite support for local development and tests and PostgreSQL support through the configured SQL client.
+- Express HTTP adapter for health, info, authentication, transaction, and webhook routes, including request limits and rate limiting.
+- Webhook processing with optional signature verification, event deduplication, persistence, callback dispatch, and failure status updates.
+- In-memory queue adapter for bounded background work and graceful shutdown.
+- Transaction watcher lifecycle for polling pending transactions, persisting watcher tasks, and dispatching work through the queue.
+
+## Planned Per Unified Spec (Not Yet Implemented)
+
+- Protocol modules: SEP-10, SEP-12, SEP-6, SEP-24 runtime flows, SEP-31, SEP-38.
+- Adapter implementations: rail adapters, signer adapters, KYC provider adapters, and rate adapters.
+- Protocol transaction state-machine runtime and provider integrations.
 
 - Full SEP-6, SEP-24, SEP-31, and SEP-38 protocol flows; withdrawals.
 - Node.js, Hono, Fastify, and Deno support.
@@ -21,11 +33,23 @@ These are partial implementations, not complete SEP compliance or production-rea
 - Enterprise signing, live KYC providers, and production rail/provider integrations.
 - A runtime transaction state machine beyond the exported initial deposit transition contract.
 
-## Milestone Gates
+- Runtime protocol engines and provider integrations listed above remain deferred while foundation APIs and typing guarantees stabilize.
+- Empty module directories under `src/core/sep6`, `src/core/sep24`, and `src/core/sep31` are placeholders for the deferred protocol flows.
+- `src/services` contains the implemented queue and watcher orchestration; future provider-specific services remain deferred.
 
-| Gate | Evidence | Focused command | Expected result |
-| --- | --- | --- | --- |
-| Public scope is tracked and planned work is labeled | This document and [`anchor-kit-trd.md`](../anchor-kit-trd.md) | Review those tracked files in a fresh clone | Current runtime decisions, milestones, and deferred backlog are explicit |
-| Plugin hooks and first-deposit transitions are typed | Compile-time fixtures and status graph tests | `bun test tests/types/transaction-status.test.ts tests/types/plugin.test.ts` | Tests pass; invalid fields/statuses are compile-time errors |
-| PostgreSQL adapter is exercised in CI | Required PostgreSQL service and integration test | `bun test tests/runtime/postgres-adapter.integration.test.ts` | Connects, migrates, and passes persistence/concurrent deduplication assertions |
-| Type safety/lint gate | Repository typecheck script | `bun run typecheck` | TypeScript and ESLint pass |
+## Drift Matrix
+
+| Area                         | Status          | Classification | Source Expectation                                                  | Current Code State                                                                      | Action Taken                                                                              |
+| ---------------------------- | --------------- | -------------- | ------------------------------------------------------------------- | --------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------- |
+| Root SDK API                 | Partial         | Digression     | Unified docs center API on `createAnchor` factory                   | Root package entrypoint exported only types before cleanup                              | Exported `createAnchor` and `AnchorInstance` from root entrypoints                        |
+| Error naming                 | Mismatch        | Digression     | Foundation error is `ConfigError` in implementation                 | Tests still imported `ConfigurationError`                                               | Removed stale `ConfigurationError` references and aligned tests to `ConfigError`          |
+| Transaction error typing     | Conflicting     | Duplicate      | SEP-24 `TransactionNotFoundError` discriminator type is `not_found` | Duplicate `TransactionNotFoundError` existed in `foundation.ts` with incompatible shape | Removed conflicting foundation duplicate; SEP-24 type is authoritative                    |
+| Plugin/foundation interfaces | Weakly typed    | Digression     | Unified docs emphasize strong type safety                           | Multiple interfaces used explicit `any`                                                 | Replaced `any` with `unknown`/typed records and generic plugin context                    |
+| Type-safety enforcement      | Incomplete      | Gap            | Strong type guarantees and compile-time safety                      | `no-explicit-any` was warning only; `typecheck` did not include lint gate               | `no-explicit-any` set to error and `typecheck` now runs `tsc` + `eslint --max-warnings 0` |
+| Docs vs implementation       | Overstated      | Digression     | Unified docs include planned protocol/adapter architecture          | README/Architecture implied protocol modules already available                          | Updated docs to separate implemented foundation/runtime from planned modules              |
+| Placeholder modules          | Expected future | Gap            | Unified docs define future protocol/service modules                 | Placeholder directories existed without guidance                                        | Added explicit stub READMEs describing planned status                                     |
+
+## Notes on Supporting Docs
+
+- `anchor-kit-unified.md` is treated as the canonical technical target.
+- `anchor-kit-trd.md`, `anchor-kit SDK Plan.md`, and `anchor-kit-plan.md` remain useful design/roadmap references, but may describe features ahead of current implementation.

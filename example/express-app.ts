@@ -9,6 +9,14 @@ export interface ExampleApp {
   shutdown: () => Promise<void>;
 }
 
+export function isSqliteDatabaseUrl(databaseUrl: string): boolean {
+  if (databaseUrl.startsWith('sqlite:') || databaseUrl.startsWith('file:')) {
+    return true;
+  }
+
+  return !/^[a-z][a-z\d+.-]*:/i.test(databaseUrl);
+}
+
 function getChallengeExpirationSeconds(): number {
   const rawValue = process.env.CHALLENGE_EXPIRATION_SECONDS;
 
@@ -26,6 +34,49 @@ function getChallengeExpirationSeconds(): number {
 
 function getWatchersEnabled(): boolean {
   return process.env.WATCHERS_ENABLED !== 'false';
+}
+
+function getMaxBodyBytes(): number | undefined {
+  const rawValue = process.env.MAX_BODY_BYTES;
+
+  if (!rawValue) {
+    return undefined;
+  }
+
+  const parsedValue = Number(rawValue);
+  if (!Number.isFinite(parsedValue) || parsedValue <= 0) {
+    return undefined;
+  }
+
+  return parsedValue;
+}
+
+function getAuthTokenLifetimeSeconds(): number | undefined {
+  const rawValue = process.env.AUTH_TOKEN_LIFETIME_SECONDS;
+
+  if (!rawValue) {
+    return undefined;
+  }
+
+  const parsedValue = Number(rawValue);
+  if (!Number.isFinite(parsedValue) || parsedValue <= 0) {
+    return undefined;
+  }
+
+  return parsedValue;
+}
+
+export function parsePort(rawValue: string | undefined): number {
+  if (rawValue === undefined || rawValue === '') {
+    return 3000;
+  }
+
+  const port = Number(rawValue);
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    throw new Error('PORT must be an integer between 1 and 65535');
+  }
+
+  return port;
 }
 
 export async function createExampleApp(): Promise<ExampleApp> {
@@ -46,6 +97,7 @@ export async function createExampleApp(): Promise<ExampleApp> {
       webhookSecret: process.env.WEBHOOK_SECRET,
       verifyWebhookSignatures: process.env.WEBHOOK_SECRET ? true : false,
       challengeExpirationSeconds: getChallengeExpirationSeconds(),
+      authTokenLifetimeSeconds: getAuthTokenLifetimeSeconds(),
     },
     assets: {
       assets: [
@@ -59,8 +111,11 @@ export async function createExampleApp(): Promise<ExampleApp> {
     },
     framework: {
       database: {
-        provider: databaseUrl.startsWith('file:') ? 'sqlite' : 'postgres',
+        provider: isSqliteDatabaseUrl(databaseUrl) ? 'sqlite' : 'postgres',
         url: databaseUrl,
+      },
+      http: {
+        maxBodyBytes: getMaxBodyBytes(),
       },
       queue: {
         backend: 'memory',
@@ -87,7 +142,7 @@ export async function createExampleApp(): Promise<ExampleApp> {
   const app = express();
   app.use(
     express.json({
-      limit: '1mb',
+      limit: getMaxBodyBytes() ?? '1mb',
       verify: (req, _res, buf) => {
         (req as { rawBody?: string }).rawBody = buf.toString('utf8');
       },
@@ -107,11 +162,7 @@ export async function createExampleApp(): Promise<ExampleApp> {
 }
 
 if (import.meta.main) {
-  const portRaw = process.env.PORT ?? '3000';
-  const port = Number(portRaw);
-  if (!Number.isFinite(port) || port <= 0) {
-    throw new Error('PORT must be a positive number');
-  }
+  const port = parsePort(process.env.PORT);
 
   const { app, shutdown } = await createExampleApp();
   const server = app.listen(port, () => {

@@ -1,4 +1,4 @@
-import { expect, test, describe } from 'bun:test';
+import { expect, test, describe } from 'vitest';
 import { IdempotencyUtils } from '../../src/utils/idempotency';
 
 type IdempotencyHeaderValue = string | string[] | null | undefined;

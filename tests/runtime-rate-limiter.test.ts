@@ -1,4 +1,5 @@
 import { InMemoryRateLimiter } from '@/runtime/http/rate-limiter.ts';
+import { extractClientIdentifier } from '@/runtime/http/client-identifier.ts';
 import { describe, expect, it } from 'vitest';
 
 describe('InMemoryRateLimiter', () => {
@@ -48,5 +49,120 @@ describe('InMemoryRateLimiter', () => {
     expect(firstKey.allowed).toBe(true);
     expect(firstKeyBlocked.allowed).toBe(false);
     expect(secondKey.allowed).toBe(true);
+  });
+
+  it('reports limit, remaining requests, and reset time', () => {
+    const limiter = new InMemoryRateLimiter({ now: () => 1000 });
+    const rule = { windowMs: 60000, max: 2 };
+
+    expect(limiter.hit('client', rule)).toMatchObject({
+      allowed: true,
+      limit: 2,
+      remaining: 1,
+      resetSeconds: 60,
+    });
+    expect(limiter.hit('client', rule)).toMatchObject({
+      allowed: true,
+      limit: 2,
+      remaining: 0,
+      resetSeconds: 60,
+    });
+    expect(limiter.hit('client', rule)).toMatchObject({
+      allowed: false,
+      limit: 2,
+      remaining: 0,
+      resetSeconds: 60,
+    });
+  });
+
+  it('bounds active buckets without evicting active keys', () => {
+    let now = 1000;
+    const limiter = new InMemoryRateLimiter({ maxBuckets: 2, now: () => now });
+    const rule = { windowMs: 10000, max: 1 };
+
+    expect(limiter.hit('first', rule).allowed).toBe(true);
+    expect(limiter.hit('second', rule).allowed).toBe(true);
+    expect(limiter.hit('first', rule).allowed).toBe(false);
+    expect(limiter.hit('third', rule)).toMatchObject({ allowed: false, remaining: 0 });
+
+    now += 10001;
+    expect(limiter.hit('third', rule).allowed).toBe(true);
+    expect(limiter.hit('first', rule).allowed).toBe(true);
+  });
+});
+
+describe('extractClientIdentifier', () => {
+  it('uses the left-most forwarded address from string headers when trusted', () => {
+    const clientId = extractClientIdentifier('203.0.113.10', '10.0.0.1, 10.0.0.2', true);
+
+    expect(clientId).toBe('10.0.0.1');
+  });
+
+  it('uses the first forwarded address from array headers when trusted', () => {
+    const clientId = extractClientIdentifier(
+      '203.0.113.10',
+      ['10.0.0.5, 10.0.0.6', '10.0.0.7'],
+      true,
+    );
+
+    expect(clientId).toBe('10.0.0.5');
+  });
+
+  it('falls back to the socket address when forwarded headers are absent or untrusted', () => {
+    expect(extractClientIdentifier('203.0.113.10', undefined, true)).toBe('203.0.113.10');
+    expect(extractClientIdentifier('203.0.113.10', ['10.0.0.1'], false)).toBe('203.0.113.10');
+  });
+});
+
+describe('extractClientIdentifier address normalization', () => {
+  it('normalizes IPv4 and collapses an IPv4 port suffix', () => {
+    expect(extractClientIdentifier('203.0.113.10', '198.51.100.7', true)).toBe('198.51.100.7');
+    expect(extractClientIdentifier('203.0.113.10', '198.51.100.7:8443', true)).toBe('198.51.100.7');
+    // The left-most entry is still selected before normalization.
+    expect(extractClientIdentifier('203.0.113.10', '198.51.100.7:8443, 10.0.0.1', true)).toBe(
+      '198.51.100.7',
+    );
+  });
+
+  it('maps bracketed IPv6 and IPv6-with-port to the same identity', () => {
+    expect(extractClientIdentifier('203.0.113.10', '[2001:db8::1]', true)).toBe('2001:db8::1');
+    expect(extractClientIdentifier('203.0.113.10', '[2001:db8::1]:443', true)).toBe('2001:db8::1');
+    expect(extractClientIdentifier('203.0.113.10', '2001:db8::1', true)).toBe('2001:db8::1');
+  });
+
+  it('canonicalizes equivalent IPv6 forms to a single key', () => {
+    const forms = [
+      '[2001:DB8::1]:8443',
+      '[2001:0db8:0000:0000:0000:0000:0000:0001]',
+      '2001:db8:0:0:0:0:0:1',
+    ];
+
+    const identifiers = forms.map((form) => extractClientIdentifier('203.0.113.10', form, true));
+
+    expect(new Set(identifiers).size).toBe(1);
+    expect(identifiers[0]).toBe('2001:db8::1');
+  });
+
+  it('falls back to the socket address for malformed forwarded values', () => {
+    const malformed = [
+      'not-an-ip',
+      'localhost',
+      '[2001:db8::1',
+      '[2001:db8::1]evil',
+      '198.51.100.7:notaport',
+      '198.51.100.7:0',
+      '198.51.100.7:99999',
+      '999.1.1.1',
+      '',
+    ];
+
+    for (const value of malformed) {
+      expect(extractClientIdentifier('203.0.113.10', value, true)).toBe('203.0.113.10');
+    }
+  });
+
+  it('does not treat malformed forwarded values as a trusted identity', () => {
+    expect(extractClientIdentifier(undefined, 'not-an-ip', true)).toBe('unknown');
+    expect(extractClientIdentifier('203.0.113.10', 'not-an-ip', false)).toBe('203.0.113.10');
   });
 });

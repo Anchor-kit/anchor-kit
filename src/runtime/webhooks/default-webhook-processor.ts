@@ -1,11 +1,15 @@
-import { createHmac, timingSafeEqual, randomUUID } from 'node:crypto';
-import type { AnchorKitConfig } from '@/types/config.ts';
 import type { DatabaseAdapter, WebhookProcessor } from '@/runtime/interfaces.ts';
+import type { AnchorKitConfigSnapshot } from '@/types/config.ts';
+import { createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
 
 interface DefaultWebhookProcessorOptions {
-  config: AnchorKitConfig;
+  config: AnchorKitConfigSnapshot;
   database: DatabaseAdapter;
 }
+
+const DEFAULT_CALLBACK_TIMEOUT_MS = 30_000;
+const CALLBACK_FAILURE_MESSAGE = 'Webhook callback failed';
+const CALLBACK_TIMEOUT_MESSAGE = 'Webhook callback timed out';
 
 function toComparableBuffer(value: string): Buffer {
   return Buffer.from(value, 'utf8');
@@ -23,7 +27,7 @@ function safeEquals(left: string, right: string): boolean {
 }
 
 export class DefaultWebhookProcessor implements WebhookProcessor {
-  private readonly config: AnchorKitConfig;
+  private readonly config: AnchorKitConfigSnapshot;
   private readonly database: DatabaseAdapter;
 
   constructor(options: DefaultWebhookProcessorOptions) {
@@ -37,10 +41,15 @@ export class DefaultWebhookProcessor implements WebhookProcessor {
     payload: Record<string, unknown>;
     rawBody: string | Buffer | Uint8Array;
     signature?: string;
-  }): Promise<{ duplicate: boolean; eventId: string }> {
+  }): Promise<{
+    duplicate: boolean;
+    eventId: string;
+    provider: string;
+    status?: 'pending' | 'processed' | 'failed';
+  }> {
     this.verifySignatureIfEnabled(input);
 
-    const insertion = await this.database.insertWebhookEvent({
+    const insertion = await this.database.insertOrGetWebhookEvent({
       id: randomUUID(),
       eventId: input.eventId,
       provider: input.provider,
@@ -48,39 +57,69 @@ export class DefaultWebhookProcessor implements WebhookProcessor {
     });
 
     if (!insertion.inserted) {
-      return { duplicate: true, eventId: insertion.record.eventId };
+      return {
+        duplicate: true,
+        eventId: insertion.record.eventId,
+        provider: insertion.record.provider,
+        status: insertion.record.status,
+      };
     }
 
     try {
-      await this.config.webhooks?.onEvent?.(
-        {
-          id: insertion.record.id,
-          eventId: insertion.record.eventId,
-          provider: insertion.record.provider,
-          payload: insertion.record.payload,
-        },
-        {
-          receivedAt: insertion.record.createdAt,
-          signature: input.signature,
-          rawBody: input.rawBody,
-        },
-      );
+      const callback = this.config.webhooks?.onEvent;
+      if (callback) {
+        let timeout: ReturnType<typeof setTimeout> | undefined;
+        try {
+          await Promise.race([
+            Promise.resolve().then(() =>
+              callback(
+                {
+                  id: insertion.record.id,
+                  eventId: insertion.record.eventId,
+                  provider: insertion.record.provider,
+                  payload: insertion.record.payload,
+                },
+                {
+                  receivedAt: insertion.record.createdAt,
+                  signature: input.signature,
+                  rawBody: input.rawBody,
+                },
+              ),
+            ),
+            new Promise<never>((_, reject) => {
+              timeout = setTimeout(
+                () => reject(new Error(CALLBACK_TIMEOUT_MESSAGE)),
+                this.config.webhooks?.callbackTimeoutMs ?? DEFAULT_CALLBACK_TIMEOUT_MS,
+              );
+            }),
+          ]);
+        } finally {
+          if (timeout) clearTimeout(timeout);
+        }
+      }
 
       await this.database.updateWebhookEventStatus({
         id: insertion.record.id,
         status: 'processed',
       });
     } catch (error) {
-      const message = error instanceof Error ? error.message : 'Unknown webhook callback error';
+      const message =
+        error instanceof Error && error.message === CALLBACK_TIMEOUT_MESSAGE
+          ? CALLBACK_TIMEOUT_MESSAGE
+          : CALLBACK_FAILURE_MESSAGE;
       await this.database.updateWebhookEventStatus({
         id: insertion.record.id,
         status: 'failed',
         errorMessage: message,
       });
-      throw error;
+      throw new Error('Webhook processing failed', { cause: error });
     }
 
-    return { duplicate: false, eventId: insertion.record.eventId };
+    return {
+      duplicate: false,
+      eventId: insertion.record.eventId,
+      provider: insertion.record.provider,
+    };
   }
 
   private verifySignatureIfEnabled(input: {
@@ -106,8 +145,10 @@ export class DefaultWebhookProcessor implements WebhookProcessor {
     }
 
     const expected = createHmac('sha256', webhookSecret).update(input.rawBody).digest('hex');
+    const normalizedSignature = input.signature.toLowerCase();
+    const normalizedExpected = expected.toLowerCase();
 
-    if (!safeEquals(expected, input.signature)) {
+    if (!safeEquals(normalizedExpected, normalizedSignature)) {
       throw new Error('Invalid webhook signature');
     }
   }
