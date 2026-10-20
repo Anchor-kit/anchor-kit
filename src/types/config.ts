@@ -112,8 +112,8 @@ export interface SecurityConfig {
   interactiveJwtSecret: string;
 
   /**
-   * Distribution account secret key
-   * Used to sign and submit Stellar transactions for asset distribution
+   * Distribution account secret key for constructing a LocalKeypairSigner.
+   * Keep this value private; the SDK does not log it or submit transactions automatically.
    * @required
    */
   distributionAccountSecret: string;

@@ -110,26 +110,46 @@ function configureSqliteConnection(database: SqliteLike, path: string): void {
   database.exec(`PRAGMA journal_mode = ${SQLITE_JOURNAL_MODE};`);
 }
 
-function parseJsonObject(value: string): Record<string, unknown> {
-  let parsed: unknown;
+function parseJsonObject(value: unknown, parseSerializedText: boolean): Record<string, unknown> {
+  let parsed = value;
 
-  try {
-    parsed = JSON.parse(value);
-  } catch (error) {
-    throw new MalformedPersistedDataError(
-      `Malformed persisted JSON payload: ${error instanceof Error ? error.message : String(error)}`,
-      { value: value.slice(0, 200) },
-    );
+  if (parseSerializedText && typeof value === 'string') {
+    try {
+      parsed = JSON.parse(value);
+    } catch (error) {
+      throw new MalformedPersistedDataError(
+        `Malformed persisted JSON payload: ${error instanceof Error ? error.message : String(error)}`,
+        { value: value.slice(0, 200) },
+      );
+    }
   }
 
-  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+  if (
+    !parsed ||
+    typeof parsed !== 'object' ||
+    Array.isArray(parsed) ||
+    (Object.getPrototypeOf(parsed) !== Object.prototype && Object.getPrototypeOf(parsed) !== null)
+  ) {
     throw new MalformedPersistedDataError(
       'Persisted JSON payload must decode to a plain object; arrays and primitive values are not allowed.',
-      { value: value.slice(0, 200) },
+      { valueType: Array.isArray(parsed) ? 'array' : typeof parsed },
     );
   }
 
   return parsed as Record<string, unknown>;
+}
+
+type PersistedTaskStatus = 'pending' | 'processed' | 'failed';
+
+function parsePersistedTaskStatus(
+  value: unknown,
+  recordType: 'webhook event' | 'watcher task',
+): PersistedTaskStatus {
+  if (value === 'pending' || value === 'processed' || value === 'failed') {
+    return value;
+  }
+
+  throw new MalformedPersistedDataError(`Invalid persisted ${recordType} status.`);
 }
 
 export class SqlDatabaseAdapter implements DatabaseAdapter {
@@ -1136,14 +1156,8 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
   }
 
   private mapWebhookRow(row: Record<string, unknown>): WebhookEventRecord {
-    const payloadValue = row.payload;
-    const payload =
-      typeof payloadValue === 'string'
-        ? parseJsonObject(payloadValue)
-        : ((payloadValue as Record<string, unknown>) ?? {});
-
-    const statusRaw = String(row.status);
-    const status = statusRaw === 'processed' || statusRaw === 'failed' ? statusRaw : 'pending';
+    const payload = parseJsonObject(row.payload, this.provider === 'sqlite');
+    const status = parsePersistedTaskStatus(row.status, 'webhook event');
 
     return {
       id: String(row.id),
@@ -1158,14 +1172,8 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
   }
 
   private mapWatcherRow(row: Record<string, unknown>): WatcherTaskRecord {
-    const payloadValue = row.payload;
-    const payload =
-      typeof payloadValue === 'string'
-        ? parseJsonObject(payloadValue)
-        : ((payloadValue as Record<string, unknown>) ?? {});
-
-    const statusRaw = String(row.status);
-    const status = statusRaw === 'processed' || statusRaw === 'failed' ? statusRaw : 'pending';
+    const payload = parseJsonObject(row.payload, this.provider === 'sqlite');
+    const status = parsePersistedTaskStatus(row.status, 'watcher task');
 
     return {
       id: String(row.id),

@@ -130,7 +130,7 @@ security: {
 | ---------------------------- | --------- | ------- | -------------- | ----------------------------------------------------------------------------------------------------------- |
 | `sep10SigningKey`            | `string`  | —       | ✅ Required    | Private key (hex or base64) used to sign SEP-10 authentication challenges                                   |
 | `interactiveJwtSecret`       | `string`  | —       | ✅ Required    | Secret used to sign and verify SEP-24 interactive flow bearer tokens                                        |
-| `distributionAccountSecret`  | `string`  | —       | ✅ Required    | Private key for the Stellar distribution account; used to sign asset distribution transactions              |
+| `distributionAccountSecret`  | `string`  | —       | ✅ Required    | Private key for constructing `LocalKeypairSigner`; never log or expose it. The SDK does not submit transactions automatically |
 | `webhookSecret`              | `string`  | —       | ✅ Optional    | HMAC-SHA256 secret for webhook signature verification; required if `verifyWebhookSignatures` is true        |
 | `verifyWebhookSignatures`    | `boolean` | `true`  | ✅ Implemented | Enable/disable webhook signature verification via `x-anchor-signature` header                               |
 | `challengeExpirationSeconds` | `number`  | `300`   | ✅ Implemented | SEP-10 challenge expiry window (5 minutes default)                                                          |

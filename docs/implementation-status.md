@@ -23,7 +23,7 @@ This file tracks where the codebase currently aligns or diverges from the canoni
 ## Planned Per Unified Spec (Not Yet Implemented)
 
 - Protocol modules: SEP-10, SEP-12, SEP-6, SEP-24 runtime flows, SEP-31, SEP-38.
-- Adapter implementations: rail adapters, signer adapters, KYC provider adapters, and rate adapters.
+- Adapter implementations: rail adapters, remote signer adapters, KYC provider adapters, and rate adapters. A local Stellar Keypair signer is implemented.
 - Protocol transaction state-machine runtime and provider integrations.
 
 ## Intentionally Deferred

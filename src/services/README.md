@@ -1,5 +1,7 @@
-# Planned Services Stub
+# Services
 
-This directory is reserved for runtime orchestration services (watchers, webhook processors, queues, etc.).
+`LocalKeypairSigner` implements the `StellarTransactionSigner` boundary for signing Stellar
+transaction XDR with a local secret seed. It exposes only a signing method; the keypair is kept
+private, and transaction submission remains the application's responsibility.
 
-No service implementations are shipped yet.
+Other provider and runtime orchestration services remain planned.
