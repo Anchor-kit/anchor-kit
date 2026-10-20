@@ -97,10 +97,23 @@ export interface PluginRouteContext {
   database: DatabaseAdapter;
 }
 
+export interface SchemaMigrationContext {
+  dialect: 'postgres' | 'sqlite';
+  execute(sql: string): Promise<void>;
+  hasColumn(table: string, column: string): Promise<boolean>;
+}
+
+export interface SchemaMigration {
+  /** Stable migration name. Once applied, a migration must not be renamed or edited. */
+  name: string;
+  up(context: SchemaMigrationContext): Promise<void> | void;
+}
+
 /**
  * SchemaDefinition - Defines database schema extensions for a plugin.
  */
 export interface SchemaDefinition {
-  name: string;
-  tables: unknown[];
+  name?: string;
+  migrations?: SchemaMigration[];
+  tables?: unknown[];
 }

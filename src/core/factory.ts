@@ -18,6 +18,7 @@ import { InMemoryQueueAdapter } from '@/runtime/queue/in-memory-queue.ts';
 import { TransactionWatcher } from '@/runtime/watchers/transaction-watcher.ts';
 import { DefaultWebhookProcessor } from '@/runtime/webhooks/default-webhook-processor.ts';
 import { AnchorKitConfig } from '@/types/config.ts';
+import type { SchemaMigration } from '@/types/foundation.ts';
 import type { AnchorPlugin, AnchorPluginHooks } from '@/types/plugin.ts';
 
 /**
@@ -94,7 +95,11 @@ export class AnchorInstance {
         }
 
         const queueConcurrency = frameworkConfig.queue?.concurrency ?? 1;
-        this.queue = new InMemoryQueueAdapter({ concurrency: queueConcurrency });
+        this.queue = new InMemoryQueueAdapter({
+          concurrency: queueConcurrency,
+          maxPendingJobs: frameworkConfig.queue?.maxPendingJobs,
+          onError: frameworkConfig.queue?.onError,
+        });
 
         this.webhookProcessor = new DefaultWebhookProcessor({
           config: this.config.getConfig(),
@@ -236,7 +241,17 @@ export class AnchorInstance {
   }
 
   protected createDatabaseAdapter(): DatabaseAdapter {
-    return createSqlDatabaseAdapter(this.config.get('framework').database);
+    const migrations: SchemaMigration[] = [];
+    for (const plugin of this.plugins.values()) {
+      for (const migration of plugin.schema?.migrations ?? []) {
+        migrations.push({
+          ...migration,
+          name: `plugin:${encodeURIComponent(plugin.id)}:${encodeURIComponent(migration.name)}`,
+        });
+      }
+    }
+
+    return createSqlDatabaseAdapter(this.config.get('framework').database, migrations);
   }
 
   /**

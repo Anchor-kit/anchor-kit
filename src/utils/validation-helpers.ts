@@ -125,6 +125,17 @@ function validateFrameworkNumbers(framework: AnchorKitConfig['framework']): bool
     throw new Error('framework.queue.concurrency must be a finite integer >= 1');
   }
 
+  if (
+    framework.queue?.maxPendingJobs !== undefined &&
+    !isPositiveSafeInteger(framework.queue.maxPendingJobs)
+  ) {
+    throw new Error('framework.queue.maxPendingJobs must be a positive safe integer');
+  }
+
+  if (framework.queue?.onError !== undefined && typeof framework.queue.onError !== 'function') {
+    throw new Error('framework.queue.onError must be a function');
+  }
+
   const watchersEnabled = framework.watchers?.enabled;
   if (watchersEnabled !== undefined && typeof watchersEnabled !== 'boolean') {
     throw new Error('framework.watchers.enabled must be a boolean');

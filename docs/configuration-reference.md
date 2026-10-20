@@ -288,15 +288,19 @@ framework: {
   queue?: {
     backend: 'memory',           // currently only 'memory' supported
     concurrency?: number,        // optional, defaults to 1
+    maxPendingJobs?: number,     // optional, defaults to unlimited
+    onError?: (job, error) => void | Promise<void>,
   },
   // ...
 }
 ```
 
-| Field               | Type       | Default    | Status         | Notes                                                                                  |
-| ------------------- | ---------- | ---------- | -------------- | -------------------------------------------------------------------------------------- |
-| `queue.backend`     | `'memory'` | `'memory'` | ✅ Implemented | In-process task queue; retains at most 10,000 active task buckets                      |
-| `queue.concurrency` | `number`   | `1`        | ✅ Implemented | Number of concurrent background workers; scales up to handle webhook and watcher loads |
+| Field                  | Type       | Default    | Status         | Notes                                                                                                                                                      |
+| ---------------------- | ---------- | ---------- | -------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `queue.backend`        | `'memory'` | `'memory'` | ✅ Implemented | In-process task queue; retains at most 10,000 active task buckets                                                                                          |
+| `queue.concurrency`    | `number`   | `1`        | ✅ Implemented | Number of concurrent background workers; scales up to handle webhook and watcher loads                                                                     |
+| `queue.maxPendingJobs` | `number`   | unlimited  | ✅ Implemented | Maximum waiting jobs; running jobs do not count toward the limit. Must be a positive safe integer.                                                         |
+| `queue.onError`        | function   | —          | ✅ Implemented | Called with the failed job and error when a worker throws. Without a handler, or if the handler throws, the queue logs the error and continues processing. |
 
 **Example:**
 
@@ -305,10 +309,14 @@ framework: {
   queue: {
     backend: 'memory',
     concurrency: 5,
+    maxPendingJobs: 100,
+    onError: (job, error) => logger.error({ job, error }, 'Background job failed'),
   },
   // ...
 }
 ```
+
+Focused check: `bun test tests/core/factory-background-startup.test.ts`. It must pass the public-factory assertions that enforce the configured pending limit and invoke `onError` after a worker failure.
 
 ---
 

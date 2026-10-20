@@ -15,24 +15,27 @@ This file tracks where the codebase currently aligns or diverges from the canoni
 ## Implemented Now (Runtime)
 
 - SQL persistence through the `DatabaseAdapter` interface, with SQLite support for local development and tests and PostgreSQL support through the configured SQL client.
-- Express HTTP adapter for health, info, authentication, transaction, and webhook routes, including request limits and rate limiting.
+- HTTP foundation routes for health/info, authentication challenge/token, interactive-deposit requests, transaction lookup, and webhook intake, including request limits and rate limiting. These SDK-specific handlers do not by themselves establish complete SEP wire-protocol conformance.
 - Webhook processing with optional signature verification, event deduplication, persistence, callback dispatch, and failure status updates.
 - In-memory queue adapter for bounded background work and graceful shutdown.
 - Transaction watcher lifecycle for polling pending transactions, persisting watcher tasks, and dispatching work through the queue.
+- Plugin route registration and active deposit-request, SEP-10 challenge, and transaction-status hooks. The withdrawal-request hook is typed but is not currently invoked.
 
-## Planned Per Unified Spec (Not Yet Implemented)
+## Protocol Conformance (Not Yet Implemented)
 
-- Protocol modules: SEP-10, SEP-12, SEP-6, SEP-24 runtime flows, SEP-31, SEP-38.
+- Complete protocol engines and conformance: SEP-6, SEP-12, SEP-24 deposit/withdrawal flows, SEP-31, and SEP-38. Existing HTTP routes and protocol-related types are partial foundation support, not complete protocol implementations.
 - Adapter implementations: rail adapters, signer adapters, KYC provider adapters, and rate adapters.
-- Protocol transaction state-machine runtime and provider integrations.
+- Provider integrations and protocol transaction state machines.
 
 ## Intentionally Deferred
 
 - Runtime protocol engines and provider integrations listed above remain deferred while foundation APIs and typing guarantees stabilize.
-- Empty module directories under `src/core/sep6`, `src/core/sep24`, and `src/core/sep31` are placeholders for the deferred protocol flows.
-- `src/services` contains the implemented queue and watcher orchestration; future provider-specific services remain deferred.
+- Directories under `src/core/sep6`, `src/core/sep24`, and `src/core/sep31` are reserved for future protocol engines; their presence does not indicate runtime conformance.
+- Queue, watcher, and webhook orchestration already runs under `src/runtime`; `src/services` is reserved for future higher-level and provider-specific services.
 
 ## Drift Matrix
+
+Focused documentation check: `bun test tests/readme-protocol-status.test.ts`. It must pass the assertions distinguishing the shared HTTP/plugin foundation from complete SEP protocol engines.
 
 | Area                         | Status          | Classification | Source Expectation                                                  | Current Code State                                                                      | Action Taken                                                                              |
 | ---------------------------- | --------------- | -------------- | ------------------------------------------------------------------- | --------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------- |

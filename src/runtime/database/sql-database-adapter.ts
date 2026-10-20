@@ -8,11 +8,12 @@ import type {
   WebhookEventRecord,
 } from '@/runtime/interfaces.ts';
 import type { FrameworkConfig } from '@/types/config.ts';
+import type { SchemaMigration, SchemaMigrationContext } from '@/types/foundation.ts';
 import { isTransactionStatus, type TransactionStatus } from '@/types/transaction-status.ts';
-import { Database } from 'bun:sqlite';
+import type { Database } from 'bun:sqlite';
 import { randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 
 type SqliteLike = Database;
 
@@ -27,6 +28,7 @@ interface PostgresClient {
 
 const SQLITE_FILE_PREFIX = 'file:';
 const SQLITE_URL_PREFIX = 'sqlite:';
+const sqliteMigrationLocks = new Map<string, Promise<void>>();
 
 /**
  * Journal mode requested for file-backed SQLite databases.
@@ -70,6 +72,130 @@ export const POSTGRES_INDEX_STATEMENTS: readonly string[] = [
   'CREATE INDEX IF NOT EXISTS idx_idempotency_keys_created_at ON idempotency_keys (created_at)',
 ];
 
+const CORE_MIGRATIONS: readonly SchemaMigration[] = [
+  {
+    name: 'core:001-initial-schema',
+    async up({ dialect, execute }) {
+      await execute(
+        dialect === 'sqlite'
+          ? `
+            CREATE TABLE IF NOT EXISTS auth_challenges (
+              id TEXT PRIMARY KEY,
+              account TEXT NOT NULL,
+              challenge TEXT NOT NULL UNIQUE,
+              expires_at TEXT NOT NULL,
+              consumed_at TEXT,
+              created_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS interactive_transactions (
+              id TEXT PRIMARY KEY,
+              account TEXT NOT NULL,
+              kind TEXT NOT NULL,
+              asset_code TEXT NOT NULL,
+              amount TEXT NOT NULL,
+              status TEXT NOT NULL,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS idempotency_keys (
+              id TEXT PRIMARY KEY,
+              scope TEXT NOT NULL,
+              idempotency_key TEXT NOT NULL,
+              request_hash TEXT NOT NULL,
+              status_code INTEGER NOT NULL,
+              response_body TEXT NOT NULL,
+              created_at TEXT NOT NULL,
+              UNIQUE(scope, idempotency_key)
+            );
+            CREATE TABLE IF NOT EXISTS webhook_events (
+              id TEXT PRIMARY KEY,
+              event_id TEXT NOT NULL UNIQUE,
+              provider TEXT NOT NULL,
+              payload TEXT NOT NULL,
+              status TEXT NOT NULL,
+              error_message TEXT,
+              processed_at TEXT,
+              created_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS watcher_tasks (
+              id TEXT PRIMARY KEY,
+              watcher_name TEXT NOT NULL,
+              payload TEXT NOT NULL,
+              status TEXT NOT NULL,
+              error_message TEXT,
+              processed_at TEXT,
+              created_at TEXT NOT NULL
+            );
+          `
+          : `
+            CREATE TABLE IF NOT EXISTS auth_challenges (
+              id TEXT PRIMARY KEY,
+              account TEXT NOT NULL,
+              challenge TEXT NOT NULL UNIQUE,
+              expires_at TIMESTAMPTZ NOT NULL,
+              consumed_at TIMESTAMPTZ,
+              created_at TIMESTAMPTZ NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS interactive_transactions (
+              id TEXT PRIMARY KEY,
+              account TEXT NOT NULL,
+              kind TEXT NOT NULL,
+              asset_code TEXT NOT NULL,
+              amount TEXT NOT NULL,
+              status TEXT NOT NULL,
+              created_at TIMESTAMPTZ NOT NULL,
+              updated_at TIMESTAMPTZ NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS idempotency_keys (
+              id TEXT PRIMARY KEY,
+              scope TEXT NOT NULL,
+              idempotency_key TEXT NOT NULL,
+              request_hash TEXT NOT NULL,
+              status_code INTEGER NOT NULL,
+              response_body TEXT NOT NULL,
+              created_at TIMESTAMPTZ NOT NULL,
+              UNIQUE(scope, idempotency_key)
+            );
+            CREATE TABLE IF NOT EXISTS webhook_events (
+              id TEXT PRIMARY KEY,
+              event_id TEXT NOT NULL UNIQUE,
+              provider TEXT NOT NULL,
+              payload JSONB NOT NULL,
+              status TEXT NOT NULL,
+              error_message TEXT,
+              processed_at TIMESTAMPTZ,
+              created_at TIMESTAMPTZ NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS watcher_tasks (
+              id TEXT PRIMARY KEY,
+              watcher_name TEXT NOT NULL,
+              payload JSONB NOT NULL,
+              status TEXT NOT NULL,
+              error_message TEXT,
+              processed_at TIMESTAMPTZ,
+              created_at TIMESTAMPTZ NOT NULL
+            );
+          `,
+      );
+
+      const indexes = dialect === 'sqlite' ? SQLITE_INDEX_STATEMENTS : POSTGRES_INDEX_STATEMENTS;
+      for (const statement of indexes) {
+        await execute(statement);
+      }
+    },
+  },
+  {
+    name: 'core:002-idempotency-status',
+    async up({ execute, hasColumn }) {
+      if (!(await hasColumn('idempotency_keys', 'status'))) {
+        await execute(
+          "ALTER TABLE idempotency_keys ADD COLUMN status TEXT NOT NULL DEFAULT 'completed'",
+        );
+      }
+    },
+  },
+];
+
 function nowIso(): string {
   return new Date().toISOString();
 }
@@ -92,6 +218,25 @@ function toSqlitePath(url: string): string {
  */
 function isInMemorySqlite(path: string): boolean {
   return path.includes(':memory:') || path.includes('mode=memory');
+}
+
+async function withSqliteMigrationLock<T>(key: string, migrate: () => Promise<T>): Promise<T> {
+  const previous = sqliteMigrationLocks.get(key) ?? Promise.resolve();
+  let release!: () => void;
+  const current = new Promise<void>((resolveLock) => {
+    release = resolveLock;
+  });
+  sqliteMigrationLocks.set(key, current);
+  await previous;
+
+  try {
+    return await migrate();
+  } finally {
+    release();
+    if (sqliteMigrationLocks.get(key) === current) {
+      sqliteMigrationLocks.delete(key);
+    }
+  }
 }
 
 /**
@@ -137,13 +282,18 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
   private readonly url: string;
   private sqlite: SqliteLike | null = null;
   private postgres: PostgresClient | null = null;
+  private readonly migrations: readonly SchemaMigration[];
   private connectPromise: Promise<void> | null = null;
   private disconnectPromise: Promise<void> | null = null;
   private migratePromise: Promise<void> | null = null;
 
-  constructor(databaseConfig: FrameworkConfig['database']) {
+  constructor(
+    databaseConfig: FrameworkConfig['database'],
+    migrations: readonly SchemaMigration[] = [],
+  ) {
     this.provider = databaseConfig.provider;
     this.url = databaseConfig.url;
+    this.migrations = migrations;
   }
 
   public async connect(): Promise<void> {
@@ -160,6 +310,7 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
       try {
         if (this.provider === 'sqlite') {
           const path = toSqlitePath(this.url);
+          const { Database } = await import('bun:sqlite');
           const database = new Database(path);
 
           try {
@@ -257,144 +408,190 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
   }
 
   private async runMigrations(): Promise<void> {
+    const migrations = [...CORE_MIGRATIONS, ...this.migrations];
+    const migrationNames = new Set<string>();
+    for (const migration of migrations) {
+      if (
+        !migration.name.trim() ||
+        typeof migration.up !== 'function' ||
+        migrationNames.has(migration.name)
+      ) {
+        throw new ConfigError(`Invalid or duplicate database migration name: "${migration.name}"`);
+      }
+      migrationNames.add(migration.name);
+    }
+
     if (this.sqlite) {
-      this.sqlite.exec(`
-        CREATE TABLE IF NOT EXISTS auth_challenges (
-          id TEXT PRIMARY KEY,
-          account TEXT NOT NULL,
-          challenge TEXT NOT NULL UNIQUE,
-          expires_at TEXT NOT NULL,
-          consumed_at TEXT,
-          created_at TEXT NOT NULL
-        );
-
-        CREATE TABLE IF NOT EXISTS interactive_transactions (
-          id TEXT PRIMARY KEY,
-          account TEXT NOT NULL,
-          kind TEXT NOT NULL,
-          asset_code TEXT NOT NULL,
-          amount TEXT NOT NULL,
-          status TEXT NOT NULL,
-          created_at TEXT NOT NULL,
-          updated_at TEXT NOT NULL
-        );
-
-        CREATE TABLE IF NOT EXISTS idempotency_keys (
-          id TEXT PRIMARY KEY,
-          scope TEXT NOT NULL,
-          idempotency_key TEXT NOT NULL,
-          request_hash TEXT NOT NULL,
-          status TEXT NOT NULL DEFAULT 'completed',
-          status_code INTEGER NOT NULL,
-          response_body TEXT NOT NULL,
-          created_at TEXT NOT NULL,
-          UNIQUE(scope, idempotency_key)
-        );
-
-        CREATE TABLE IF NOT EXISTS webhook_events (
-          id TEXT PRIMARY KEY,
-          event_id TEXT NOT NULL UNIQUE,
-          provider TEXT NOT NULL,
-          payload TEXT NOT NULL,
-          status TEXT NOT NULL,
-          error_message TEXT,
-          processed_at TEXT,
-          created_at TEXT NOT NULL
-        );
-
-        CREATE TABLE IF NOT EXISTS watcher_tasks (
-          id TEXT PRIMARY KEY,
-          watcher_name TEXT NOT NULL,
-          payload TEXT NOT NULL,
-          status TEXT NOT NULL,
-          error_message TEXT,
-          processed_at TEXT,
-          created_at TEXT NOT NULL
-        );
-      `);
-      const idempotencyColumns = this.sqlite
-        .prepare('PRAGMA table_info(idempotency_keys)')
-        .all() as Array<{ name?: unknown }>;
-      if (!idempotencyColumns.some((column) => column.name === 'status')) {
-        this.sqlite.exec(
-          "ALTER TABLE idempotency_keys ADD COLUMN status TEXT NOT NULL DEFAULT 'completed'",
-        );
-      }
-      for (const statement of SQLITE_INDEX_STATEMENTS) {
-        this.sqlite.exec(statement);
-      }
+      const database = this.sqlite;
+      await withSqliteMigrationLock(resolve(toSqlitePath(this.url)), async () => {
+        await this.runSqliteMigrations(database, migrations);
+      });
       return;
     }
 
     if (this.postgres) {
-      await this.postgres.query(`
-        CREATE TABLE IF NOT EXISTS auth_challenges (
-          id TEXT PRIMARY KEY,
-          account TEXT NOT NULL,
-          challenge TEXT NOT NULL UNIQUE,
-          expires_at TIMESTAMPTZ NOT NULL,
-          consumed_at TIMESTAMPTZ,
-          created_at TIMESTAMPTZ NOT NULL
-        );
+      const postgres = this.postgres;
+      await postgres.query(`
+        CREATE TABLE IF NOT EXISTS anchor_kit_migrations (
+          name TEXT PRIMARY KEY,
+          applied_at TIMESTAMPTZ NOT NULL
+        )
       `);
-      await this.postgres.query(`
-        CREATE TABLE IF NOT EXISTS interactive_transactions (
-          id TEXT PRIMARY KEY,
-          account TEXT NOT NULL,
-          kind TEXT NOT NULL,
-          asset_code TEXT NOT NULL,
-          amount TEXT NOT NULL,
-          status TEXT NOT NULL,
-          created_at TIMESTAMPTZ NOT NULL,
-          updated_at TIMESTAMPTZ NOT NULL
-        );
-      `);
-      await this.postgres.query(`
-        CREATE TABLE IF NOT EXISTS idempotency_keys (
-          id TEXT PRIMARY KEY,
-          scope TEXT NOT NULL,
-          idempotency_key TEXT NOT NULL,
-          request_hash TEXT NOT NULL,
-          status TEXT NOT NULL DEFAULT 'completed',
-          status_code INTEGER NOT NULL,
-          response_body TEXT NOT NULL,
-          created_at TIMESTAMPTZ NOT NULL,
-          UNIQUE(scope, idempotency_key)
-        );
-      `);
-      await this.postgres.query(
-        "ALTER TABLE idempotency_keys ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'completed'",
+      const result = await postgres.query<{ name: string }>(
+        'SELECT name FROM anchor_kit_migrations',
       );
-      await this.postgres.query(`
-        CREATE TABLE IF NOT EXISTS webhook_events (
-          id TEXT PRIMARY KEY,
-          event_id TEXT NOT NULL UNIQUE,
-          provider TEXT NOT NULL,
-          payload JSONB NOT NULL,
-          status TEXT NOT NULL,
-          error_message TEXT,
-          processed_at TIMESTAMPTZ,
-          created_at TIMESTAMPTZ NOT NULL
-        );
-      `);
-      await this.postgres.query(`
-        CREATE TABLE IF NOT EXISTS watcher_tasks (
-          id TEXT PRIMARY KEY,
-          watcher_name TEXT NOT NULL,
-          payload JSONB NOT NULL,
-          status TEXT NOT NULL,
-          error_message TEXT,
-          processed_at TIMESTAMPTZ,
-          created_at TIMESTAMPTZ NOT NULL
-        );
-      `);
-      for (const statement of POSTGRES_INDEX_STATEMENTS) {
-        await this.postgres.query(statement);
-      }
+      const applied = new Set(result.rows.map((row) => row.name));
+      const context: SchemaMigrationContext = {
+        dialect: 'postgres',
+        execute: async (sql) => {
+          await postgres.query(sql);
+        },
+        hasColumn: async (table, column) => {
+          const columns = await postgres.query<{ exists: boolean }>(
+            `SELECT EXISTS (
+              SELECT 1 FROM information_schema.columns
+              WHERE table_schema = current_schema() AND table_name = $1 AND column_name = $2
+            ) AS exists`,
+            [table, column],
+          );
+          return columns.rows[0]?.exists === true;
+        },
+      };
+      await this.applyMigrations(migrations, applied, context, {
+        begin: async () => {
+          await postgres.query('BEGIN');
+        },
+        commit: async () => {
+          await postgres.query('COMMIT');
+        },
+        rollback: async () => {
+          await postgres.query('ROLLBACK');
+        },
+        isApplied: async (name) => {
+          const existing = await postgres.query(
+            'SELECT 1 FROM anchor_kit_migrations WHERE name = $1',
+            [name],
+          );
+          return existing.rows.length > 0;
+        },
+        record: async (name) => {
+          await postgres.query(
+            'INSERT INTO anchor_kit_migrations (name, applied_at) VALUES ($1, $2)',
+            [name, nowIso()],
+          );
+        },
+      });
       return;
     }
 
     throw new ConfigError('Database not connected');
+  }
+
+  private async runSqliteMigrations(
+    database: SqliteLike,
+    migrations: readonly SchemaMigration[],
+  ): Promise<void> {
+    database.exec('BEGIN IMMEDIATE');
+    try {
+      database.exec(`
+        CREATE TABLE IF NOT EXISTS anchor_kit_migrations (
+          name TEXT PRIMARY KEY,
+          applied_at TEXT NOT NULL
+        )
+      `);
+      database.exec('COMMIT');
+    } catch (error) {
+      try {
+        database.exec('ROLLBACK');
+      } catch (rollbackError) {
+        throw new AggregateError(
+          [error, rollbackError],
+          'Could not initialize the SQLite migration metadata table',
+          { cause: rollbackError },
+        );
+      }
+      throw error;
+    }
+
+    const rows = database.prepare('SELECT name FROM anchor_kit_migrations').all() as Array<{
+      name: string;
+    }>;
+    const applied = new Set(rows.map((row) => row.name));
+    const context: SchemaMigrationContext = {
+      dialect: 'sqlite',
+      execute: async (sql) => {
+        database.exec(sql);
+      },
+      hasColumn: async (table, column) => {
+        const escapedTable = table.replaceAll('"', '""');
+        const columns = database.prepare(`PRAGMA table_info("${escapedTable}")`).all() as Array<{
+          name?: unknown;
+        }>;
+        return columns.some((item) => item.name === column);
+      },
+    };
+    await this.applyMigrations(migrations, applied, context, {
+      begin: async () => {
+        database.exec('BEGIN IMMEDIATE');
+      },
+      commit: async () => {
+        database.exec('COMMIT');
+      },
+      rollback: async () => {
+        database.exec('ROLLBACK');
+      },
+      isApplied: async (name) =>
+        database.prepare('SELECT 1 FROM anchor_kit_migrations WHERE name = ?').get(name) !== null,
+      record: async (name) => {
+        database
+          .prepare('INSERT INTO anchor_kit_migrations (name, applied_at) VALUES (?, ?)')
+          .run(name, nowIso());
+      },
+    });
+  }
+
+  private async applyMigrations(
+    migrations: readonly SchemaMigration[],
+    applied: Set<string>,
+    context: SchemaMigrationContext,
+    transaction: {
+      begin(): Promise<void>;
+      commit(): Promise<void>;
+      rollback(): Promise<void>;
+      isApplied(name: string): Promise<boolean>;
+      record(name: string): Promise<void>;
+    },
+  ): Promise<void> {
+    for (const migration of migrations) {
+      if (applied.has(migration.name)) {
+        continue;
+      }
+
+      await transaction.begin();
+      try {
+        if (await transaction.isApplied(migration.name)) {
+          applied.add(migration.name);
+          await transaction.commit();
+          continue;
+        }
+
+        await migration.up(context);
+        await transaction.record(migration.name);
+        await transaction.commit();
+        applied.add(migration.name);
+      } catch (error) {
+        try {
+          await transaction.rollback();
+        } catch (rollbackError) {
+          throw new AggregateError(
+            [error, rollbackError],
+            `Migration "${migration.name}" failed and its transaction could not be rolled back`,
+            { cause: rollbackError },
+          );
+        }
+        throw error;
+      }
+    }
   }
 
   public async insertAuthChallenge(input: {
@@ -1188,6 +1385,7 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
 
 export function createSqlDatabaseAdapter(
   databaseConfig: FrameworkConfig['database'],
+  migrations: readonly SchemaMigration[] = [],
 ): DatabaseAdapter {
   if (String(databaseConfig.provider) === 'mysql') {
     throw new ConfigError('MySQL is not implemented in this MVP. Use postgres or sqlite.');
@@ -1200,7 +1398,7 @@ export function createSqlDatabaseAdapter(
     }
   }
 
-  return new SqlDatabaseAdapter(databaseConfig);
+  return new SqlDatabaseAdapter(databaseConfig, migrations);
 }
 
 export function makeSqliteDbUrlForTests(): string {

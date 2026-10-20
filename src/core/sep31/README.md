@@ -1,5 +1,5 @@
-# Planned Module Stub
+# SEP-31 Module (Reserved)
 
-This directory is a placeholder for the SEP-31 module implementation.
+This directory is reserved for a future SEP-31 protocol engine.
 
-No runtime SEP-31 implementation is shipped yet.
+The shared HTTP runtime and plugin route mechanism provide general infrastructure, but there is no SEP-31 cross-border payment flow and no SEP-31 wire-protocol conformance claim. Check the current official SEP-31 specification before implementing protocol behavior.
