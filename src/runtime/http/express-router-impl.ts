@@ -16,7 +16,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { version } from '../../../package.json';
 
-const SEP10_NONCE_OP = 'anchor_auth';
+const SEP10_AUTH_OPERATION_SUFFIX = ' auth';
 
 export interface ExpressRouterContext {
   config: AnchorConfig;
@@ -216,14 +216,15 @@ function hasValidSignature(transaction: Transaction, publicKey: string): boolean
   return false;
 }
 
-function extractNonceFromChallenge(transaction: Transaction): string | null {
+function extractNonceFromChallenge(transaction: Transaction, homeDomain: string): string | null {
+  const authOperationName = `${homeDomain}${SEP10_AUTH_OPERATION_SUFFIX}`;
   for (const operation of transaction.operations) {
     if (operation.type !== 'manageData') {
       continue;
     }
 
     const manageDataOp = operation as unknown as { name?: unknown; value?: unknown };
-    if (manageDataOp.name !== SEP10_NONCE_OP) {
+    if (manageDataOp.name !== authOperationName) {
       continue;
     }
 
@@ -488,7 +489,7 @@ async function handleAuthChallenge(
   )
     .addOperation(
       Operation.manageData({
-        name: SEP10_NONCE_OP,
+        name: `${context.config.get('server').homeDomain}${SEP10_AUTH_OPERATION_SUFFIX}`,
         value: nonce,
         source: account,
       }),
@@ -568,7 +569,7 @@ async function handleAuthToken(
     return;
   }
 
-  const nonce = extractNonceFromChallenge(transaction);
+  const nonce = extractNonceFromChallenge(transaction, context.config.get('server').homeDomain);
   if (!nonce) {
     sendJson(res, 401, {
       error: 'invalid_challenge',
@@ -852,8 +853,14 @@ async function handleTransaction(
   };
 
   if (serverConfig.interactiveDomain) {
-    responseData.interactive_url = buildInteractiveUrl(serverConfig.interactiveDomain, transaction.id);
-    responseData.more_info_url = buildInteractiveUrl(serverConfig.interactiveDomain, transaction.id);
+    responseData.interactive_url = buildInteractiveUrl(
+      serverConfig.interactiveDomain,
+      transaction.id,
+    );
+    responseData.more_info_url = buildInteractiveUrl(
+      serverConfig.interactiveDomain,
+      transaction.id,
+    );
   }
 
   sendJson(res, 200, responseData);

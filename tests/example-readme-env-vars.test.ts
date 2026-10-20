@@ -9,6 +9,7 @@ describe('example README documents all env vars', () => {
     const envVarsReadByExampleApp = [
       'PORT',
       'DATABASE_URL',
+      'ANCHOR_HOME_DOMAIN',
       'INTERACTIVE_DOMAIN',
       'SEP10_SIGNING_KEY',
       'INTERACTIVE_JWT_SECRET',

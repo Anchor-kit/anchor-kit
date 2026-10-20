@@ -10,7 +10,7 @@ describe('Config Validation Improvements (#124, #125)', () => {
   const testSep10SigningKey = Keypair.random().secret();
   const validBaseConfig: AnchorKitConfig = {
     network: { network: 'testnet' },
-    server: { port: 3000 },
+    server: { homeDomain: 'anchor.example.com', port: 3000 },
     security: {
       sep10SigningKey: testSep10SigningKey,
       interactiveJwtSecret: 'jwt-secret',
@@ -41,14 +41,18 @@ describe('Config Validation Improvements (#124, #125)', () => {
     ] as const) {
       const config = new AnchorConfig({
         ...validBaseConfig,
-        server: server as AnchorKitConfig['server'],
+        server: { homeDomain: 'anchor.example.com', ...server } as AnchorKitConfig['server'],
       });
       expect(() => config.validate()).toThrow(expectedError);
     }
 
     const validConfig = new AnchorConfig({
       ...validBaseConfig,
-      server: { host: 'localhost', corsOrigins: ['https://app.example.com'] },
+      server: {
+        homeDomain: 'anchor.example.com',
+        host: 'localhost',
+        corsOrigins: ['https://app.example.com'],
+      },
     });
     expect(() => validConfig.validate()).not.toThrow();
     expect(validConfig.get('server').corsOrigins).toEqual(['https://app.example.com']);
@@ -251,14 +255,19 @@ describe('Config Validation Improvements (#124, #125)', () => {
     const dbUrl = makeSqliteDbUrlForTests();
     const anchor = createAnchor({
       network: { network: 'testnet' },
-      server: { interactiveDomain: 'https://anchor.example.com' },
+      server: {
+        homeDomain: 'anchor.example.com',
+        interactiveDomain: 'https://anchor.example.com',
+      },
       security: {
         sep10SigningKey: testSep10SigningKey,
         interactiveJwtSecret: 'jwt-secret',
         distributionAccountSecret: 'dist-secret',
       },
       assets: {
-        assets: [{ code: 'USDC', issuer: 'GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5' }],
+        assets: [
+          { code: 'USDC', issuer: 'GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5' },
+        ],
       },
       framework: { database: { provider: 'sqlite', url: dbUrl } },
     });

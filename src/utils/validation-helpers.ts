@@ -26,6 +26,15 @@ function isValidUrlString(url: string): boolean {
   }
 }
 
+function isValidHomeDomain(value: unknown): value is string {
+  if (typeof value !== 'string' || value.length === 0 || value.length > 59) return false;
+
+  return value.split('.').every((label) => {
+    if (label.length === 0 || label.length > 63) return false;
+    return /^[a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?$/.test(label);
+  });
+}
+
 function isValidDatabaseUrlString(urlString: unknown): boolean {
   return (
     isString(urlString) &&
@@ -325,6 +334,15 @@ function validateAnchorKitConfig(config: AnchorKitConfig): boolean {
   NetworkConfigSchema.validate(network);
   SecurityConfigSchema.validate(security);
 
+  if (server.homeDomain === undefined || server.homeDomain === null || server.homeDomain === '') {
+    throw new Error('Missing required field: server.homeDomain');
+  }
+  if (!ServerConfigSchema.homeDomain.validate(server.homeDomain)) {
+    throw new Error(
+      'Invalid server.homeDomain: use a hostname only and ensure the SEP-10 auth operation name is at most 64 bytes',
+    );
+  }
+
   for (const key of ['host', 'corsOrigins'] as const) {
     const value = server[key];
     if (value !== undefined && value !== null && !ServerConfigSchema[key].validate(value)) {
@@ -378,6 +396,12 @@ export interface SchemaField {
  * ServerConfigSchema.port.validate(3000); // true
  */
 export const ServerConfigSchema: Record<keyof Required<ServerConfig>, SchemaField> = {
+  homeDomain: {
+    type: 'string',
+    required: true,
+    description: 'SEP-10 anchor home domain hostname, without scheme or path.',
+    validate: isValidHomeDomain,
+  },
   host: {
     type: 'string',
     required: false,

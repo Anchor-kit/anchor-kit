@@ -1,5 +1,6 @@
 import { AnchorConfig } from '@/core/config.ts';
 import { ConfigError } from '@/core/errors.ts';
+import { createAnchor } from '@/core/factory.ts';
 import type { AnchorKitConfig } from '@/types/config.ts';
 import { Networks } from '@stellar/stellar-sdk';
 import { describe, expect, it } from 'vitest';
@@ -7,7 +8,7 @@ import { describe, expect, it } from 'vitest';
 describe('AnchorConfig', () => {
   const validBaseConfig: AnchorKitConfig = {
     network: { network: 'testnet' },
-    server: { port: 3000 },
+    server: { homeDomain: 'anchor.example.com', port: 3000 },
     security: {
       sep10SigningKey: 'secret-key-10',
       interactiveJwtSecret: 'jwt-secret',
@@ -146,6 +147,45 @@ describe('AnchorConfig', () => {
     it('should pass for a valid configuration', () => {
       const config = new AnchorConfig(validBaseConfig);
       expect(() => config.validate()).not.toThrow();
+    });
+
+    it('should require a valid SEP-10 home domain within the Stellar operation-name limit', () => {
+      const missingDomain = new AnchorConfig({
+        ...validBaseConfig,
+        server: { ...validBaseConfig.server, homeDomain: undefined as unknown as string },
+      });
+      expect(() => missingDomain.validate()).toThrow(/Missing required field: server\.homeDomain/);
+      expect(() =>
+        createAnchor({
+          ...validBaseConfig,
+          server: { ...validBaseConfig.server, homeDomain: undefined as unknown as string },
+        }),
+      ).toThrow(/Missing required field: server\.homeDomain/);
+
+      for (const homeDomain of [
+        'https://anchor.example.com',
+        'anchor.example.com/path',
+        'invalid_domain.example.com',
+        'a'.repeat(60),
+      ]) {
+        const invalidDomain = new AnchorConfig({
+          ...validBaseConfig,
+          server: { ...validBaseConfig.server, homeDomain },
+        });
+        expect(() => invalidDomain.validate()).toThrow(/Invalid server\.homeDomain/);
+        expect(() =>
+          createAnchor({
+            ...validBaseConfig,
+            server: { ...validBaseConfig.server, homeDomain },
+          }),
+        ).toThrow(/Invalid server\.homeDomain/);
+      }
+
+      const maximumLengthDomain = new AnchorConfig({
+        ...validBaseConfig,
+        server: { ...validBaseConfig.server, homeDomain: 'a'.repeat(59) },
+      });
+      expect(() => maximumLengthDomain.validate()).not.toThrow();
     });
 
     it('should throw ConfigError if top-level network is missing', () => {

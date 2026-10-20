@@ -54,6 +54,13 @@ export interface NetworkConfig {
  */
 export interface ServerConfig {
   /**
+   * SEP-10 anchor home domain (hostname only, without scheme or path).
+   * The value must leave room for the " auth" operation suffix in Stellar's 64-byte limit.
+   * @required
+   */
+  homeDomain: string;
+
+  /**
    * Server host address
    * @optional - defaults to '0.0.0.0'
    */

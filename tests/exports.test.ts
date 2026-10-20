@@ -23,7 +23,7 @@ describe('package root exports', () => {
 
     const schema: AnchorKitConfig = {
       network: { network: 'testnet' },
-      server: {},
+      server: { homeDomain: 'anchor.example.com' },
       security: {
         sep10SigningKey: 'key',
         interactiveJwtSecret: 'secret',
