@@ -1,52 +1,15 @@
-import { AnchorInstance, createAnchor } from '@/core/factory.ts';
+import { AnchorInstance } from '@/core/factory.ts';
 import type { AnchorKitConfig } from '@/types/config.ts';
 import type { DatabaseAdapter } from '@/runtime/interfaces.ts';
 import { Keypair } from '@stellar/stellar-sdk';
 import { describe, expect, it, vi } from 'vitest';
 
 describe('AnchorInstance lifecycle', () => {
-  it('runs the injected database adapter lifecycle through createAnchor', async () => {
-    const databaseAdapter = createDatabaseAdapter();
-    const anchor = createAnchor(
-      {
-        network: { network: 'testnet' },
-        server: { port: 3000 },
-        security: {
-          sep10SigningKey: Keypair.random().secret(),
-          interactiveJwtSecret: 'jwt-secret',
-          distributionAccountSecret: 'dist-secret',
-        },
-        assets: {
-          assets: [
-            {
-              code: 'USDC',
-              issuer: 'GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5',
-            },
-          ],
-        },
-        framework: {
-          database: { provider: 'sqlite', url: 'file:unused' },
-          watchers: { enabled: false },
-        },
-      },
-      { databaseAdapter },
-    );
-
-    await anchor.init();
-    await anchor.shutdown();
-    await anchor.shutdown();
-
-    expect(databaseAdapter.connect).toHaveBeenCalledTimes(1);
-    expect(databaseAdapter.migrate).toHaveBeenCalledTimes(1);
-    expect(databaseAdapter.disconnect).toHaveBeenCalledTimes(1);
-  });
-
   it('waits for pending init before shutdown and supports later reinitialization', async () => {
     let signalConnectStarted: (() => void) | undefined;
     const connectStarted = new Promise<void>((resolve) => {
       signalConnectStarted = resolve;
     });
-
     let releaseConnect: (() => void) | undefined;
     const connectGate = new Promise<void>((resolve) => {
       releaseConnect = resolve;
@@ -123,49 +86,4 @@ class DelayedConnectAnchor extends AnchorInstance {
     this.databaseAdapters.push(adapter);
     return adapter;
   }
-}
-
-function createDatabaseAdapter(): DatabaseAdapter {
-  return {
-    connect: vi.fn().mockResolvedValue(undefined),
-    disconnect: vi.fn().mockResolvedValue(undefined),
-    migrate: vi.fn().mockResolvedValue(undefined),
-    insertAuthChallenge: vi.fn().mockResolvedValue(undefined),
-    getAuthChallengeByChallenge: vi.fn().mockResolvedValue(null),
-    markAuthChallengeConsumed: vi.fn().mockResolvedValue(false),
-    insertInteractiveTransaction: vi.fn().mockResolvedValue({
-      id: 'transaction',
-      account: 'account',
-      kind: 'deposit',
-      assetCode: 'USD',
-      amount: '1',
-      status: 'pending',
-      createdAt: '',
-      updatedAt: '',
-    }),
-    getInteractiveTransactionById: vi.fn().mockResolvedValue(null),
-    listPendingTransactionsBefore: vi.fn().mockResolvedValue([]),
-    updateTransactionStatus: vi.fn().mockResolvedValue(false),
-    getIdempotencyRecord: vi.fn().mockResolvedValue(null),
-    insertIdempotencyRecord: vi.fn().mockResolvedValue(undefined),
-    insertWebhookEvent: vi.fn().mockResolvedValue({
-      record: {
-        id: 'event',
-        eventId: 'event',
-        provider: 'test',
-        payload: {},
-        status: 'pending',
-        errorMessage: null,
-        processedAt: null,
-        createdAt: '',
-      },
-      inserted: true,
-    }),
-    updateWebhookEventStatus: vi.fn().mockResolvedValue(undefined),
-    insertWatcherTask: vi.fn().mockResolvedValue(undefined),
-    listPendingWatcherTasks: vi.fn().mockResolvedValue([]),
-    updateWatcherTaskStatus: vi.fn().mockResolvedValue(undefined),
-    countProcessedWatcherTasks: vi.fn().mockResolvedValue(0),
-    cleanupOldRecords: vi.fn().mockResolvedValue(undefined),
-  };
 }

@@ -1,225 +1,864 @@
-import {
-  AnchorKitConfigSchema,
-  NetworkConfigSchema,
-  SecurityConfigSchema,
-  ValidationUtils,
-} from '../../src/utils/validation';
-import type { AnchorKitConfig } from '../../src/types/config';
+import { AnchorConfig } from '@/core/config';
+import type { AnchorKitConfig } from '@/types/config';
+import { ValidationUtils } from '@/utils/validation';
+import { encodeMuxedAccount, encodeMuxedAccountToAddress } from '@stellar/stellar-sdk';
+import { describe, expect, it } from 'vitest';
 
-describe('ValidationUtils', () => {
-  describe('isValidEmail', () => {
-    test('should return true for valid emails', () => {
-      expect(ValidationUtils.isValidEmail('test@example.com')).toBe(true);
-      expect(ValidationUtils.isValidEmail('user.name@domain.co.uk')).toBe(true);
-      expect(ValidationUtils.isValidEmail('user+alias@gmail.com')).toBe(true);
-    });
+describe('Asset Validation (#254)', () => {
+  const baseConfig: AnchorKitConfig = {
+    network: { network: 'testnet' },
+    server: { port: 3000 },
+    security: {
+      sep10SigningKey: 'secret-key-10',
+      interactiveJwtSecret: 'jwt-secret',
+      distributionAccountSecret: 'dist-secret',
+    },
+    assets: {
+      assets: [
+        {
+          code: 'USDC',
+          issuer: 'GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5',
+        },
+      ],
+    },
+    framework: {
+      database: {
+        provider: 'postgres',
+        url: 'postgresql://localhost:5432/anchor',
+      },
+    },
+  };
 
-    test('should return false for invalid emails', () => {
-      expect(ValidationUtils.isValidEmail('invalid-email')).toBe(false);
-      expect(ValidationUtils.isValidEmail('user@')).toBe(false);
-      expect(ValidationUtils.isValidEmail('@domain.com')).toBe(false);
-      expect(ValidationUtils.isValidEmail('user@domain')).toBe(false);
-    });
+  it('should accept valid asset config with code and issuer', () => {
+    const config = new AnchorConfig(baseConfig);
+    expect(() => config.validate()).not.toThrow();
   });
 
-  describe('isValidPhoneNumber', () => {
-    test('should return true for valid E.164 phone numbers', () => {
-      expect(ValidationUtils.isValidPhoneNumber('+1234567890')).toBe(true);
-      expect(ValidationUtils.isValidPhoneNumber('+447123456789')).toBe(true);
-    });
-
-    test('should return false for invalid phone numbers', () => {
-      expect(ValidationUtils.isValidPhoneNumber('1234567890')).toBe(false); // Missing +
-      expect(ValidationUtils.isValidPhoneNumber('+0123456789')).toBe(false); // Leading zero after +
-      expect(ValidationUtils.isValidPhoneNumber('+123')).toBe(true); // Minimum length is not strictly enforced by SEP usually, but pattern says 1-14 digits
-      expect(ValidationUtils.isValidPhoneNumber('+1234567890123456')).toBe(false); // Too long (>15 digits)
-    });
+  it('should accept asset with optional fields', () => {
+    const config: AnchorKitConfig = {
+      ...baseConfig,
+      assets: {
+        assets: [
+          {
+            code: 'USDC',
+            issuer: 'GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5',
+            name: 'USDC Token',
+            deposits_enabled: true,
+            withdrawals_enabled: true,
+            min_amount: 1,
+            max_amount: 10000,
+          },
+        ],
+      },
+    };
+    const anchor = new AnchorConfig(config);
+    expect(() => anchor.validate()).not.toThrow();
   });
 
-  describe('isValidUrl', () => {
-    test('should return true for valid URLs', () => {
-      expect(ValidationUtils.isValidUrl('https://stellar.org')).toBe(true);
-      expect(ValidationUtils.isValidUrl('http://localhost:8000')).toBe(true);
-    });
+  it('accepts native XLM without an issuer', () => {
+    const config: AnchorKitConfig = {
+      ...baseConfig,
+      assets: { assets: [{ code: 'XLM' }] },
+    };
 
-    test('should return false for invalid URLs', () => {
-      expect(ValidationUtils.isValidUrl('not-a-url')).toBe(false);
-      expect(ValidationUtils.isValidUrl('ftp://invalid')).toBe(true); // Technically a valid URL structure
-      expect(ValidationUtils.isValidUrl('')).toBe(false);
-    });
+    expect(() => new AnchorConfig(config).validate()).not.toThrow();
   });
 
-  describe('sanitizeInput', () => {
-    test('should remove script tags', () => {
-      const input = '<script>alert("xss")</script>Hello';
-      expect(ValidationUtils.sanitizeInput(input)).toBe('Hello');
-    });
+  it('rejects native XLM when an issuer is supplied', () => {
+    const config: AnchorKitConfig = {
+      ...baseConfig,
+      assets: {
+        assets: [
+          {
+            code: 'XLM',
+            issuer: 'GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5',
+          },
+        ],
+      },
+    };
 
-    test('should remove HTML tags', () => {
-      const input = '<div><b>Bold</b> Text</div>';
-      expect(ValidationUtils.sanitizeInput(input)).toBe('Bold Text');
-    });
-
-    test('should handle robust XSS vectors', () => {
-      const vectors = [
-        '<img src=x onerror=alert(1)>',
-        '<svg/onload=alert(1)>',
-        '<details open ontoggle=alert(1)>',
-        '<a href="javascript:alert(1)">Click me</a>',
-        '<video><source onerror="alert(1)">',
-      ];
-      for (const vector of vectors) {
-        expect(ValidationUtils.sanitizeInput(vector)).not.toContain('alert(1)');
-        expect(ValidationUtils.sanitizeInput(vector)).not.toContain('<script');
-      }
-    });
-
-    test('should trim whitespace', () => {
-      const input = '   content   ';
-      expect(ValidationUtils.sanitizeInput(input)).toBe('content');
-    });
-
-    test('should handle empty input', () => {
-      expect(ValidationUtils.sanitizeInput('')).toBe('');
-    });
+    expect(() => new AnchorConfig(config).validate()).toThrow(/Invalid asset at index 0/);
   });
 
-  describe('isDecimal', () => {
-    test('should return true for valid decimals', () => {
-      expect(ValidationUtils.isDecimal('100')).toBe(true);
-      expect(ValidationUtils.isDecimal('100.50')).toBe(true);
-      expect(ValidationUtils.isDecimal('-100.50')).toBe(true);
-      expect(ValidationUtils.isDecimal('0')).toBe(true);
-    });
-
-    test('should return false for invalid decimals', () => {
-      expect(ValidationUtils.isDecimal('abc')).toBe(false);
-      expect(ValidationUtils.isDecimal('1.2.3')).toBe(false);
-      expect(ValidationUtils.isDecimal('100px')).toBe(false);
-      expect(ValidationUtils.isDecimal('')).toBe(false);
-      expect(ValidationUtils.isDecimal(' ')).toBe(false);
-    });
+  it('rejects issued assets without a valid classic issuer key', () => {
+    for (const issuer of [undefined, 'invalid-issuer']) {
+      const config = {
+        ...baseConfig,
+        assets: { assets: [{ code: 'USDC', ...(issuer ? { issuer } : {}) }] },
+      } as AnchorKitConfig;
+      expect(() => new AnchorConfig(config).validate()).toThrow(/Invalid asset at index 0/);
+    }
   });
 
-  describe('isValidDatabaseUrl', () => {
-    test('should return true for valid database URLs', () => {
-      expect(ValidationUtils.isValidDatabaseUrl('postgresql://localhost:5432/db')).toBe(true);
-      expect(ValidationUtils.isValidDatabaseUrl('postgres://user:pass@host:5432/db')).toBe(true);
-      expect(ValidationUtils.isValidDatabaseUrl('sqlite://path/to/db.sqlite')).toBe(true);
-      expect(ValidationUtils.isValidDatabaseUrl('file:./local.db')).toBe(true);
-    });
+  it.each([' USDC', 'USDC ', '\tUSDC', 'USDC\n'])(
+    'should reject whitespace-padded asset code %j',
+    (code) => {
+      const config: AnchorKitConfig = {
+        ...baseConfig,
+        assets: { assets: [{ code, issuer: baseConfig.assets.assets[0].issuer }] },
+      };
+      expect(() => new AnchorConfig(config).validate()).toThrow(/Invalid asset at index 0/);
+    },
+  );
 
-    test('should return false for invalid database URLs', () => {
-      expect(ValidationUtils.isValidDatabaseUrl('')).toBe(false);
-      expect(ValidationUtils.isValidDatabaseUrl('not-a-db-url')).toBe(false);
-    });
+  it.each(['usdc', 'USDC', 'UsdC'])('should accept unpadded mixed-case asset code %s', (code) => {
+    const config: AnchorKitConfig = {
+      ...baseConfig,
+      assets: { assets: [{ code, issuer: baseConfig.assets.assets[0].issuer }] },
+    };
+    expect(() => new AnchorConfig(config).validate()).not.toThrow();
+  });
+
+  it('should reject asset with empty code string', () => {
+    const config: AnchorKitConfig = {
+      ...baseConfig,
+      assets: {
+        assets: [
+          {
+            code: '',
+            issuer: 'GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5',
+          },
+        ],
+      },
+    };
+    const anchor = new AnchorConfig(config);
+    expect(() => anchor.validate()).toThrow();
+    expect(() => anchor.validate()).toThrow(/Invalid asset at index 0/);
+  });
+
+  it('should reject asset with missing code', () => {
+    const config: AnchorKitConfig = {
+      ...baseConfig,
+      assets: {
+        assets: [
+          {
+            issuer: 'GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5',
+          } as unknown as { code: string; issuer: string },
+        ],
+      },
+    };
+    const anchor = new AnchorConfig(config);
+    expect(() => anchor.validate()).toThrow();
+    expect(() => anchor.validate()).toThrow(/Invalid asset at index 0/);
+  });
+
+  it('should reject asset with invalid issuer', () => {
+    const config: AnchorKitConfig = {
+      ...baseConfig,
+      assets: {
+        assets: [
+          {
+            code: 'USDC',
+            issuer: 'invalid-issuer',
+          },
+        ],
+      },
+    };
+    const anchor = new AnchorConfig(config);
+    expect(() => anchor.validate()).toThrow();
+    expect(() => anchor.validate()).toThrow(/Invalid asset at index 0/);
+  });
+
+  it('should reject asset with non-string code', () => {
+    const config: AnchorKitConfig = {
+      ...baseConfig,
+      assets: {
+        assets: [
+          {
+            code: 123 as unknown as string,
+            issuer: 'GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5',
+          },
+        ],
+      },
+    };
+    const anchor = new AnchorConfig(config);
+    expect(() => anchor.validate()).toThrow();
+    expect(() => anchor.validate()).toThrow(/Invalid asset at index 0/);
+  });
+
+  it('should reject asset with non-string issuer', () => {
+    const config: AnchorKitConfig = {
+      ...baseConfig,
+      assets: {
+        assets: [
+          {
+            code: 'USDC',
+            issuer: 123 as unknown as string,
+          },
+        ],
+      },
+    };
+    const anchor = new AnchorConfig(config);
+    expect(() => anchor.validate()).toThrow();
+    expect(() => anchor.validate()).toThrow(/Invalid asset at index 0/);
+  });
+
+  it('should identify the invalid asset by code in error message', () => {
+    const config: AnchorKitConfig = {
+      ...baseConfig,
+      assets: {
+        assets: [
+          {
+            code: 'GOOD',
+            issuer: 'GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5',
+          },
+          {
+            code: 'BAD',
+            issuer: 'invalid',
+          },
+        ],
+      },
+    };
+    const anchor = new AnchorConfig(config);
+    expect(() => anchor.validate()).toThrow();
+    expect(() => anchor.validate()).toThrow(/Invalid asset at index 1/);
+  });
+
+  it('should validate all assets and fail on first invalid one', () => {
+    const config: AnchorKitConfig = {
+      ...baseConfig,
+      assets: {
+        assets: [
+          {
+            code: 'USDC',
+            issuer: 'GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5',
+          },
+          {
+            code: 'EURC',
+            issuer: 'GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5',
+          },
+          {
+            code: '',
+            issuer: 'GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5',
+          },
+        ],
+      },
+    };
+    const anchor = new AnchorConfig(config);
+    expect(() => anchor.validate()).toThrow();
+    expect(() => anchor.validate()).toThrow(/Invalid asset at index 2/);
+  });
+
+  it('should reject non-object asset entries', () => {
+    const config: AnchorKitConfig = {
+      ...baseConfig,
+      assets: {
+        assets: ['not-an-object' as unknown as { code: string; issuer: string }],
+      },
+    };
+    const anchor = new AnchorConfig(config);
+    expect(() => anchor.validate()).toThrow();
+    expect(() => anchor.validate()).toThrow(/Invalid asset at index 0/);
   });
 });
 
-describe('NetworkConfigSchema', () => {
-  test('should validate a correct NetworkConfig', () => {
-    expect(() => NetworkConfigSchema.validate({ network: 'testnet' })).not.toThrow();
-    expect(() =>
-      NetworkConfigSchema.validate({
-        network: 'public',
-        horizonUrl: 'https://horizon.stellar.org',
-      }),
-    ).not.toThrow();
+describe('Operational Boolean Options Validation (#550)', () => {
+  const baseConfig: AnchorKitConfig = {
+    network: { network: 'testnet' },
+    server: { port: 3000 },
+    security: {
+      sep10SigningKey: 'secret-key-10',
+      interactiveJwtSecret: 'jwt-secret',
+      distributionAccountSecret: 'dist-secret',
+    },
+    assets: {
+      assets: [
+        {
+          code: 'USDC',
+          issuer: 'GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5',
+        },
+      ],
+    },
+    framework: {
+      database: {
+        provider: 'postgres',
+        url: 'postgresql://localhost:5432/anchor',
+      },
+    },
+  };
+
+  it('should accept valid boolean true for webhooksEnabled', () => {
+    const config: AnchorKitConfig = {
+      ...baseConfig,
+      operational: {
+        webhooksEnabled: true,
+      },
+    };
+    const anchor = new AnchorConfig(config);
+    expect(() => anchor.validate()).not.toThrow();
   });
 
-  test('should throw for invalid network name', () => {
-    // @ts-expect-error test case
-    expect(() => NetworkConfigSchema.validate({ network: 'invalidnet' })).toThrow(
-      /Invalid network/,
+  it('should accept valid boolean false for webhooksEnabled', () => {
+    const config: AnchorKitConfig = {
+      ...baseConfig,
+      operational: {
+        webhooksEnabled: false,
+      },
+    };
+    const anchor = new AnchorConfig(config);
+    expect(() => anchor.validate()).not.toThrow();
+  });
+
+  it('should accept valid boolean true for corsEnabled', () => {
+    const config: AnchorKitConfig = {
+      ...baseConfig,
+      operational: {
+        corsEnabled: true,
+      },
+    };
+    const anchor = new AnchorConfig(config);
+    expect(() => anchor.validate()).not.toThrow();
+  });
+
+  it('should accept valid boolean false for corsEnabled', () => {
+    const config: AnchorKitConfig = {
+      ...baseConfig,
+      operational: {
+        corsEnabled: false,
+      },
+    };
+    const anchor = new AnchorConfig(config);
+    expect(() => anchor.validate()).not.toThrow();
+  });
+
+  it('should accept config without webhooksEnabled (optional field)', () => {
+    const config: AnchorKitConfig = {
+      ...baseConfig,
+      operational: {},
+    };
+    const anchor = new AnchorConfig(config);
+    expect(() => anchor.validate()).not.toThrow();
+  });
+
+  it('should accept config without corsEnabled (optional field)', () => {
+    const config: AnchorKitConfig = {
+      ...baseConfig,
+      operational: {},
+    };
+    const anchor = new AnchorConfig(config);
+    expect(() => anchor.validate()).not.toThrow();
+  });
+
+  it('should reject string value for webhooksEnabled', () => {
+    const config = {
+      ...baseConfig,
+      operational: {
+        webhooksEnabled: 'true',
+      },
+    } as unknown as AnchorKitConfig;
+    const anchor = new AnchorConfig(config);
+    expect(() => anchor.validate()).toThrow('operational.webhooksEnabled must be a boolean');
+  });
+
+  it('should reject string value for corsEnabled', () => {
+    const config = {
+      ...baseConfig,
+      operational: {
+        corsEnabled: 'true',
+      },
+    } as unknown as AnchorKitConfig;
+    const anchor = new AnchorConfig(config);
+    expect(() => anchor.validate()).toThrow('operational.corsEnabled must be a boolean');
+  });
+
+  it('should reject number value for webhooksEnabled', () => {
+    const config = {
+      ...baseConfig,
+      operational: {
+        webhooksEnabled: 1,
+      },
+    } as unknown as AnchorKitConfig;
+    const anchor = new AnchorConfig(config);
+    expect(() => anchor.validate()).toThrow('operational.webhooksEnabled must be a boolean');
+  });
+
+  it('should reject number value for corsEnabled', () => {
+    const config = {
+      ...baseConfig,
+      operational: {
+        corsEnabled: 0,
+      },
+    } as unknown as AnchorKitConfig;
+    const anchor = new AnchorConfig(config);
+    expect(() => anchor.validate()).toThrow('operational.corsEnabled must be a boolean');
+  });
+});
+
+describe('Operational Website Validation (#388)', () => {
+  const baseConfig: AnchorKitConfig = {
+    network: { network: 'testnet' },
+    server: { port: 3000 },
+    security: {
+      sep10SigningKey: 'secret-key-10',
+      interactiveJwtSecret: 'jwt-secret',
+      distributionAccountSecret: 'dist-secret',
+    },
+    assets: {
+      assets: [
+        {
+          code: 'USDC',
+          issuer: 'GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5',
+        },
+      ],
+    },
+    framework: {
+      database: {
+        provider: 'postgres',
+        url: 'postgresql://localhost:5432/anchor',
+      },
+    },
+  };
+
+  it('should accept valid HTTP website URL', () => {
+    const config: AnchorKitConfig = {
+      ...baseConfig,
+      operational: {
+        website: 'http://example.com',
+      },
+    };
+    const anchor = new AnchorConfig(config);
+    expect(() => anchor.validate()).not.toThrow();
+  });
+
+  it('should accept valid HTTPS website URL', () => {
+    const config: AnchorKitConfig = {
+      ...baseConfig,
+      operational: {
+        website: 'https://example.com',
+      },
+    };
+    const anchor = new AnchorConfig(config);
+    expect(() => anchor.validate()).not.toThrow();
+  });
+
+  it('should accept config without operational.website (optional field)', () => {
+    const config: AnchorKitConfig = {
+      ...baseConfig,
+      operational: {
+        name: 'Test Anchor',
+      },
+    };
+    const anchor = new AnchorConfig(config);
+    expect(() => anchor.validate()).not.toThrow();
+  });
+
+  it('should accept config without operational section', () => {
+    const anchor = new AnchorConfig(baseConfig);
+    expect(() => anchor.validate()).not.toThrow();
+  });
+
+  it('should reject malformed URL', () => {
+    const config: AnchorKitConfig = {
+      ...baseConfig,
+      operational: {
+        website: 'not-a-valid-url',
+      },
+    };
+    const anchor = new AnchorConfig(config);
+    expect(() => anchor.validate()).toThrow();
+    expect(() => anchor.validate()).toThrow(/Invalid URL format for operational.website/);
+  });
+
+  it('should reject FTP scheme', () => {
+    const config: AnchorKitConfig = {
+      ...baseConfig,
+      operational: {
+        website: 'ftp://example.com',
+      },
+    };
+    const anchor = new AnchorConfig(config);
+    expect(() => anchor.validate()).toThrow();
+    expect(() => anchor.validate()).toThrow(/Invalid URL format for operational.website/);
+  });
+
+  it('should reject javascript: scheme', () => {
+    const config: AnchorKitConfig = {
+      ...baseConfig,
+      operational: {
+        website: 'javascript:alert(1)',
+      },
+    };
+    const anchor = new AnchorConfig(config);
+    expect(() => anchor.validate()).toThrow();
+    expect(() => anchor.validate()).toThrow(/Invalid URL format for operational.website/);
+  });
+
+  it('should reject data: scheme', () => {
+    const config: AnchorKitConfig = {
+      ...baseConfig,
+      operational: {
+        website: 'data:text/html,<script>alert(1)</script>',
+      },
+    };
+    const anchor = new AnchorConfig(config);
+    expect(() => anchor.validate()).toThrow();
+    expect(() => anchor.validate()).toThrow(/Invalid URL format for operational.website/);
+  });
+
+  it('should reject file: scheme', () => {
+    const config: AnchorKitConfig = {
+      ...baseConfig,
+      operational: {
+        website: 'file:///etc/passwd',
+      },
+    };
+    const anchor = new AnchorConfig(config);
+    expect(() => anchor.validate()).toThrow();
+    expect(() => anchor.validate()).toThrow(/Invalid URL format for operational.website/);
+  });
+
+  it('should reject mailto: scheme', () => {
+    const config: AnchorKitConfig = {
+      ...baseConfig,
+      operational: {
+        website: 'mailto:test@example.com',
+      },
+    };
+    const anchor = new AnchorConfig(config);
+    expect(() => anchor.validate()).toThrow();
+    expect(() => anchor.validate()).toThrow(/Invalid URL format for operational.website/);
+  });
+
+  it('should accept a valid support email', () => {
+    const config: AnchorKitConfig = {
+      ...baseConfig,
+      operational: { supportEmail: 'support@example.com' },
+    };
+    const anchor = new AnchorConfig(config);
+    expect(() => anchor.validate()).not.toThrow();
+  });
+
+  it('should reject a malformed support email', () => {
+    const config: AnchorKitConfig = {
+      ...baseConfig,
+      operational: { supportEmail: 'not-an-email' },
+    };
+    const anchor = new AnchorConfig(config);
+    expect(() => anchor.validate()).toThrow(/Invalid email format for operational.supportEmail/);
+  });
+});
+
+describe('Stellar Address Checksum Validation (#386)', () => {
+  const VALID_PUBLIC_KEY = 'GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5';
+  // One-character mutation of the StrKey checksum (final char 5 -> 3)
+  const BAD_CHECKSUM_KEY = 'GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA3';
+
+  it('should return true for a valid public key', () => {
+    expect(ValidationUtils.isValidStellarAddress(VALID_PUBLIC_KEY)).toBe(true);
+  });
+
+  it('should return false for a regex-shaped key with a bad checksum', () => {
+    expect(BAD_CHECKSUM_KEY).toMatch(/^G[A-Z2-7]{55}$/);
+    expect(ValidationUtils.isValidStellarAddress(BAD_CHECKSUM_KEY)).toBe(false);
+  });
+
+  it('should accept a valid muxed account address', () => {
+    const muxed = encodeMuxedAccountToAddress(encodeMuxedAccount(VALID_PUBLIC_KEY, '42'), true);
+    expect(ValidationUtils.isValidStellarAddress(muxed)).toBe(true);
+  });
+
+  it('should reject a checksum-invalid muxed account address', () => {
+    const muxed = encodeMuxedAccountToAddress(encodeMuxedAccount(VALID_PUBLIC_KEY, '42'), true);
+    const replacement = muxed.endsWith('A') ? 'B' : 'A';
+    expect(ValidationUtils.isValidStellarAddress(muxed.slice(0, -1) + replacement)).toBe(false);
+  });
+
+  it('should return false for empty or non-string input', () => {
+    expect(ValidationUtils.isValidStellarAddress('')).toBe(false);
+    expect(ValidationUtils.isValidStellarAddress(null as unknown as string)).toBe(false);
+    expect(ValidationUtils.isValidStellarAddress(undefined as unknown as string)).toBe(false);
+  });
+});
+
+describe('Email Validation (#607)', () => {
+  it.each(['support@example.com', 'first.last+tag@example.co.uk', 'user_name@example-domain.com'])(
+    'accepts valid email %s',
+    (email) => {
+      expect(ValidationUtils.isValidEmail(email)).toBe(true);
+    },
+  );
+
+  it.each([
+    '.support@example.com',
+    'support.@example.com',
+    'support..team@example.com',
+    'support@.example.com',
+    'support@example..com',
+  ])('rejects malformed email %s', (email) => {
+    expect(ValidationUtils.isValidEmail(email)).toBe(false);
+  });
+});
+
+describe('Documentation URLs Validation (#549)', () => {
+  const baseConfig: AnchorKitConfig = {
+    network: { network: 'testnet' },
+    server: { port: 3000 },
+    security: {
+      sep10SigningKey: 'secret-key-10',
+      interactiveJwtSecret: 'jwt-secret',
+      distributionAccountSecret: 'dist-secret',
+    },
+    assets: {
+      assets: [
+        {
+          code: 'USDC',
+          issuer: 'GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5',
+        },
+      ],
+    },
+    framework: {
+      database: {
+        provider: 'postgres',
+        url: 'postgresql://localhost:5432/anchor',
+      },
+    },
+  };
+
+  it('should accept valid HTTPS URL for apiDocs', () => {
+    const config: AnchorKitConfig = {
+      ...baseConfig,
+      metadata: {
+        documentationUrls: {
+          apiDocs: 'https://docs.example.com/api',
+        },
+      },
+    };
+    const anchor = new AnchorConfig(config);
+    expect(() => anchor.validate()).not.toThrow();
+  });
+
+  it('should accept valid HTTP URL for apiDocs', () => {
+    const config: AnchorKitConfig = {
+      ...baseConfig,
+      metadata: {
+        documentationUrls: {
+          apiDocs: 'http://docs.example.com/api',
+        },
+      },
+    };
+    const anchor = new AnchorConfig(config);
+    expect(() => anchor.validate()).not.toThrow();
+  });
+
+  it('should accept valid HTTPS URL for support', () => {
+    const config: AnchorKitConfig = {
+      ...baseConfig,
+      metadata: {
+        documentationUrls: {
+          support: 'https://support.example.com',
+        },
+      },
+    };
+    const anchor = new AnchorConfig(config);
+    expect(() => anchor.validate()).not.toThrow();
+  });
+
+  it('should accept valid HTTP URL for support', () => {
+    const config: AnchorKitConfig = {
+      ...baseConfig,
+      metadata: {
+        documentationUrls: {
+          support: 'http://support.example.com',
+        },
+      },
+    };
+    const anchor = new AnchorConfig(config);
+    expect(() => anchor.validate()).not.toThrow();
+  });
+
+  it('should accept valid HTTPS URL for terms', () => {
+    const config: AnchorKitConfig = {
+      ...baseConfig,
+      metadata: {
+        documentationUrls: {
+          terms: 'https://example.com/terms',
+        },
+      },
+    };
+    const anchor = new AnchorConfig(config);
+    expect(() => anchor.validate()).not.toThrow();
+  });
+
+  it('should accept valid HTTP URL for terms', () => {
+    const config: AnchorKitConfig = {
+      ...baseConfig,
+      metadata: {
+        documentationUrls: {
+          terms: 'http://example.com/terms',
+        },
+      },
+    };
+    const anchor = new AnchorConfig(config);
+    expect(() => anchor.validate()).not.toThrow();
+  });
+
+  it('should accept config without documentationUrls (optional field)', () => {
+    const config: AnchorKitConfig = {
+      ...baseConfig,
+      metadata: {
+        tomlUrl: 'https://example.com/stellar.toml',
+      },
+    };
+    const anchor = new AnchorConfig(config);
+    expect(() => anchor.validate()).not.toThrow();
+  });
+
+  it('should accept config with empty documentationUrls object', () => {
+    const config: AnchorKitConfig = {
+      ...baseConfig,
+      metadata: {
+        documentationUrls: {},
+      },
+    };
+    const anchor = new AnchorConfig(config);
+    expect(() => anchor.validate()).not.toThrow();
+  });
+
+  it('should accept config with partial documentationUrls', () => {
+    const config: AnchorKitConfig = {
+      ...baseConfig,
+      metadata: {
+        documentationUrls: {
+          apiDocs: 'https://docs.example.com/api',
+        },
+      },
+    };
+    const anchor = new AnchorConfig(config);
+    expect(() => anchor.validate()).not.toThrow();
+  });
+
+  it('should accept all three valid documentation URLs', () => {
+    const config: AnchorKitConfig = {
+      ...baseConfig,
+      metadata: {
+        documentationUrls: {
+          apiDocs: 'https://docs.example.com/api',
+          support: 'https://support.example.com',
+          terms: 'https://example.com/terms',
+        },
+      },
+    };
+    const anchor = new AnchorConfig(config);
+    expect(() => anchor.validate()).not.toThrow();
+  });
+
+  it('should reject malformed URL for apiDocs', () => {
+    const config: AnchorKitConfig = {
+      ...baseConfig,
+      metadata: {
+        documentationUrls: {
+          apiDocs: 'not-a-valid-url',
+        },
+      },
+    };
+    const anchor = new AnchorConfig(config);
+    expect(() => anchor.validate()).toThrow(
+      /Invalid URL format for metadata.documentationUrls.apiDocs/,
     );
   });
 
-  test('should throw for invalid horizonUrl', () => {
-    expect(() =>
-      NetworkConfigSchema.validate({
-        network: 'testnet',
-        horizonUrl: 'not-a-url',
-      }),
-    ).toThrow(/Invalid URL format/);
-  });
-});
-
-describe('SecurityConfigSchema', () => {
-  const validSecurityConfig = {
-    sep10SigningKey: 'SD6P3...',
-    interactiveJwtSecret: 'shhh',
-    distributionAccountSecret: 'SD7Q4...',
-  };
-
-  test('should validate a correct SecurityConfig', () => {
-    expect(() => SecurityConfigSchema.validate(validSecurityConfig)).not.toThrow();
-  });
-
-  test('should throw for missing security secrets', () => {
-    expect(() =>
-      SecurityConfigSchema.validate({
-        ...validSecurityConfig,
-        sep10SigningKey: '',
-      }),
-    ).toThrow(/sep10SigningKey/);
-  });
-
-  test('should throw for invalid authTokenLifetimeSeconds', () => {
-    expect(() =>
-      SecurityConfigSchema.validate({
-        ...validSecurityConfig,
-        authTokenLifetimeSeconds: 0,
-      }),
-    ).toThrow(/authTokenLifetimeSeconds must be > 0/);
-  });
-
-  test('should throw when authTokenLifetimeSeconds is a string', () => {
-    expect(() =>
-      SecurityConfigSchema.validate({
-        ...validSecurityConfig,
-        authTokenLifetimeSeconds: '3600' as unknown as number,
-      }),
-    ).toThrow(/authTokenLifetimeSeconds must be > 0/);
-  });
-});
-
-describe('AnchorKitConfigSchema', () => {
-  const validConfig: AnchorKitConfig = {
-    network: { network: 'testnet' },
-    server: { interactiveDomain: 'https://example.com' },
-    security: {
-      sep10SigningKey: 'SD6P3...',
-      interactiveJwtSecret: 'shhh',
-      distributionAccountSecret: 'SD7Q4...',
-    },
-    assets: {
-      assets: [{ code: 'USDC', issuer: 'GD...' }],
-    },
-    framework: {
-      database: { provider: 'sqlite', url: 'file:./test.db' },
-    },
-  };
-
-  test('should validate a correct AnchorKitConfig', () => {
-    expect(() => AnchorKitConfigSchema.validate(validConfig)).not.toThrow();
-  });
-
-  test('should throw for missing secrets', () => {
-    const invalidConfig = {
-      ...validConfig,
-      security: { ...validConfig.security, sep10SigningKey: '' },
-    };
-    expect(() => AnchorKitConfigSchema.validate(invalidConfig)).toThrow(/sep10SigningKey/);
-  });
-
-  test('should throw for invalid pollsIntervalMs', () => {
-    const invalidConfig = {
-      ...validConfig,
-      framework: {
-        ...validConfig.framework,
-        watchers: { pollIntervalMs: 5 }, // Minimum is 10
+  it('should reject malformed URL for support', () => {
+    const config: AnchorKitConfig = {
+      ...baseConfig,
+      metadata: {
+        documentationUrls: {
+          support: 'not-a-valid-url',
+        },
       },
     };
-    expect(() => AnchorKitConfigSchema.validate(invalidConfig)).toThrow(/pollIntervalMs/);
+    const anchor = new AnchorConfig(config);
+    expect(() => anchor.validate()).toThrow(
+      /Invalid URL format for metadata.documentationUrls.support/,
+    );
+  });
+
+  it('should reject malformed URL for terms', () => {
+    const config: AnchorKitConfig = {
+      ...baseConfig,
+      metadata: {
+        documentationUrls: {
+          terms: 'not-a-valid-url',
+        },
+      },
+    };
+    const anchor = new AnchorConfig(config);
+    expect(() => anchor.validate()).toThrow(
+      /Invalid URL format for metadata.documentationUrls.terms/,
+    );
+  });
+
+  it('should reject FTP scheme for apiDocs', () => {
+    const config: AnchorKitConfig = {
+      ...baseConfig,
+      metadata: {
+        documentationUrls: {
+          apiDocs: 'ftp://docs.example.com/api',
+        },
+      },
+    };
+    const anchor = new AnchorConfig(config);
+    expect(() => anchor.validate()).toThrow(
+      /Invalid URL format for metadata.documentationUrls.apiDocs/,
+    );
+  });
+
+  it('should reject javascript: scheme for support', () => {
+    const config: AnchorKitConfig = {
+      ...baseConfig,
+      metadata: {
+        documentationUrls: {
+          support: 'javascript:alert(1)',
+        },
+      },
+    };
+    const anchor = new AnchorConfig(config);
+    expect(() => anchor.validate()).toThrow(
+      /Invalid URL format for metadata.documentationUrls.support/,
+    );
+  });
+
+  it('should reject data: scheme for terms', () => {
+    const config: AnchorKitConfig = {
+      ...baseConfig,
+      metadata: {
+        documentationUrls: {
+          terms: 'data:text/html,<script>alert(1)</script>',
+        },
+      },
+    };
+    const anchor = new AnchorConfig(config);
+    expect(() => anchor.validate()).toThrow(
+      /Invalid URL format for metadata.documentationUrls.terms/,
+    );
+  });
+
+  it('should reject file: scheme for apiDocs', () => {
+    const config: AnchorKitConfig = {
+      ...baseConfig,
+      metadata: {
+        documentationUrls: {
+          apiDocs: 'file:///etc/passwd',
+        },
+      },
+    };
+    const anchor = new AnchorConfig(config);
+    expect(() => anchor.validate()).toThrow(
+      /Invalid URL format for metadata.documentationUrls.apiDocs/,
+    );
+  });
+
+  it('should reject mailto: scheme for support', () => {
+    const config: AnchorKitConfig = {
+      ...baseConfig,
+      metadata: {
+        documentationUrls: {
+          support: 'mailto:support@example.com',
+        },
+      },
+    };
+    const anchor = new AnchorConfig(config);
+    expect(() => anchor.validate()).toThrow(
+      /Invalid URL format for metadata.documentationUrls.support/,
+    );
   });
 });

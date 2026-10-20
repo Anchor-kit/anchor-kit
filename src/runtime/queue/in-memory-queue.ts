@@ -1,4 +1,5 @@
-import type { QueueAdapter, QueueJob } from '@/runtime/interfaces.ts';
+import { ConfigError } from '@/core/errors.ts';
+import type { QueueAdapter, QueueDrainStatus, QueueJob } from '@/runtime/interfaces.ts';
 
 interface InMemoryQueueOptions {
   concurrency: number;
@@ -18,13 +19,28 @@ export class InMemoryQueueAdapter implements QueueAdapter {
   private resolveStop: (() => void) | null = null;
 
   constructor(options: InMemoryQueueOptions) {
+    if (!Number.isSafeInteger(options.concurrency) || options.concurrency < 1) {
+      throw new ConfigError('InMemoryQueueAdapter concurrency must be a positive safe integer');
+    }
+    if (
+      options.maxPendingJobs !== undefined &&
+      (!Number.isSafeInteger(options.maxPendingJobs) || options.maxPendingJobs < 1)
+    ) {
+      throw new ConfigError('InMemoryQueueAdapter maxPendingJobs must be a positive safe integer');
+    }
+
     this.concurrency = options.concurrency;
     this.maxPendingJobs = options.maxPendingJobs;
     this.onError = options.onError;
   }
 
+  public get status(): QueueDrainStatus {
+    return { pending: this.jobs.length, active: this.activeWorkers };
+  }
+
   public async enqueue(job: QueueJob): Promise<void> {
-    const canStartImmediately = this.running && this.worker && this.activeWorkers < this.concurrency;
+    const canStartImmediately =
+      this.running && this.worker && this.activeWorkers < this.concurrency;
     if (
       this.maxPendingJobs !== undefined &&
       this.jobs.length >= this.maxPendingJobs &&
@@ -38,6 +54,13 @@ export class InMemoryQueueAdapter implements QueueAdapter {
   }
 
   public async start(worker: (job: QueueJob) => Promise<void>): Promise<void> {
+    if (this.running) {
+      if (this.worker === worker) {
+        return;
+      }
+      throw new Error('Queue is already running with a different worker callback.');
+    }
+
     this.worker = worker;
     this.running = true;
     this.kick();

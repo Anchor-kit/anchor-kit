@@ -13,6 +13,10 @@ export const CryptoUtils = {
    * @returns A secure random string.
    */
   generateRandomString(length: number): string {
+    if (!Number.isSafeInteger(length) || length < 0) {
+      throw new TypeError('length must be a non-negative safe integer');
+    }
+
     const charset = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
     let result = '';
     const randomValues = new Uint32Array(length);
@@ -60,24 +64,19 @@ export const CryptoUtils = {
     secret: string,
     options: { expiresIn?: string | number } = {},
   ): Promise<string> {
+    if (secret.trim().length === 0) {
+      throw new TypeError('secret must not be empty');
+    }
+
     const secretKey = new TextEncoder().encode(secret);
     const issuedAt = Math.floor(Date.now() / 1000);
     const builder = new jose.SignJWT(payload)
       .setProtectedHeader({ alg: 'HS256' })
       .setIssuedAt(issuedAt);
 
+    // Honor an explicit expiresIn of 0 (immediate expiry). Only skip when option omitted.
     if (options.expiresIn !== undefined) {
-      if (typeof options.expiresIn === 'number') {
-        if (!Number.isFinite(options.expiresIn) || options.expiresIn < 0) {
-          throw new TypeError(
-            'expiresIn must be a non-negative finite number or a duration string',
-          );
-        }
-
-        builder.setExpirationTime(issuedAt + options.expiresIn);
-      } else {
-        builder.setExpirationTime(options.expiresIn);
-      }
+      builder.setExpirationTime(options.expiresIn);
     }
 
     return builder.sign(secretKey);
@@ -92,6 +91,10 @@ export const CryptoUtils = {
    * @throws Error if the token is invalid or expired.
    */
   async verifyJwt(token: string, secret: string): Promise<JWTPayload> {
+    if (secret.trim().length === 0) {
+      throw new TypeError('secret must not be empty');
+    }
+
     const secretKey = new TextEncoder().encode(secret);
     const { payload } = await jose.jwtVerify(token, secretKey);
     return payload;

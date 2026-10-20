@@ -26,6 +26,6 @@
       "@/*": ["./src/*"]
     }
   },
-  "include": ["src/**/*", "tests/**/*", "example/**/*"],
-  "exclude": ["node_modules", "dist", "tests/fixtures/package-consumer"]
+  "include": ["src/**/*", "tests/**/*", "example/**/*", "index.ts", "*.ts"],
+  "exclude": ["node_modules", "dist"]
 }
