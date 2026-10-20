@@ -264,6 +264,31 @@ describe('AnchorConfig', () => {
       expect(config.get('security').authTokenLifetimeSeconds).toBeUndefined();
     });
 
+    it('should accept the maximum SEP-10 challenge lifetime', () => {
+      const config = new AnchorConfig({
+        ...validBaseConfig,
+        security: {
+          ...validBaseConfig.security,
+          challengeExpirationSeconds: 300,
+        },
+      });
+      expect(() => config.validate()).not.toThrow();
+    });
+
+    it.each([0, 301, 1.5])('should reject unsupported SEP-10 challenge lifetime (%s)', (value) => {
+      const config = new AnchorConfig({
+        ...validBaseConfig,
+        security: {
+          ...validBaseConfig.security,
+          challengeExpirationSeconds: value,
+        },
+      });
+      expect(() => config.validate()).toThrow(ConfigError);
+      expect(() => config.validate()).toThrow(
+        /challengeExpirationSeconds must be an integer from 1 to 300/,
+      );
+    });
+
     it('should reject invalid auth token lifetime (zero)', () => {
       const invalidConfig: AnchorKitConfig = {
         ...validBaseConfig,

@@ -18,6 +18,14 @@ import { AnchorExpressRouter, type ExpressLikeMiddleware } from '@/runtime/http/
 import { TransactionWatcher } from '@/runtime/watchers/transaction-watcher.ts';
 import { ConfigError } from '@/core/errors.ts';
 
+export interface CreateAnchorOptions {
+  /**
+   * Caller-created adapter. AnchorKit manages connect/migrate during init and
+   * disconnect during shutdown; do not share it with another active instance.
+   */
+  databaseAdapter?: DatabaseAdapter;
+}
+
 /**
  * AnchorInstance
  * Represents the core SDK instance controlling the anchor's behavior.
@@ -36,10 +44,12 @@ export class AnchorInstance {
   private backgroundJobsRunning = false;
   private initPromise: Promise<void> | null = null;
   private shutdownPromise: Promise<void> | null = null;
+  private readonly injectedDatabaseAdapter: DatabaseAdapter | undefined;
 
-  constructor(config: Partial<AnchorKitConfig>) {
+  constructor(config: Partial<AnchorKitConfig>, options: CreateAnchorOptions = {}) {
     this.config = new AnchorConfig(config);
     this.config.validate();
+    this.injectedDatabaseAdapter = options.databaseAdapter;
   }
 
   /**
@@ -129,7 +139,10 @@ export class AnchorInstance {
   }
 
   protected createDatabaseAdapter(): DatabaseAdapter {
-    return createSqlDatabaseAdapter(this.config.get('framework').database);
+    return (
+      this.injectedDatabaseAdapter ??
+      createSqlDatabaseAdapter(this.config.get('framework').database)
+    );
   }
 
   /**
@@ -163,8 +176,8 @@ export class AnchorInstance {
   }
 
   /**
-  * Cleanly shut down all services. If initialization is pending, shutdown waits
-  * for it to settle before releasing resources. The instance can then be initialized again.
+   * Cleanly shut down all services. If initialization is pending, shutdown waits
+   * for it to settle before releasing resources. The instance can then be initialized again.
    */
   public async shutdown(): Promise<void> {
     if (this.shutdownPromise) return this.shutdownPromise;
@@ -302,11 +315,17 @@ export class AnchorInstance {
 }
 
 /**
- * createAnchor
- * Factory function to initialize a new Anchor-Kit instance.
+ * Create a new Anchor-Kit instance.
+ *
+ * A supplied database adapter is created and configured by the caller. The
+ * instance manages its lifecycle: connect and migrate once per init cycle,
+ * then disconnect once when that cycle shuts down.
  */
-export function createAnchor(config: Partial<AnchorKitConfig>): AnchorInstance {
-  return new AnchorInstance(config);
+export function createAnchor(
+  config: Partial<AnchorKitConfig>,
+  options: CreateAnchorOptions = {},
+): AnchorInstance {
+  return new AnchorInstance(config, options);
 }
 
 export { makeSqliteDbUrlForTests };

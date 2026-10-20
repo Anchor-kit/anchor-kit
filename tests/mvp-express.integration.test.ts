@@ -1,6 +1,6 @@
 import { makeSqliteDbUrlForTests } from '@/core/factory.ts';
 import { createAnchor, type AnchorInstance } from '@/index.ts';
-import { Keypair, Transaction } from '@stellar/stellar-sdk';
+import { Keypair, Transaction, WebAuth } from '@stellar/stellar-sdk';
 import { createHmac } from 'node:crypto';
 import { unlinkSync } from 'node:fs';
 import type { IncomingMessage, ServerResponse } from 'node:http';
@@ -295,6 +295,15 @@ describe('MVP Express-mounted integration', () => {
     expect(challengeXdr.length).toBeGreaterThan(0);
     const networkPassphrase = String(challengeResponse.body.network_passphrase ?? '');
     const challengeTx = new Transaction(challengeXdr, networkPassphrase);
+    const parsedChallenge = WebAuth.readChallengeTx(
+      challengeXdr,
+      sep10ServerKeypair.publicKey(),
+      networkPassphrase,
+      'anchor.example.com',
+      'anchor.example.com',
+    );
+    expect(parsedChallenge.clientAccountID).toBe(account);
+    expect(parsedChallenge.tx.sequence).toBe('0');
     challengeTx.sign(clientKeypair);
     const signedChallengeXdr = challengeTx.toXDR();
 
@@ -898,7 +907,13 @@ describe('MVP Express-mounted integration', () => {
         ...headers,
         'x-webhook-provider': 'generic',
         'x-anchor-signature': createHmac('sha256', 'webhook-test-secret')
-          .update(JSON.stringify({ id: 'evt_rate_limit_21', type: 'deposit.completed', transaction_id: transactionId }))
+          .update(
+            JSON.stringify({
+              id: 'evt_rate_limit_21',
+              type: 'deposit.completed',
+              transaction_id: transactionId,
+            }),
+          )
           .digest('hex'),
       },
       body: {

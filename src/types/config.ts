@@ -119,7 +119,7 @@ export interface SecurityConfig {
   distributionAccountSecret: string;
 
   /**
-   * Challenge transaction time limit in seconds
+   * SEP-10 challenge time limit in seconds. Must be an integer from 1 to 300.
    * @optional - defaults to 300
    */
   challengeExpirationSeconds?: number;

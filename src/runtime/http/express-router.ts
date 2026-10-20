@@ -3,14 +3,7 @@ import type { AnchorConfig } from '@/core/config.ts';
 import { ValidationError } from '@/core/errors.ts';
 import { InMemoryRateLimiter, type RateLimitRule } from '@/runtime/http/rate-limiter.ts';
 import type { DatabaseAdapter, WebhookProcessor } from '@/runtime/interfaces.ts';
-import {
-  Account,
-  Keypair,
-  Operation,
-  StrKey,
-  Transaction,
-  TransactionBuilder,
-} from '@stellar/stellar-sdk';
+import { Keypair, StrKey, Transaction, WebAuth } from '@stellar/stellar-sdk';
 import jwt from 'jsonwebtoken';
 import { createHash, randomUUID } from 'node:crypto';
 import { IdempotencyUtils } from '@/utils/idempotency.ts';
@@ -40,8 +33,6 @@ interface JsonResponse {
 interface RawBodyCarrier {
   rawBody?: string;
 }
-
-const SEP10_NONCE_OP = 'anchor_auth';
 
 function sendJson(res: ServerResponse, status: number, body: Record<string, unknown>): void {
   if (!res.headersSent) {
@@ -168,7 +159,7 @@ function hasValidSignature(transaction: Transaction, publicKey: string): boolean
   return false;
 }
 
-function extractNonceFromChallenge(transaction: Transaction): string | null {
+function extractNonceFromChallenge(transaction: Transaction, homeDomain: string): string | null {
   for (const operation of transaction.operations) {
     if (operation.type !== 'manageData') {
       continue;
@@ -180,7 +171,7 @@ function extractNonceFromChallenge(transaction: Transaction): string | null {
     };
 
     const name = manageDataOp.name;
-    if (typeof name !== 'string' || name !== SEP10_NONCE_OP) {
+    if (typeof name !== 'string' || name !== `${homeDomain} auth`) {
       continue;
     }
 
@@ -207,6 +198,7 @@ export class AnchorExpressRouter {
   private readonly webhookProcessor: WebhookProcessor;
   private readonly sep10ServerKeypair: Keypair;
   private readonly networkPassphrase: string;
+  private readonly webAuthDomain: string;
   private readonly maxBodyBytes: number;
   private readonly rateLimiter = new InMemoryRateLimiter();
   private readonly rateRules: Record<
@@ -220,6 +212,12 @@ export class AnchorExpressRouter {
     this.webhookProcessor = dependencies.webhookProcessor;
     this.sep10ServerKeypair = Keypair.fromSecret(this.config.get('security').sep10SigningKey);
     this.networkPassphrase = this.config.get('network').networkPassphrase ?? '';
+    const interactiveDomain = this.config.get('server').interactiveDomain;
+    this.webAuthDomain = interactiveDomain
+      ? new URL(
+          interactiveDomain.includes('://') ? interactiveDomain : `https://${interactiveDomain}`,
+        ).hostname
+      : 'localhost';
     this.maxBodyBytes = this.config.get('framework').http?.maxBodyBytes ?? 1024 * 1024;
 
     const rateLimitConfig = this.config.get('framework').rateLimit;
@@ -301,30 +299,24 @@ export class AnchorExpressRouter {
         return;
       }
 
-      const nonce = randomUUID();
-      const now = Math.floor(Date.now() / 1000);
       const expirationSeconds = this.config.get('security').challengeExpirationSeconds ?? 300;
-      const expiresAtUnix = now + expirationSeconds;
-
-      const challengeTx = new TransactionBuilder(
-        new Account(this.sep10ServerKeypair.publicKey(), '0'),
-        {
-          fee: '100',
-          networkPassphrase: this.networkPassphrase,
-        },
-      )
-        .addOperation(
-          Operation.manageData({
-            name: SEP10_NONCE_OP,
-            value: nonce,
-            source: account,
-          }),
-        )
-        .setTimebounds(now, expiresAtUnix)
-        .build();
-
-      challengeTx.sign(this.sep10ServerKeypair);
-      const challengeXdr = challengeTx.toXDR();
+      const challengeXdr = WebAuth.buildChallengeTx(
+        this.sep10ServerKeypair,
+        account,
+        this.webAuthDomain,
+        expirationSeconds,
+        this.networkPassphrase,
+        this.webAuthDomain,
+      );
+      const challengeTx = new Transaction(challengeXdr, this.networkPassphrase);
+      const nonce = extractNonceFromChallenge(challengeTx, this.webAuthDomain);
+      if (!nonce) {
+        throw new Error('Generated SEP-10 challenge is missing its authentication nonce');
+      }
+      const expiresAtUnix = Number(challengeTx.timeBounds?.maxTime);
+      if (!Number.isFinite(expiresAtUnix)) {
+        throw new Error('Generated SEP-10 challenge is missing its expiration time');
+      }
       const expiresAt = new Date(expiresAtUnix * 1000).toISOString();
 
       await this.database.insertAuthChallenge({
@@ -388,7 +380,7 @@ export class AnchorExpressRouter {
         return;
       }
 
-      const nonce = extractNonceFromChallenge(transaction);
+      const nonce = extractNonceFromChallenge(transaction, this.webAuthDomain);
       if (!nonce) {
         sendJson(res, 401, {
           error: 'invalid_challenge',

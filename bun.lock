@@ -7,6 +7,7 @@
       "dependencies": {
         "@stellar/stellar-sdk": "^14.6.0",
         "@types/bcryptjs": "^3.0.0",
+        "@types/big.js": "^6.2.2",
         "@types/express": "^5.0.6",
         "@types/jsonwebtoken": "^9.0.10",
         "@types/supertest": "^7.2.0",
@@ -21,7 +22,6 @@
       },
       "devDependencies": {
         "@eslint/js": "^10.0.1",
-        "@types/big.js": "^6.2.2",
         "@types/bun": "latest",
         "@types/node": "^25.5.0",
         "@vitest/coverage-v8": "^4.0.18",

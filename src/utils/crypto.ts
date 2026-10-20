@@ -49,7 +49,10 @@ export const CryptoUtils = {
    *
    * @param payload The payload to include in the token.
    * @param secret The secret key to sign the token with.
-   * @param options Additional options for token generation (e.g., expiration).
+   * @param options Additional options for token generation. Numeric expiresIn
+   * values are relative seconds (zero expires immediately; negative or
+   * non-finite values are rejected). Strings use jose duration syntax, such as
+   * '1h'.
    * @returns A promise that resolves to the generated JWT.
    */
   async generateJwt(
@@ -58,10 +61,23 @@ export const CryptoUtils = {
     options: { expiresIn?: string | number } = {},
   ): Promise<string> {
     const secretKey = new TextEncoder().encode(secret);
-    const builder = new jose.SignJWT(payload).setProtectedHeader({ alg: 'HS256' }).setIssuedAt();
+    const issuedAt = Math.floor(Date.now() / 1000);
+    const builder = new jose.SignJWT(payload)
+      .setProtectedHeader({ alg: 'HS256' })
+      .setIssuedAt(issuedAt);
 
-    if (options.expiresIn) {
-      builder.setExpirationTime(options.expiresIn);
+    if (options.expiresIn !== undefined) {
+      if (typeof options.expiresIn === 'number') {
+        if (!Number.isFinite(options.expiresIn) || options.expiresIn < 0) {
+          throw new TypeError(
+            'expiresIn must be a non-negative finite number or a duration string',
+          );
+        }
+
+        builder.setExpirationTime(issuedAt + options.expiresIn);
+      } else {
+        builder.setExpirationTime(options.expiresIn);
+      }
     }
 
     return builder.sign(secretKey);

@@ -195,6 +195,14 @@ export const SecurityConfigSchema = {
     ) {
       throw new Error('security.authTokenLifetimeSeconds must be > 0');
     }
+    if (
+      config.challengeExpirationSeconds !== undefined &&
+      (!Number.isInteger(config.challengeExpirationSeconds) ||
+        config.challengeExpirationSeconds < 1 ||
+        config.challengeExpirationSeconds > 300)
+    ) {
+      throw new Error('security.challengeExpirationSeconds must be an integer from 1 to 300');
+    }
   },
 };
 
@@ -258,7 +266,8 @@ export const AnchorKitConfigSchema = {
     }
     if (
       config.webhooks?.callbackTimeoutMs !== undefined &&
-      (!Number.isFinite(config.webhooks.callbackTimeoutMs) || config.webhooks.callbackTimeoutMs <= 0)
+      (!Number.isFinite(config.webhooks.callbackTimeoutMs) ||
+        config.webhooks.callbackTimeoutMs <= 0)
     ) {
       throw new Error('webhooks.callbackTimeoutMs must be > 0');
     }
