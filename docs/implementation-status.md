@@ -16,7 +16,7 @@ This file tracks where the codebase currently aligns or diverges from the canoni
 
 - SQL persistence through the `DatabaseAdapter` interface, with SQLite support for local development and tests and PostgreSQL support through the configured SQL client.
 - Express HTTP adapter for health, info, authentication, transaction, and webhook routes, including request limits and rate limiting.
-- Webhook processing with optional signature verification, event deduplication, persistence, callback dispatch, and failure status updates.
+- Webhook processing with optional signature verification, event deduplication, persistence, callback dispatch, and explicit unresolved status for timed-out callbacks.
 - In-memory queue adapter for bounded background work and graceful shutdown.
 - Transaction watcher lifecycle for polling pending transactions, persisting watcher tasks, and dispatching work through the queue.
 

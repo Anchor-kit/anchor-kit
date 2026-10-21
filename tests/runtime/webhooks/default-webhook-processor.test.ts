@@ -110,6 +110,72 @@ describe('DefaultWebhookProcessor', () => {
     expect(callbackInvokedCount).toBe(0);
   });
 
+  test('records an ambiguous timeout as unresolved and does not retry a duplicate delivery', async () => {
+    const eventRecords = new Map<string, WebhookEventRecord>();
+    let lateCallbackCount = 0;
+    const database: Partial<DatabaseAdapter> = {
+      async insertOrGetWebhookEvent(input) {
+        const existing = eventRecords.get(input.eventId);
+        if (existing) return { record: existing, inserted: false };
+        const record: WebhookEventRecord = {
+          id: input.id,
+          eventId: input.eventId,
+          provider: input.provider,
+          payload: input.payload,
+          status: 'pending',
+          errorMessage: null,
+          processedAt: null,
+          createdAt: new Date().toISOString(),
+        };
+        eventRecords.set(input.eventId, record);
+        return { record, inserted: true };
+      },
+      async updateWebhookEventStatus(input) {
+        const record = [...eventRecords.values()].find((candidate) => candidate.id === input.id);
+        if (record) {
+          record.status = input.status;
+          record.errorMessage = input.errorMessage ?? null;
+        }
+      },
+    };
+    const timeoutProcessor = new DefaultWebhookProcessor({
+      config: {
+        network: { network: 'testnet' },
+        server: { interactiveDomain: 'test.example.com' },
+        assets: { assets: [] },
+        framework: { database: { provider: 'sqlite', url: 'file::memory:' } },
+        security: {
+          sep10SigningKey: 'SCZJBZ6S7HWMQVT7DM74JVHVDKCEE5P6I6T3E5M7LJM6LJM6LJM6LJM6',
+          interactiveJwtSecret: 'test-jwt-secret',
+          distributionAccountSecret: 'test-distribution-secret',
+          verifyWebhookSignatures: false,
+        },
+        webhooks: {
+          callbackTimeoutMs: 1,
+          onEvent: async () => {
+            await new Promise((resolve) => setTimeout(resolve, 20));
+            lateCallbackCount += 1;
+          },
+        },
+      },
+      database: database as DatabaseAdapter,
+    });
+
+    const event = {
+      eventId: 'evt-timeout',
+      provider: 'test-provider',
+      payload: { type: 'test' },
+      rawBody: '{}',
+    };
+    await expect(timeoutProcessor.process(event)).rejects.toThrow('Webhook processing failed');
+    const duplicate = await timeoutProcessor.process(event);
+    await new Promise((resolve) => setTimeout(resolve, 25));
+
+    expect(duplicate).toMatchObject({ duplicate: true, status: 'unresolved' });
+    expect(eventRecords.get('evt-timeout')?.status).toBe('unresolved');
+    expect(lateCallbackCount).toBe(1);
+  });
+
   test('throws when verification is enabled but webhook secret is missing', async () => {
     const config: AnchorKitConfig = {
       network: { network: 'testnet' },

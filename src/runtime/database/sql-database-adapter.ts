@@ -968,7 +968,7 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
 
   public async updateWebhookEventStatus(input: {
     id: string;
-    status: 'processed' | 'failed';
+    status: 'processed' | 'failed' | 'unresolved';
     errorMessage?: string;
   }): Promise<void> {
     const processedAt = nowIso();
