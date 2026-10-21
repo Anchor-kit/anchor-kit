@@ -1,4 +1,4 @@
-import { ConfigError, MalformedPersistedDataError } from '@/core/errors.ts';
+import { ConfigError, MalformedPersistedDataError } from '../../core/errors.ts';
 import type {
   AuthChallengeRecord,
   DatabaseAdapter,
@@ -8,8 +8,8 @@ import type {
   WebhookEventRecord,
 } from '@/runtime/interfaces.ts';
 import type { FrameworkConfig } from '@/types/config.ts';
-import { isTransactionStatus, type TransactionStatus } from '@/types/transaction-status.ts';
-import { Database } from 'bun:sqlite';
+import { isTransactionStatus, type TransactionStatus } from '../../types/transaction-status.ts';
+import type { Database } from 'bun:sqlite';
 import { randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -160,7 +160,7 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
       try {
         if (this.provider === 'sqlite') {
           const path = toSqlitePath(this.url);
-          const database = new Database(path);
+          const database = await loadSqliteDatabase(path);
 
           try {
             configureSqliteConnection(database, path);
@@ -1184,6 +1184,21 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
     }
     return this.postgres;
   }
+}
+
+async function loadSqliteDatabase(path: string): Promise<SqliteLike> {
+  if (typeof Bun === 'undefined') {
+    throw new ConfigError(
+      'SQLite provider requires the Bun runtime and bun:sqlite. Select postgres when running under Node.js.',
+    );
+  }
+
+  const moduleName = 'bun:sqlite';
+  const sqliteModuleUnknown: unknown = await import(moduleName);
+  const sqliteModule = sqliteModuleUnknown as {
+    Database: new (path: string) => SqliteLike;
+  };
+  return new sqliteModule.Database(path);
 }
 
 export function createSqlDatabaseAdapter(

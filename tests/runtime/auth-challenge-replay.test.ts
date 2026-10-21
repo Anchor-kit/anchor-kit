@@ -9,7 +9,14 @@ import {
 import type { DatabaseAdapter } from '@/runtime/interfaces.ts';
 import { InMemoryRateLimiter } from '@/runtime/http/rate-limiter.ts';
 import { DefaultWebhookProcessor } from '@/runtime/webhooks/default-webhook-processor.ts';
-import { Account, Keypair, Networks, Operation, TransactionBuilder } from '@stellar/stellar-sdk';
+import {
+  Account,
+  Keypair,
+  Networks,
+  Operation,
+  Transaction,
+  TransactionBuilder,
+} from '@stellar/stellar-sdk';
 import { EventEmitter } from 'node:events';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { describe, expect, it } from 'vitest';
@@ -259,6 +266,64 @@ function makeMockRequestResponse(method: string, path: string, body: Record<stri
 }
 
 describe('Auth Challenge Consumption Atomicity & Recovery (#451)', () => {
+  it('generates unique 64-byte base64 nonces and consumes the stored nonce once', async () => {
+    const serverKeypair = Keypair.random();
+    const userKeypair = Keypair.random();
+    const database = new ControllableFakeDatabaseAdapter();
+    const context = makeTestContext(database, serverKeypair);
+
+    async function requestChallenge() {
+      const request = makeMockRequestResponse(
+        'GET',
+        `/auth/challenge?account=${userKeypair.publicKey()}`,
+        {},
+      );
+      await handleExpressRouterRequest(context, request.req, request.res);
+      expect(request.getResult().status).toBe(200);
+
+      const challengeXdr = String(request.getResult().body.challenge);
+      const transaction = new Transaction(challengeXdr, Networks.TESTNET);
+      const nonceOperation = transaction.operations.find(
+        (operation) => operation.type === 'manageData' && operation.name === 'anchor_auth',
+      );
+      expect(nonceOperation?.type).toBe('manageData');
+      if (nonceOperation?.type !== 'manageData') {
+        throw new Error('SEP-10 challenge is missing its nonce operation');
+      }
+
+      const nonceBytes = Buffer.isBuffer(nonceOperation.value)
+        ? nonceOperation.value
+        : Buffer.from(String(nonceOperation.value), 'utf8');
+      const nonce = nonceBytes.toString('utf8');
+      expect(nonceBytes).toHaveLength(64);
+      expect(Buffer.from(nonce, 'base64')).toHaveLength(48);
+      expect(Buffer.from(nonce, 'base64').toString('base64')).toBe(nonce);
+      expect(database.challenges.get(nonce)?.challenge).toBe(nonce);
+      return { transaction, nonce };
+    }
+
+    const firstChallenge = await requestChallenge();
+    const secondChallenge = await requestChallenge();
+    expect(secondChallenge.nonce).not.toBe(firstChallenge.nonce);
+
+    firstChallenge.transaction.sign(userKeypair);
+    const tokenRequest = makeMockRequestResponse('POST', '/auth/token', {
+      account: userKeypair.publicKey(),
+      challenge: firstChallenge.transaction.toXDR(),
+    });
+    await handleExpressRouterRequest(context, tokenRequest.req, tokenRequest.res);
+    expect(tokenRequest.getResult().status).toBe(200);
+    expect(database.challenges.get(firstChallenge.nonce)?.consumedAt).toEqual(expect.any(String));
+
+    const replayRequest = makeMockRequestResponse('POST', '/auth/token', {
+      account: userKeypair.publicKey(),
+      challenge: firstChallenge.transaction.toXDR(),
+    });
+    await handleExpressRouterRequest(context, replayRequest.req, replayRequest.res);
+    expect(replayRequest.getResult().status).toBe(401);
+    expect(replayRequest.getResult().body.message).toBe('Challenge already used');
+  });
+
   it('expires at maxTime and accepts requests only before the fixed boundary', () => {
     const maxTime = Date.parse('2026-01-01T00:05:00.000Z');
     const expiresAt = new Date(maxTime).toISOString();

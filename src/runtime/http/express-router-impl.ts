@@ -1,10 +1,10 @@
 import type { AnchorConfig } from '@/core/config.ts';
-import { ConfigError, PayloadTooLargeError, ValidationError } from '@/core/errors.ts';
-import { InMemoryRateLimiter, type RateLimitRule } from '@/runtime/http/rate-limiter.ts';
+import { ConfigError, PayloadTooLargeError, ValidationError } from '../../core/errors.ts';
+import { InMemoryRateLimiter, type RateLimitRule } from './rate-limiter.ts';
 import type { DatabaseAdapter, WebhookProcessor } from '@/runtime/interfaces.ts';
 import type { PluginRouteContext, RouteDefinition } from '@/types/foundation.ts';
 import type { AnchorPluginHooks, DepositRequestBody } from '@/types/plugin.ts';
-import { IdempotencyUtils } from '@/utils/idempotency.ts';
+import { IdempotencyUtils } from '../../utils/idempotency.ts';
 import Big from 'big.js';
 import {
   Account,
@@ -15,7 +15,7 @@ import {
   TransactionBuilder,
 } from '@stellar/stellar-sdk';
 import jwt from 'jsonwebtoken';
-import { createHash, randomUUID } from 'node:crypto';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { version } from '../../../package.json';
 import { extractClientIdentifier } from './client-identifier.ts';
@@ -752,7 +752,7 @@ async function handleAuthChallenge(
     return;
   }
 
-  const nonce = randomUUID();
+  const nonce = randomBytes(48).toString('base64');
   const now = Math.floor(Date.now() / 1000);
   const expirationSeconds = context.config.get('security').challengeExpirationSeconds ?? 300;
   const expiresAtUnix = now + expirationSeconds;
