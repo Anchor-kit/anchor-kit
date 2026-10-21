@@ -1,21 +1,28 @@
 ## What does this PR do?
 
-Makes deposit idempotency reservations explicit and atomic. Concurrent replays receive a retry response, failed writes roll back safely, and incomplete cached bodies are never replayed as success. Also defines SEP-10 challenge expiry boundaries and validates native XLM versus issued-asset issuer configuration.
+This PR makes background startup and watcher shutdown recoverable, and invokes the declared deposit and SEP-10 challenge plugin hooks.
+
+- Stops the queue and earlier watchers after a later startup failure while preserving the original error.
+- Coordinates watcher start/stop races and tolerates in-flight tick failures during shutdown.
+- Runs deposit and challenge hooks in registration order with typed context; hook failures prevent persistence.
+- Adds focused lifecycle and HTTP integration tests.
 
 ## How to test?
 
-Run `bun test`. Focused coverage exercises delayed concurrent deposit requests, SQLite write failures and retries, fixed-clock challenge boundaries, and asset issuer validation.
+- Run `bun test` (434 tests pass across 45 files).
+- For focused coverage, run `bun test tests/runtime/background-lifecycle.test.ts tests/runtime/transaction-watcher.unit.test.ts tests/mvp-express.integration.test.ts`.
 
 ## Checklist
 
-- [x] My code follows the code style of this project.
+- [ ] My code follows the code style of this project.
 - [x] I have added tests for my changes.
-- [x] I have updated the documentation accordingly.
-- [ ] I have run `bun run test` and `bun run lint` locally.
+- [x] I have updated the hook contract documentation.
+- [x] I have run `bun run test` locally.
+- [ ] I have run `bun run lint` locally.
 
 ## Issue Reference
 
-Closes #573
-Closes #574
-Closes #569
-Closes #575
+Closes #584
+Closes #585
+Closes #589
+Closes #590

@@ -1,8 +1,4 @@
-import { randomUUID } from 'node:crypto';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import { Database } from 'bun:sqlite';
-import { ConfigError } from '@/core/errors.ts';
+import { ConfigError, MalformedPersistedDataError } from '@/core/errors.ts';
 import type {
   AuthChallengeRecord,
   DatabaseAdapter,
@@ -13,16 +9,66 @@ import type {
 } from '@/runtime/interfaces.ts';
 import type { FrameworkConfig } from '@/types/config.ts';
 import { isTransactionStatus, type TransactionStatus } from '@/types/transaction-status.ts';
+import { Database } from 'bun:sqlite';
+import { randomUUID } from 'node:crypto';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 type SqliteLike = Database;
 
 interface PostgresClient {
   connect(): Promise<void>;
   end(): Promise<void>;
-  query<T extends Record<string, unknown>>(sql: string, values?: unknown[]): Promise<{ rows: T[] }>;
+  query<T extends Record<string, unknown>>(
+    sql: string,
+    values?: unknown[],
+  ): Promise<{ rows: T[]; rowCount?: number }>;
 }
 
 const SQLITE_FILE_PREFIX = 'file:';
+const SQLITE_URL_PREFIX = 'sqlite:';
+
+/**
+ * Journal mode requested for file-backed SQLite databases.
+ *
+ * WAL lets readers keep working while a single writer commits, so the webhook,
+ * watcher, and idempotency writes that overlap during normal anchor operation
+ * queue behind each other instead of failing. SQLite stores the journal mode in
+ * the database file itself, so applying it once on connect also covers later
+ * connections to the same file.
+ */
+export const SQLITE_JOURNAL_MODE = 'WAL';
+
+/**
+ * How long a blocked SQLite writer waits for a competing lock before giving up
+ * with SQLITE_BUSY. Overlapping writes are short-lived, so a retry window
+ * absorbs lock contention that would otherwise surface as avoidable errors.
+ */
+export const SQLITE_BUSY_TIMEOUT_MS = 5000;
+
+/**
+ * Indexes supporting watcher polling and retention cleanup.
+ *
+ * Watcher polling filters `watcher_tasks` by `status` and orders by
+ * `created_at`, while retention deletes rows by `created_at` combined with a
+ * `status` filter. The same shape applies to `webhook_events`. Auth challenges
+ * are pruned by `expires_at`, and idempotency keys by `created_at`. Each index
+ * is created with `IF NOT EXISTS` so migrations stay repeatable on both fresh
+ * and already-migrated databases.
+ */
+export const SQLITE_INDEX_STATEMENTS: readonly string[] = [
+  'CREATE INDEX IF NOT EXISTS idx_watcher_tasks_status_created_at ON watcher_tasks (status, created_at)',
+  'CREATE INDEX IF NOT EXISTS idx_webhook_events_status_created_at ON webhook_events (status, created_at)',
+  'CREATE INDEX IF NOT EXISTS idx_auth_challenges_expires_at ON auth_challenges (expires_at)',
+  'CREATE INDEX IF NOT EXISTS idx_idempotency_keys_created_at ON idempotency_keys (created_at)',
+];
+
+export const POSTGRES_INDEX_STATEMENTS: readonly string[] = [
+  'CREATE INDEX IF NOT EXISTS idx_watcher_tasks_status_created_at ON watcher_tasks (status, created_at)',
+  'CREATE INDEX IF NOT EXISTS idx_webhook_events_status_created_at ON webhook_events (status, created_at)',
+  'CREATE INDEX IF NOT EXISTS idx_auth_challenges_expires_at ON auth_challenges (expires_at)',
+  'CREATE INDEX IF NOT EXISTS idx_idempotency_keys_created_at ON idempotency_keys (created_at)',
+];
 
 function nowIso(): string {
   return new Date().toISOString();
@@ -32,14 +78,57 @@ function toSqlitePath(url: string): string {
   if (url.startsWith(SQLITE_FILE_PREFIX)) {
     return url.slice(SQLITE_FILE_PREFIX.length);
   }
+  if (url.startsWith(SQLITE_URL_PREFIX)) {
+    return url.slice(SQLITE_URL_PREFIX.length);
+  }
   return url;
 }
 
-function parseJsonObject(value: string): Record<string, unknown> {
-  const parsed: unknown = JSON.parse(value);
-  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-    return {};
+/**
+ * In-memory databases keep SQLite's `memory` journal mode and share no file for
+ * connections to coordinate on, so WAL does not apply to them. Both the plain
+ * `:memory:` form and URI forms such as `file::memory:` or `?mode=memory` are
+ * recognised so in-memory test databases keep working unchanged.
+ */
+function isInMemorySqlite(path: string): boolean {
+  return path.includes(':memory:') || path.includes('mode=memory');
+}
+
+/**
+ * Applies the concurrency settings to a freshly opened SQLite connection.
+ *
+ * `busy_timeout` applies to every connection, including in-memory ones, while
+ * the WAL journal mode is only requested for file-backed databases.
+ */
+function configureSqliteConnection(database: SqliteLike, path: string): void {
+  database.exec(`PRAGMA busy_timeout = ${SQLITE_BUSY_TIMEOUT_MS};`);
+
+  if (isInMemorySqlite(path)) {
+    return;
   }
+
+  database.exec(`PRAGMA journal_mode = ${SQLITE_JOURNAL_MODE};`);
+}
+
+function parseJsonObject(value: string): Record<string, unknown> {
+  let parsed: unknown;
+
+  try {
+    parsed = JSON.parse(value);
+  } catch (error) {
+    throw new MalformedPersistedDataError(
+      `Malformed persisted JSON payload: ${error instanceof Error ? error.message : String(error)}`,
+      { value: value.slice(0, 200) },
+    );
+  }
+
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new MalformedPersistedDataError(
+      'Persisted JSON payload must decode to a plain object; arrays and primitive values are not allowed.',
+      { value: value.slice(0, 200) },
+    );
+  }
+
   return parsed as Record<string, unknown>;
 }
 
@@ -58,6 +147,9 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
   private readonly schema: string | null;
   private sqlite: SqliteLike | null = null;
   private postgres: PostgresClient | null = null;
+  private connectPromise: Promise<void> | null = null;
+  private disconnectPromise: Promise<void> | null = null;
+  private migratePromise: Promise<void> | null = null;
 
   constructor(databaseConfig: FrameworkConfig['database']) {
     this.provider = databaseConfig.provider;
@@ -74,41 +166,116 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
   }
 
   public async connect(): Promise<void> {
-    if (this.provider === 'sqlite') {
-      this.sqlite = new Database(toSqlitePath(this.url));
+    if (this.sqlite || this.postgres) {
       return;
     }
 
-    if (this.provider === 'postgres') {
-      const moduleName = 'pg';
-      const pgModuleUnknown: unknown = await import(moduleName);
-      const pgModule = pgModuleUnknown as {
-        Client: new (config: { connectionString: string }) => PostgresClient;
-      };
-      this.postgres = new pgModule.Client({ connectionString: this.url });
-      await this.postgres.connect();
-      const schema = this.schema ?? 'public';
-      await this.postgres.query(`CREATE SCHEMA IF NOT EXISTS "${schema}"`);
-      await this.postgres.query(`SET search_path TO "${schema}"`);
+    if (this.connectPromise) {
+      await this.connectPromise;
       return;
     }
 
-    throw new ConfigError(`Unsupported database provider: ${this.provider}`);
+    this.connectPromise = (async () => {
+      try {
+        if (this.provider === 'sqlite') {
+          const path = toSqlitePath(this.url);
+          const database = new Database(path);
+
+          try {
+            configureSqliteConnection(database, path);
+          } catch (error) {
+            // Do not leak the handle when the connection cannot be tuned.
+            database.close();
+            throw error;
+          }
+
+          this.sqlite = database;
+          return;
+        }
+
+        if (this.provider === 'postgres') {
+          const moduleName = 'pg';
+          const pgModuleUnknown: unknown = await import(moduleName);
+          const pgModule = pgModuleUnknown as {
+            Client: new (config: { connectionString: string }) => PostgresClient;
+          };
+          const client = new pgModule.Client({ connectionString: this.url });
+          this.postgres = client;
+          await this.postgres.connect();
+          return;
+        }
+
+        throw new ConfigError(`Unsupported database provider: ${this.provider}`);
+      } catch (error) {
+        this.sqlite = null;
+        this.postgres = null;
+        throw error;
+      }
+    })();
+
+    try {
+      await this.connectPromise;
+    } finally {
+      this.connectPromise = null;
+    }
   }
 
   public async disconnect(): Promise<void> {
-    if (this.sqlite) {
-      this.sqlite.close();
-      this.sqlite = null;
+    if (!this.sqlite && !this.postgres) {
+      return;
     }
 
-    if (this.postgres) {
-      await this.postgres.end();
+    if (this.disconnectPromise) {
+      await this.disconnectPromise;
+      return;
+    }
+
+    this.disconnectPromise = (async () => {
+      const sqlite = this.sqlite;
+      const postgres = this.postgres;
+      this.sqlite = null;
       this.postgres = null;
+
+      try {
+        if (sqlite) {
+          sqlite.close();
+        }
+
+        if (postgres) {
+          await postgres.end();
+        }
+      } catch (error) {
+        this.sqlite = sqlite;
+        this.postgres = postgres;
+        throw error;
+      }
+    })();
+
+    try {
+      await this.disconnectPromise;
+    } finally {
+      this.disconnectPromise = null;
     }
   }
 
   public async migrate(): Promise<void> {
+    if (this.migratePromise) {
+      await this.migratePromise;
+      return;
+    }
+
+    this.migratePromise = this.runMigrations();
+
+    try {
+      await this.migratePromise;
+    } finally {
+      // Clear the guard once the sequence settles so a failed migration can be
+      // retried by the next caller instead of being cached as successful.
+      this.migratePromise = null;
+    }
+  }
+
+  private async runMigrations(): Promise<void> {
     if (this.sqlite) {
       this.sqlite.exec(`
         CREATE TABLE IF NOT EXISTS auth_challenges (
@@ -177,31 +344,8 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
           "ALTER TABLE idempotency_keys ADD COLUMN status TEXT NOT NULL DEFAULT 'completed'",
         );
       }
-      const financialMigration = this.sqlite
-        .prepare('SELECT version FROM anchor_kit_schema_migrations WHERE version = ?')
-        .get(1);
-      if (!financialMigration) {
-        const transactionColumns = this.sqlite
-          .prepare('PRAGMA table_info(interactive_transactions)')
-          .all() as Array<{ name?: unknown }>;
-        const existingTransactionColumns = new Set(transactionColumns.map((column) => column.name));
-        for (const column of [
-          'amount_in',
-          'amount_out',
-          'amount_fee',
-          'currency',
-          'rail_reference',
-          'stellar_transaction_hash',
-        ]) {
-          if (!existingTransactionColumns.has(column)) {
-            this.sqlite.exec(`ALTER TABLE interactive_transactions ADD COLUMN ${column} TEXT`);
-          }
-        }
-        this.sqlite
-          .prepare(
-            'INSERT INTO anchor_kit_schema_migrations (version, applied_at) VALUES (?, ?) ON CONFLICT(version) DO NOTHING',
-          )
-          .run(1, nowIso());
+      for (const statement of SQLITE_INDEX_STATEMENTS) {
+        this.sqlite.exec(statement);
       }
       return;
     }
@@ -246,31 +390,6 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
         "ALTER TABLE idempotency_keys ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'completed'",
       );
       await this.postgres.query(`
-        CREATE TABLE IF NOT EXISTS anchor_kit_schema_migrations (
-          version INTEGER PRIMARY KEY,
-          applied_at TIMESTAMPTZ NOT NULL
-        )
-      `);
-      const financialMigration = await this.postgres.query<Record<string, unknown>>(
-        'SELECT version FROM anchor_kit_schema_migrations WHERE version = $1',
-        [1],
-      );
-      if (financialMigration.rows.length === 0) {
-        await this.postgres.query(`
-          ALTER TABLE interactive_transactions
-            ADD COLUMN IF NOT EXISTS amount_in TEXT,
-            ADD COLUMN IF NOT EXISTS amount_out TEXT,
-            ADD COLUMN IF NOT EXISTS amount_fee TEXT,
-            ADD COLUMN IF NOT EXISTS currency TEXT,
-            ADD COLUMN IF NOT EXISTS rail_reference TEXT,
-            ADD COLUMN IF NOT EXISTS stellar_transaction_hash TEXT
-        `);
-        await this.postgres.query(
-          'INSERT INTO anchor_kit_schema_migrations (version, applied_at) VALUES ($1, $2) ON CONFLICT (version) DO NOTHING',
-          [1, nowIso()],
-        );
-      }
-      await this.postgres.query(`
         CREATE TABLE IF NOT EXISTS webhook_events (
           id TEXT PRIMARY KEY,
           event_id TEXT NOT NULL UNIQUE,
@@ -293,6 +412,9 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
           created_at TIMESTAMPTZ NOT NULL
         );
       `);
+      for (const statement of POSTGRES_INDEX_STATEMENTS) {
+        await this.postgres.query(statement);
+      }
       return;
     }
 
@@ -355,19 +477,20 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
     };
   }
 
-  public async markAuthChallengeConsumed(id: string): Promise<void> {
+  public async markAuthChallengeConsumed(id: string): Promise<boolean> {
     const consumedAt = nowIso();
     if (this.sqlite) {
-      this.sqlite
-        .prepare('UPDATE auth_challenges SET consumed_at = ? WHERE id = ?')
+      const result = this.sqlite
+        .prepare('UPDATE auth_challenges SET consumed_at = ? WHERE id = ? AND consumed_at IS NULL')
         .run(consumedAt, id);
-      return;
+      return result.changes > 0;
     }
 
-    await this.requirePostgres().query(
-      'UPDATE auth_challenges SET consumed_at = $1 WHERE id = $2',
+    const response = await this.requirePostgres().query(
+      'UPDATE auth_challenges SET consumed_at = $1 WHERE id = $2 AND consumed_at IS NULL',
       [consumedAt, id],
     );
+    return (response.rowCount ?? 0) > 0;
   }
 
   public async insertInteractiveTransaction(input: {
@@ -376,12 +499,6 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
     kind: 'deposit';
     assetCode: string;
     amount: string;
-    amountIn?: string;
-    amountOut?: string;
-    amountFee?: string;
-    currency?: string;
-    railReference?: string;
-    stellarTransactionHash?: string;
     status: TransactionStatus;
   }): Promise<InteractiveTransactionRecord> {
     const createdAt = nowIso();
@@ -476,32 +593,48 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
     if (this.sqlite) {
       const rows = this.sqlite
         .prepare(
-          "SELECT * FROM interactive_transactions WHERE status = 'pending_user_transfer_start' AND created_at < ?",
+          "SELECT * FROM interactive_transactions WHERE status = 'pending_user_transfer_start' AND created_at < ? ORDER BY created_at ASC, id ASC",
         )
         .all(cutoffIso) as Record<string, unknown>[];
       return rows.map((row) => this.mapTransactionRow(row));
     }
 
     const response = await this.requirePostgres().query<Record<string, unknown>>(
-      "SELECT * FROM interactive_transactions WHERE status = 'pending_user_transfer_start' AND created_at < $1",
+      "SELECT * FROM interactive_transactions WHERE status = 'pending_user_transfer_start' AND created_at < $1 ORDER BY created_at ASC, id ASC",
       [cutoffIso],
     );
     return response.rows.map((row) => this.mapTransactionRow(row));
   }
 
-  public async updateTransactionStatus(id: string, status: TransactionStatus): Promise<void> {
+  public async updateTransactionStatus(
+    id: string,
+    status: TransactionStatus,
+    expectedStatus?: TransactionStatus,
+  ): Promise<boolean> {
     const updatedAt = nowIso();
     if (this.sqlite) {
-      this.sqlite
-        .prepare('UPDATE interactive_transactions SET status = ?, updated_at = ? WHERE id = ?')
-        .run(status, updatedAt, id);
-      return;
+      const result = expectedStatus
+        ? this.sqlite
+            .prepare(
+              'UPDATE interactive_transactions SET status = ?, updated_at = ? WHERE id = ? AND status = ?',
+            )
+            .run(status, updatedAt, id, expectedStatus)
+        : this.sqlite
+            .prepare('UPDATE interactive_transactions SET status = ?, updated_at = ? WHERE id = ?')
+            .run(status, updatedAt, id);
+      return result.changes > 0;
     }
 
-    await this.requirePostgres().query(
-      'UPDATE interactive_transactions SET status = $1, updated_at = $2 WHERE id = $3',
-      [status, updatedAt, id],
-    );
+    const response = expectedStatus
+      ? await this.requirePostgres().query<{ id: string }>(
+          'UPDATE interactive_transactions SET status = $1, updated_at = $2 WHERE id = $3 AND status = $4 RETURNING id',
+          [status, updatedAt, id, expectedStatus],
+        )
+      : await this.requirePostgres().query<{ id: string }>(
+          'UPDATE interactive_transactions SET status = $1, updated_at = $2 WHERE id = $3 RETURNING id',
+          [status, updatedAt, id],
+        );
+    return response.rows.length > 0;
   }
 
   public async getIdempotencyRecord(
@@ -524,6 +657,91 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
     return row ? this.mapIdempotencyRow(row) : null;
   }
 
+  public async insertOrGetIdempotencyRecord(input: {
+    id: string;
+    scope: string;
+    idempotencyKey: string;
+    requestHash: string;
+    statusCode: number;
+    responseBody: string;
+  }): Promise<IdempotencyRecord> {
+    const createdAt = nowIso();
+
+    if (this.sqlite) {
+      // SQLite: INSERT ... ON CONFLICT DO NOTHING, then SELECT
+      this.sqlite
+        .prepare(
+          'INSERT INTO idempotency_keys (id, scope, idempotency_key, request_hash, status_code, response_body, created_at) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(scope, idempotency_key) DO NOTHING',
+        )
+        .run(
+          input.id,
+          input.scope,
+          input.idempotencyKey,
+          input.requestHash,
+          input.statusCode,
+          input.responseBody,
+          createdAt,
+        );
+
+      const row = this.sqlite
+        .prepare('SELECT * FROM idempotency_keys WHERE scope = ? AND idempotency_key = ? LIMIT 1')
+        .get(input.scope, input.idempotencyKey) as Record<string, unknown>;
+
+      if (!row) {
+        throw new ConfigError('Failed to insert or retrieve idempotency record');
+      }
+
+      return this.mapIdempotencyRow(row);
+    }
+
+    // PostgreSQL: INSERT ... ON CONFLICT DO NOTHING, then SELECT
+    await this.requirePostgres().query(
+      'INSERT INTO idempotency_keys (id, scope, idempotency_key, request_hash, status_code, response_body, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7) ON CONFLICT(scope, idempotency_key) DO NOTHING',
+      [
+        input.id,
+        input.scope,
+        input.idempotencyKey,
+        input.requestHash,
+        input.statusCode,
+        input.responseBody,
+        createdAt,
+      ],
+    );
+
+    const response = await this.requirePostgres().query<Record<string, unknown>>(
+      'SELECT * FROM idempotency_keys WHERE scope = $1 AND idempotency_key = $2 LIMIT 1',
+      [input.scope, input.idempotencyKey],
+    );
+
+    const row = response.rows[0];
+    if (!row) {
+      throw new ConfigError('Failed to insert or retrieve idempotency record');
+    }
+
+    return this.mapIdempotencyRow(row);
+  }
+
+  public async updateIdempotencyRecord(input: {
+    scope: string;
+    idempotencyKey: string;
+    statusCode: number;
+    responseBody: string;
+  }): Promise<void> {
+    if (this.sqlite) {
+      this.sqlite
+        .prepare(
+          "UPDATE idempotency_keys SET status = 'completed', status_code = ?, response_body = ? WHERE scope = ? AND idempotency_key = ?",
+        )
+        .run(input.statusCode, input.responseBody, input.scope, input.idempotencyKey);
+      return;
+    }
+
+    await this.requirePostgres().query(
+      "UPDATE idempotency_keys SET status = 'completed', status_code = $1, response_body = $2 WHERE scope = $3 AND idempotency_key = $4",
+      [input.statusCode, input.responseBody, input.scope, input.idempotencyKey],
+    );
+  }
+
   public async reserveIdempotencyRecord(input: {
     id: string;
     scope: string;
@@ -531,7 +749,6 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
     requestHash: string;
   }): Promise<{ record: IdempotencyRecord; inserted: boolean }> {
     const createdAt = nowIso();
-    let inserted: boolean;
 
     if (this.sqlite) {
       const result = this.sqlite
@@ -539,20 +756,25 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
           "INSERT INTO idempotency_keys (id, scope, idempotency_key, request_hash, status, status_code, response_body, created_at) VALUES (?, ?, ?, ?, 'pending', 0, '', ?) ON CONFLICT(scope, idempotency_key) DO NOTHING",
         )
         .run(input.id, input.scope, input.idempotencyKey, input.requestHash, createdAt);
-      inserted = result.changes === 1;
-    } else {
-      const result = await this.requirePostgres().query<Record<string, unknown>>(
-        "INSERT INTO idempotency_keys (id, scope, idempotency_key, request_hash, status, status_code, response_body, created_at) VALUES ($1, $2, $3, $4, 'pending', 0, '', $5) ON CONFLICT (scope, idempotency_key) DO NOTHING RETURNING id",
-        [input.id, input.scope, input.idempotencyKey, input.requestHash, createdAt],
-      );
-      inserted = result.rows.length === 1;
+      const row = this.sqlite
+        .prepare('SELECT * FROM idempotency_keys WHERE scope = ? AND idempotency_key = ? LIMIT 1')
+        .get(input.scope, input.idempotencyKey) as Record<string, unknown> | null;
+      if (!row) throw new ConfigError('Failed to reserve or retrieve idempotency record');
+      return { record: this.mapIdempotencyRow(row), inserted: result.changes > 0 };
     }
 
-    const record = await this.getIdempotencyRecord(input.scope, input.idempotencyKey);
-    if (!record) {
-      throw new ConfigError('Failed to reserve idempotency record');
-    }
-    return { record, inserted };
+    const postgres = this.requirePostgres();
+    const result = await postgres.query(
+      "INSERT INTO idempotency_keys (id, scope, idempotency_key, request_hash, status, status_code, response_body, created_at) VALUES ($1, $2, $3, $4, 'pending', 0, '', $5) ON CONFLICT(scope, idempotency_key) DO NOTHING",
+      [input.id, input.scope, input.idempotencyKey, input.requestHash, createdAt],
+    );
+    const selected = await postgres.query<Record<string, unknown>>(
+      'SELECT * FROM idempotency_keys WHERE scope = $1 AND idempotency_key = $2 LIMIT 1',
+      [input.scope, input.idempotencyKey],
+    );
+    const row = selected.rows[0];
+    if (!row) throw new ConfigError('Failed to reserve or retrieve idempotency record');
+    return { record: this.mapIdempotencyRow(row), inserted: result.rowCount === 1 };
   }
 
   public async createDepositWithIdempotency(input: {
@@ -562,12 +784,6 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
       kind: 'deposit';
       assetCode: string;
       amount: string;
-      amountIn?: string;
-      amountOut?: string;
-      amountFee?: string;
-      currency?: string;
-      railReference?: string;
-      stellarTransactionHash?: string;
       status: TransactionStatus;
       createdAt: string;
     };
@@ -579,14 +795,15 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
       responseBody: string;
     };
   }): Promise<InteractiveTransactionRecord> {
-    const { transaction, idempotency } = input;
+    const transaction = input.transaction;
+    const updatedAt = nowIso();
 
     if (this.sqlite) {
       const sqlite = this.sqlite;
       const create = sqlite.transaction(() => {
         sqlite
           .prepare(
-            'INSERT INTO interactive_transactions (id, account, kind, asset_code, amount, amount_in, amount_out, amount_fee, currency, rail_reference, stellar_transaction_hash, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+            'INSERT INTO interactive_transactions (id, account, kind, asset_code, amount, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
           )
           .run(
             transaction.id,
@@ -594,29 +811,22 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
             transaction.kind,
             transaction.assetCode,
             transaction.amount,
-            transaction.amountIn ?? null,
-            transaction.amountOut ?? null,
-            transaction.amountFee ?? null,
-            transaction.currency ?? null,
-            transaction.railReference ?? null,
-            transaction.stellarTransactionHash ?? null,
             transaction.status,
             transaction.createdAt,
-            transaction.createdAt,
+            updatedAt,
           );
-
-        const result = sqlite
+        const completed = sqlite
           .prepare(
             "UPDATE idempotency_keys SET status = 'completed', status_code = ?, response_body = ? WHERE scope = ? AND idempotency_key = ? AND request_hash = ? AND status = 'pending'",
           )
           .run(
-            idempotency.statusCode,
-            idempotency.responseBody,
-            idempotency.scope,
-            idempotency.idempotencyKey,
-            idempotency.requestHash,
+            input.idempotency.statusCode,
+            input.idempotency.responseBody,
+            input.idempotency.scope,
+            input.idempotency.idempotencyKey,
+            input.idempotency.requestHash,
           );
-        if (result.changes !== 1) {
+        if (completed.changes !== 1) {
           throw new ConfigError('Pending idempotency reservation was not found');
         }
       });
@@ -626,34 +836,29 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
       await postgres.query('BEGIN');
       try {
         await postgres.query(
-          'INSERT INTO interactive_transactions (id, account, kind, asset_code, amount, amount_in, amount_out, amount_fee, currency, rail_reference, stellar_transaction_hash, status, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $13)',
+          'INSERT INTO interactive_transactions (id, account, kind, asset_code, amount, status, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)',
           [
             transaction.id,
             transaction.account,
             transaction.kind,
             transaction.assetCode,
             transaction.amount,
-            transaction.amountIn ?? null,
-            transaction.amountOut ?? null,
-            transaction.amountFee ?? null,
-            transaction.currency ?? null,
-            transaction.railReference ?? null,
-            transaction.stellarTransactionHash ?? null,
             transaction.status,
             transaction.createdAt,
+            updatedAt,
           ],
         );
-        const result = await postgres.query<Record<string, unknown>>(
+        const completed = await postgres.query<{ id: string }>(
           "UPDATE idempotency_keys SET status = 'completed', status_code = $1, response_body = $2 WHERE scope = $3 AND idempotency_key = $4 AND request_hash = $5 AND status = 'pending' RETURNING id",
           [
-            idempotency.statusCode,
-            idempotency.responseBody,
-            idempotency.scope,
-            idempotency.idempotencyKey,
-            idempotency.requestHash,
+            input.idempotency.statusCode,
+            input.idempotency.responseBody,
+            input.idempotency.scope,
+            input.idempotency.idempotencyKey,
+            input.idempotency.requestHash,
           ],
         );
-        if (result.rows.length !== 1) {
+        if (completed.rows.length !== 1) {
           throw new ConfigError('Pending idempotency reservation was not found');
         }
         await postgres.query('COMMIT');
@@ -664,20 +869,9 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
     }
 
     return {
-      id: transaction.id,
-      account: transaction.account,
-      kind: transaction.kind,
-      assetCode: transaction.assetCode,
-      amount: transaction.amount,
-      amountIn: transaction.amountIn,
-      amountOut: transaction.amountOut,
-      amountFee: transaction.amountFee,
-      currency: transaction.currency,
-      railReference: transaction.railReference,
-      stellarTransactionHash: transaction.stellarTransactionHash,
-      status: transaction.status,
+      ...transaction,
       createdAt: transaction.createdAt,
-      updatedAt: transaction.createdAt,
+      updatedAt,
     };
   }
 
@@ -701,116 +895,114 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
     );
   }
 
-  public async insertIdempotencyRecord(input: {
-    id: string;
-    scope: string;
-    idempotencyKey: string;
-    requestHash: string;
-    statusCode: number;
-    responseBody: string;
-  }): Promise<void> {
-    const createdAt = nowIso();
-
-    if (this.sqlite) {
-      this.sqlite
-        .prepare(
-          'INSERT INTO idempotency_keys (id, scope, idempotency_key, request_hash, status_code, response_body, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
-        )
-        .run(
-          input.id,
-          input.scope,
-          input.idempotencyKey,
-          input.requestHash,
-          input.statusCode,
-          input.responseBody,
-          createdAt,
-        );
-      return;
-    }
-
-    await this.requirePostgres().query(
-      'INSERT INTO idempotency_keys (id, scope, idempotency_key, request_hash, status_code, response_body, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7)',
-      [
-        input.id,
-        input.scope,
-        input.idempotencyKey,
-        input.requestHash,
-        input.statusCode,
-        input.responseBody,
-        createdAt,
-      ],
-    );
-  }
-
-  public async insertWebhookEvent(input: {
+  public async insertOrGetWebhookEvent(input: {
     id: string;
     eventId: string;
     provider: string;
     payload: Record<string, unknown>;
   }): Promise<{ record: WebhookEventRecord; inserted: boolean }> {
     const createdAt = nowIso();
+    const eventId = input.eventId.trim();
+    const provider = input.provider.trim() || 'generic';
 
     if (this.sqlite) {
       const existing = this.sqlite
         .prepare('SELECT * FROM webhook_events WHERE event_id = ? LIMIT 1')
-        .get(input.eventId) as Record<string, unknown> | null;
+        .get(eventId) as Record<string, unknown> | null;
+
       if (existing) {
-        return { record: this.mapWebhookRow(existing), inserted: false };
+        const record = this.mapWebhookRow(existing);
+
+        if (record.status === 'processed') {
+          return { record, inserted: false };
+        }
+
+        if (record.status === 'failed') {
+          this.sqlite
+            .prepare(
+              'UPDATE webhook_events SET provider = ?, payload = ?, status = ?, error_message = NULL, processed_at = NULL WHERE id = ?',
+            )
+            .run(provider, JSON.stringify(input.payload), 'pending', record.id);
+
+          const refreshed = this.sqlite
+            .prepare('SELECT * FROM webhook_events WHERE id = ? LIMIT 1')
+            .get(record.id) as Record<string, unknown> | null;
+
+          if (!refreshed) {
+            throw new ConfigError('Failed to retry failed webhook event');
+          }
+
+          return { record: this.mapWebhookRow(refreshed), inserted: true };
+        }
+
+        return { record, inserted: false };
       }
 
       this.sqlite
         .prepare(
           'INSERT INTO webhook_events (id, event_id, provider, payload, status, error_message, processed_at, created_at) VALUES (?, ?, ?, ?, ?, NULL, NULL, ?)',
         )
-        .run(
-          input.id,
-          input.eventId,
-          input.provider,
-          JSON.stringify(input.payload),
-          'pending',
-          createdAt,
-        );
+        .run(input.id, eventId, provider, JSON.stringify(input.payload), 'pending', createdAt);
 
-      const inserted = this.sqlite
+      const row = this.sqlite
         .prepare('SELECT * FROM webhook_events WHERE id = ? LIMIT 1')
         .get(input.id) as Record<string, unknown> | null;
 
-      if (!inserted) {
-        throw new ConfigError('Failed to insert webhook event');
+      if (!row) {
+        throw new ConfigError('Failed to insert or retrieve webhook event');
       }
 
-      return { record: this.mapWebhookRow(inserted), inserted: true };
+      return { record: this.mapWebhookRow(row), inserted: true };
     }
 
     const existingPg = await this.requirePostgres().query<Record<string, unknown>>(
       'SELECT * FROM webhook_events WHERE event_id = $1 LIMIT 1',
-      [input.eventId],
+      [eventId],
     );
 
-    if (existingPg.rows[0]) {
-      return { record: this.mapWebhookRow(existingPg.rows[0]), inserted: false };
+    const existingRow = existingPg.rows[0];
+    if (existingRow) {
+      const record = this.mapWebhookRow(existingRow);
+
+      if (record.status === 'processed') {
+        return { record, inserted: false };
+      }
+
+      if (record.status === 'failed') {
+        await this.requirePostgres().query(
+          'UPDATE webhook_events SET provider = $1, payload = $2::jsonb, status = $3, error_message = NULL, processed_at = NULL WHERE id = $4',
+          [provider, JSON.stringify(input.payload), 'pending', record.id],
+        );
+
+        const refreshedPg = await this.requirePostgres().query<Record<string, unknown>>(
+          'SELECT * FROM webhook_events WHERE id = $1 LIMIT 1',
+          [record.id],
+        );
+
+        const refreshedRow = refreshedPg.rows[0];
+        if (!refreshedRow) {
+          throw new ConfigError('Failed to retry failed webhook event');
+        }
+
+        return { record: this.mapWebhookRow(refreshedRow), inserted: true };
+      }
+
+      return { record, inserted: false };
     }
 
     await this.requirePostgres().query(
       'INSERT INTO webhook_events (id, event_id, provider, payload, status, error_message, processed_at, created_at) VALUES ($1, $2, $3, $4::jsonb, $5, NULL, NULL, $6)',
-      [
-        input.id,
-        input.eventId,
-        input.provider,
-        JSON.stringify(input.payload),
-        'pending',
-        createdAt,
-      ],
+      [input.id, eventId, provider, JSON.stringify(input.payload), 'pending', createdAt],
     );
 
-    const insertedPg = await this.requirePostgres().query<Record<string, unknown>>(
+    const response = await this.requirePostgres().query<Record<string, unknown>>(
       'SELECT * FROM webhook_events WHERE id = $1 LIMIT 1',
       [input.id],
     );
 
-    const row = insertedPg.rows[0];
+    const row = response.rows[0];
     if (!row) {
-      throw new ConfigError('Failed to insert webhook event');
+      throw new ConfigError('Failed to insert or retrieve webhook event');
     }
 
     return { record: this.mapWebhookRow(row), inserted: true };
@@ -862,6 +1054,10 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
   }
 
   public async listPendingWatcherTasks(limit: number): Promise<WatcherTaskRecord[]> {
+    if (!Number.isSafeInteger(limit) || limit <= 0) {
+      throw new RangeError('Watcher task limit must be a positive safe integer');
+    }
+
     if (this.sqlite) {
       const rows = this.sqlite
         .prepare('SELECT * FROM watcher_tasks WHERE status = ? ORDER BY created_at ASC LIMIT ?')
@@ -916,6 +1112,8 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
   }
 
   public async cleanupOldRecords(cutoffIso: string): Promise<void> {
+    // Retention uses a strict cutoff: values exactly equal to the cutoff are retained,
+    // while only entries strictly older than the cutoff are removed.
     if (this.sqlite) {
       this.sqlite.prepare('DELETE FROM auth_challenges WHERE expires_at < ?').run(cutoffIso);
       this.sqlite.prepare('DELETE FROM idempotency_keys WHERE created_at < ?').run(cutoffIso);
@@ -960,13 +1158,6 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
       kind: 'deposit',
       assetCode: String(row.asset_code),
       amount: String(row.amount),
-      amountIn: row.amount_in == null ? undefined : String(row.amount_in),
-      amountOut: row.amount_out == null ? undefined : String(row.amount_out),
-      amountFee: row.amount_fee == null ? undefined : String(row.amount_fee),
-      currency: row.currency == null ? undefined : String(row.currency),
-      railReference: row.rail_reference == null ? undefined : String(row.rail_reference),
-      stellarTransactionHash:
-        row.stellar_transaction_hash == null ? undefined : String(row.stellar_transaction_hash),
       status,
       createdAt: String(row.created_at),
       updatedAt: String(row.updated_at),
@@ -1040,7 +1231,7 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
 export function createSqlDatabaseAdapter(
   databaseConfig: FrameworkConfig['database'],
 ): DatabaseAdapter {
-  if (databaseConfig.provider === 'mysql') {
+  if (String(databaseConfig.provider) === 'mysql') {
     throw new ConfigError('MySQL is not implemented in this MVP. Use postgres or sqlite.');
   }
 

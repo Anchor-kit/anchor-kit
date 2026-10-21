@@ -32,6 +32,16 @@ describe('DecimalUtils', () => {
       expect(DecimalUtils.divide('1', '3', 2)).toBe('0.33');
       expect(DecimalUtils.divide('10', '2', 2)).toBe('5.00');
     });
+
+    test('should throw when dividing by zero', () => {
+      expect(() => DecimalUtils.divide('1', '0')).toThrow('[big.js] Division by zero');
+    });
+
+    test('should validate precision parameter', () => {
+      expect(() => DecimalUtils.divide('1', '3', -1)).toThrow();
+      expect(() => DecimalUtils.divide('1', '3', 2.5)).toThrow();
+      expect(() => DecimalUtils.divide('1', '3', Number.POSITIVE_INFINITY)).toThrow();
+    });
   });
 
   describe('applyFee', () => {
@@ -40,6 +50,18 @@ describe('DecimalUtils', () => {
       expect(DecimalUtils.applyFee('100', 2.5)).toBe('102.5');
       // 50 + 10% = 55
       expect(DecimalUtils.applyFee('50', 10)).toBe('55');
+    });
+
+    test('should accept zero and 100% boundary fees', () => {
+      expect(DecimalUtils.applyFee('100', 0)).toBe('100');
+      expect(DecimalUtils.applyFee('100', 100)).toBe('200');
+    });
+
+    test('should reject invalid fee inputs', () => {
+      expect(() => DecimalUtils.applyFee('100', -1)).toThrow();
+      expect(() => DecimalUtils.applyFee('100', Number.NaN)).toThrow();
+      expect(() => DecimalUtils.applyFee('100', Infinity)).toThrow();
+      expect(() => DecimalUtils.applyFee('100', 200)).toThrow();
     });
   });
 

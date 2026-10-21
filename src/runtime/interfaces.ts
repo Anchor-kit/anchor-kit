@@ -15,12 +15,6 @@ export interface InteractiveTransactionRecord {
   kind: 'deposit';
   assetCode: string;
   amount: string;
-  amountIn?: string;
-  amountOut?: string;
-  amountFee?: string;
-  currency?: string;
-  railReference?: string;
-  stellarTransactionHash?: string;
   status: TransactionStatus;
   createdAt: string;
   updatedAt: string;
@@ -70,7 +64,7 @@ export interface DatabaseAdapter {
     expiresAt: string;
   }): Promise<void>;
   getAuthChallengeByChallenge(challenge: string): Promise<AuthChallengeRecord | null>;
-  markAuthChallengeConsumed(id: string): Promise<void>;
+  markAuthChallengeConsumed(id: string): Promise<boolean>;
 
   insertInteractiveTransaction(input: {
     id: string;
@@ -78,19 +72,31 @@ export interface DatabaseAdapter {
     kind: 'deposit';
     assetCode: string;
     amount: string;
-    amountIn?: string;
-    amountOut?: string;
-    amountFee?: string;
-    currency?: string;
-    railReference?: string;
-    stellarTransactionHash?: string;
     status: TransactionStatus;
   }): Promise<InteractiveTransactionRecord>;
   getInteractiveTransactionById(id: string): Promise<InteractiveTransactionRecord | null>;
   listPendingTransactionsBefore(cutoffIso: string): Promise<InteractiveTransactionRecord[]>;
-  updateTransactionStatus(id: string, status: TransactionStatus): Promise<void>;
+  updateTransactionStatus(
+    id: string,
+    status: TransactionStatus,
+    expectedStatus?: TransactionStatus,
+  ): Promise<boolean>;
 
   getIdempotencyRecord(scope: string, idempotencyKey: string): Promise<IdempotencyRecord | null>;
+  insertOrGetIdempotencyRecord(input: {
+    id: string;
+    scope: string;
+    idempotencyKey: string;
+    requestHash: string;
+    statusCode: number;
+    responseBody: string;
+  }): Promise<IdempotencyRecord>;
+  updateIdempotencyRecord(input: {
+    scope: string;
+    idempotencyKey: string;
+    statusCode: number;
+    responseBody: string;
+  }): Promise<void>;
   reserveIdempotencyRecord(input: {
     id: string;
     scope: string;
@@ -104,12 +110,6 @@ export interface DatabaseAdapter {
       kind: 'deposit';
       assetCode: string;
       amount: string;
-      amountIn?: string;
-      amountOut?: string;
-      amountFee?: string;
-      currency?: string;
-      railReference?: string;
-      stellarTransactionHash?: string;
       status: TransactionStatus;
       createdAt: string;
     };
@@ -126,16 +126,8 @@ export interface DatabaseAdapter {
     idempotencyKey: string,
     requestHash: string,
   ): Promise<void>;
-  insertIdempotencyRecord(input: {
-    id: string;
-    scope: string;
-    idempotencyKey: string;
-    requestHash: string;
-    statusCode: number;
-    responseBody: string;
-  }): Promise<void>;
 
-  insertWebhookEvent(input: {
+  insertOrGetWebhookEvent(input: {
     id: string;
     eventId: string;
     provider: string;
@@ -162,12 +154,18 @@ export interface DatabaseAdapter {
   cleanupOldRecords(cutoffIso: string): Promise<void>;
 }
 
-export interface QueueJob {
-  type: 'expire_transaction' | 'process_watcher_task' | 'cleanup_records';
-  payload: Record<string, unknown>;
+export type QueueJob =
+  | { type: 'expire_transaction'; payload: { transactionId: string } }
+  | { type: 'process_watcher_task'; payload: { watcherTaskId: string } }
+  | { type: 'cleanup_records'; payload: { retentionDays: number } };
+
+export interface QueueDrainStatus {
+  readonly pending: number;
+  readonly active: number;
 }
 
 export interface QueueAdapter {
+  readonly status?: QueueDrainStatus;
   enqueue(job: QueueJob): Promise<void>;
   start(worker: (job: QueueJob) => Promise<void>): Promise<void>;
   stop(): Promise<void>;
@@ -184,8 +182,12 @@ export interface WebhookProcessor {
     eventId: string;
     provider: string;
     payload: Record<string, unknown>;
-    rawBody: string;
+    rawBody: string | Buffer | Uint8Array;
     signature?: string;
-  }): Promise<{ duplicate: boolean; eventId: string }>;
-  shutdown?(): Promise<void>;
+  }): Promise<{
+    duplicate: boolean;
+    eventId: string;
+    provider: string;
+    status?: WebhookEventRecord['status'];
+  }>;
 }

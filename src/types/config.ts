@@ -1,3 +1,5 @@
+import type { QueueJob } from '@/runtime/interfaces.ts';
+
 /**
  * Configuration Types for Anchor-Kit
  * Defines the complete configuration interface required to initialize an Anchor-Kit instance
@@ -138,10 +140,22 @@ export interface SecurityConfig {
 
   /**
    * Enable client attribution for SEP-10
-   * Requires client domain verification
+   * Requires clientDomain, clientDomainSigningKey, and a matching HTTPS origin in server.corsOrigins
    * @optional - defaults to false
    */
   enableClientAttribution?: boolean;
+
+  /**
+   * Client's DNS hostname used for SEP-10 client attribution (without a scheme).
+   * @optional - required when enableClientAttribution is true
+   */
+  clientDomain?: string;
+
+  /**
+   * Stellar public key from the client's SEP-1 SIGNING_KEY entry.
+   * @optional - required when enableClientAttribution is true
+   */
+  clientDomainSigningKey?: string;
 
   /**
    * Webhook secret for payment rail providers
@@ -219,7 +233,8 @@ export interface AssetsConfig {
   assets: Asset[];
 
   /**
-   * Default fiat currency code (ISO 4217)
+   * Default fiat currency code (ISO 4217).
+   * Only standard three-letter uppercase fiat codes are accepted; custom or non-fiat values are not allowed.
    * @optional
    */
   defaultCurrency?: string;
@@ -314,38 +329,27 @@ export interface OperationalConfig {
   supportEmail?: string;
 
   /**
+   * Enable webhook event processing
+   * @optional
+   */
+  webhooksEnabled?: boolean;
+
+  /**
+   * Enable CORS for HTTP endpoints
+   * @optional
+   */
+  corsEnabled?: boolean;
+
+  /**
    * Operational address
    * @optional
    */
   address?: OperationalAddress;
 
   /**
-   * Enable transaction webhook notifications
-   * @optional - defaults to true
-   */
-  webhooksEnabled?: boolean;
-
-  /**
-   * Background job queue backend ('memory' | 'redis' | 'postgres')
-   * @optional - defaults to 'memory'
-   */
-  queueBackend?: 'memory' | 'redis' | 'postgres';
-
-  /**
-   * Redis connection URL (required if queueBackend is 'redis')
-   * @optional
-   */
-  redisUrl?: string;
-
-  /**
-   * Enable cross-origin requests
-   * @optional - defaults to true
-   */
-  corsEnabled?: boolean;
-
-  /**
-   * Transaction retention period in days
-   * @optional - defaults to 90
+   * Retention window in days for cleanup records. This setting takes precedence
+   * over framework.watchers.retentionDays.
+   * @optional - defaults to framework.watchers.retentionDays, then 90
    */
   transactionRetentionDays?: number;
 }
@@ -405,7 +409,7 @@ export interface FrameworkConfig {
     /**
      * Database provider type
      */
-    provider: 'postgres' | 'sqlite' | 'mysql';
+    provider: 'postgres' | 'sqlite';
 
     /**
      * Database connection URL
@@ -436,6 +440,12 @@ export interface FrameworkConfig {
      * @optional - defaults to 1
      */
     concurrency?: number;
+
+    /** Maximum number of jobs waiting for a worker; in-flight jobs are excluded. Defaults to unlimited. */
+    maxPendingJobs?: number;
+
+    /** Called when a queue worker fails. Errors from this callback are ignored. */
+    onError?: (job: QueueJob, error: unknown) => void | Promise<void>;
   };
 
   /**
@@ -462,7 +472,8 @@ export interface FrameworkConfig {
     transactionTimeoutMs?: number;
 
     /**
-     * Retention window in days for watcher logs and operational records.
+     * Legacy fallback retention window in days. Used when
+     * operational.transactionRetentionDays is not configured.
      * @optional - defaults to 90
      */
     retentionDays?: number;
@@ -514,6 +525,13 @@ export interface FrameworkConfig {
      * @optional - defaults to 60
      */
     depositMax?: number;
+
+    /**
+     * Trust x-forwarded-for header for client IP identification.
+     * Only set this to true if you're behind a trusted proxy.
+     * @optional - defaults to false
+     */
+    trustForwardedFor?: boolean;
   };
 
   /**
@@ -639,6 +657,9 @@ export interface AnchorKitConfig {
    * Webhook integration configuration.
    */
   webhooks?: {
+    /** Maximum time to wait for onEvent, in milliseconds. Defaults to 30000. */
+    callbackTimeoutMs?: number;
+
     /**
      * Maximum time allowed for a cooperative webhook callback.
      * @optional - defaults to 30000
@@ -658,8 +679,24 @@ export interface AnchorKitConfig {
       context: {
         receivedAt: string;
         signature?: string;
-        signal: AbortSignal;
+        rawBody: string | Buffer | Uint8Array;
       },
     ) => Promise<void> | void;
   };
 }
+
+/**
+ * Deep readonly utility type to reflect runtime deep-freeze behavior.
+ */
+export type DeepReadonly<T> = T extends (...args: never[]) => unknown
+  ? T
+  : T extends Array<infer U>
+    ? ReadonlyArray<DeepReadonly<U>>
+    : T extends object
+      ? { readonly [K in keyof T]: DeepReadonly<T[K]> }
+      : T;
+
+/**
+ * Snapshot type returned by `AnchorConfig.getConfig()` — deeply readonly.
+ */
+export type AnchorKitConfigSnapshot = DeepReadonly<AnchorKitConfig>;

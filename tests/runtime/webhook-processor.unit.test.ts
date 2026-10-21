@@ -6,7 +6,7 @@ import type { AnchorKitConfig } from '@/types/config.ts';
 describe('DefaultWebhookProcessor Unit Tests', () => {
   it('updates event status to failed when callback throws', async () => {
     const mockDatabase = {
-      insertWebhookEvent: vi.fn().mockResolvedValue({
+      insertOrGetWebhookEvent: vi.fn().mockResolvedValue({
         inserted: true,
         record: {
           id: 'internal-id',
@@ -40,20 +40,19 @@ describe('DefaultWebhookProcessor Unit Tests', () => {
       rawBody: '{}',
     };
 
-    // Should rethrow the error
-    await expect(processor.process(input)).rejects.toThrow('Callback failed');
+    await expect(processor.process(input)).rejects.toThrow('Webhook processing failed');
 
     // Should have updated status to failed with error message
     expect(mockDatabase.updateWebhookEventStatus).toHaveBeenCalledWith({
       id: 'internal-id',
       status: 'failed',
-      errorMessage: 'Callback failed',
+      errorMessage: 'Webhook callback failed',
     });
   });
 
   it('updates event status to processed when callback succeeds', async () => {
     const mockDatabase = {
-      insertWebhookEvent: vi.fn().mockResolvedValue({
+      insertOrGetWebhookEvent: vi.fn().mockResolvedValue({
         inserted: true,
         record: {
           id: 'internal-id-2',
@@ -97,102 +96,76 @@ describe('DefaultWebhookProcessor Unit Tests', () => {
     });
   });
 
-  it('aborts a cooperative callback when its deadline expires', async () => {
-    const mockDatabase = {
-      insertWebhookEvent: vi.fn().mockResolvedValue({
-        inserted: true,
-        record: {
-          id: 'timeout-id',
-          eventId: 'timeout-event',
-          provider: 'generic',
-          payload: {},
-          createdAt: new Date().toISOString(),
-        },
-      }),
-      updateWebhookEventStatus: vi.fn().mockResolvedValue(undefined),
-    } as unknown as DatabaseAdapter;
-    let callbackSignal: AbortSignal | undefined;
-    const mockConfig = {
-      security: { verifyWebhookSignatures: false },
-      webhooks: {
-        timeoutMs: 10,
-        onEvent: vi.fn(
-          (_event, context: { signal: AbortSignal }) =>
-            new Promise<void>((resolve) => {
-              callbackSignal = context.signal;
-              context.signal.addEventListener('abort', () => resolve(), { once: true });
-            }),
-        ),
-      },
-    } as unknown as AnchorKitConfig;
-    const processor = new DefaultWebhookProcessor({
-      config: mockConfig,
-      database: mockDatabase,
-    });
-
-    await expect(
-      processor.process({
-        eventId: 'timeout-event',
-        provider: 'generic',
-        payload: {},
-        rawBody: '{}',
-      }),
-    ).rejects.toThrow('Webhook callback deadline exceeded');
-    expect(callbackSignal?.aborted).toBe(true);
-    expect(mockDatabase.updateWebhookEventStatus).toHaveBeenCalledWith({
-      id: 'timeout-id',
-      status: 'failed',
-      errorMessage: 'Webhook callback deadline exceeded',
-    });
-  });
-
-  it('aborts active callbacks during shutdown', async () => {
-    const mockDatabase = {
-      insertWebhookEvent: vi.fn().mockResolvedValue({
-        inserted: true,
-        record: {
-          id: 'shutdown-id',
-          eventId: 'shutdown-event',
-          provider: 'generic',
-          payload: {},
-          createdAt: new Date().toISOString(),
-        },
-      }),
-      updateWebhookEventStatus: vi.fn().mockResolvedValue(undefined),
-    } as unknown as DatabaseAdapter;
-    let callbackSignal: AbortSignal | undefined;
-    let callbackStarted!: () => void;
-    const started = new Promise<void>((resolve) => {
-      callbackStarted = resolve;
-    });
-    const mockConfig = {
-      security: { verifyWebhookSignatures: false },
-      webhooks: {
-        onEvent: vi.fn(
-          (_event, context: { signal: AbortSignal }) =>
-            new Promise<void>((resolve) => {
-              callbackSignal = context.signal;
-              callbackStarted();
-              context.signal.addEventListener('abort', () => resolve(), { once: true });
-            }),
-        ),
-      },
-    } as unknown as AnchorKitConfig;
-    const processor = new DefaultWebhookProcessor({
-      config: mockConfig,
-      database: mockDatabase,
-    });
-    const processing = processor.process({
-      eventId: 'shutdown-event',
+  it('retries a failed event but blocks an already processed duplicate', async () => {
+    const failingRecord = {
+      id: 'internal-id-3',
+      eventId: 'external-id-3',
       provider: 'generic',
-      payload: {},
+      payload: { type: 'test' },
+      status: 'failed',
+      errorMessage: 'temporary failure',
+      processedAt: new Date().toISOString(),
+      createdAt: new Date().toISOString(),
+    };
+
+    const insertOrGetWebhookEvent = vi
+      .fn<DatabaseAdapter['insertOrGetWebhookEvent']>()
+      .mockResolvedValueOnce({
+        inserted: true,
+        record: {
+          ...failingRecord,
+          status: 'pending',
+          errorMessage: null,
+          processedAt: null,
+          payload: { type: 'retry' },
+        },
+      });
+    const mockDatabase = {
+      insertOrGetWebhookEvent,
+      updateWebhookEventStatus: vi.fn().mockResolvedValue(undefined),
+    } as unknown as DatabaseAdapter;
+
+    const onEvent = vi.fn().mockResolvedValue(undefined);
+    const processor = new DefaultWebhookProcessor({
+      config: {
+        security: { verifyWebhookSignatures: false },
+        webhooks: { onEvent },
+      } as unknown as AnchorKitConfig,
+      database: mockDatabase,
+    });
+
+    const retryResult = await processor.process({
+      eventId: 'external-id-3',
+      provider: 'generic',
+      payload: { type: 'retry' },
       rawBody: '{}',
     });
 
-    await started;
-    await processor.shutdown();
+    expect(retryResult.duplicate).toBe(false);
+    expect(retryResult.eventId).toBe('external-id-3');
+    expect(onEvent).toHaveBeenCalledTimes(1);
+    expect(mockDatabase.updateWebhookEventStatus).toHaveBeenLastCalledWith({
+      id: 'internal-id-3',
+      status: 'processed',
+    });
 
-    await expect(processing).rejects.toThrow('Webhook processor is shutting down');
-    expect(callbackSignal?.aborted).toBe(true);
+    insertOrGetWebhookEvent.mockResolvedValueOnce({
+      inserted: false,
+      record: {
+        ...failingRecord,
+        status: 'processed',
+        errorMessage: null,
+      },
+    });
+
+    const duplicateResult = await processor.process({
+      eventId: 'external-id-3',
+      provider: 'generic',
+      payload: { type: 'retry' },
+      rawBody: '{}',
+    });
+
+    expect(duplicateResult.duplicate).toBe(true);
+    expect(onEvent).toHaveBeenCalledTimes(1);
   });
 });

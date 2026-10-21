@@ -177,6 +177,7 @@ export interface Transaction {
   message?: string;
 
   // ============================================
+  // ============================================
   // Timestamp Fields
   // ============================================
 
@@ -185,6 +186,12 @@ export interface Transaction {
 
   /** Unix timestamp (in milliseconds) when transaction completed */
   completed_at?: number;
+
+  /** ISO 8601 timestamp when transaction record was created */
+  created_at?: string;
+
+  /** ISO 8601 timestamp when transaction record was last updated */
+  updated_at?: string;
 
   // ============================================
   // Optional Rail-Specific Fields
