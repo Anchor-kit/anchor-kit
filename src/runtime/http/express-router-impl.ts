@@ -455,6 +455,25 @@ function hasValidSignature(transaction: Transaction, publicKey: string): boolean
   return false;
 }
 
+function hasValidClientDomainSignature(
+  transaction: Transaction,
+  clientDomain: string,
+  signingKey: string,
+): boolean {
+  const operations = transaction.operations.filter(
+    (operation): operation is Operation.ManageData =>
+      operation.type === 'manageData' && operation.name === 'client_domain',
+  );
+  if (operations.length !== 1) return false;
+
+  const operation = operations[0];
+  return (
+    operation?.source === signingKey &&
+    operation.value?.toString('utf8') === clientDomain &&
+    hasValidSignature(transaction, signingKey)
+  );
+}
+
 function extractNonceFromChallenge(transaction: Transaction): string | null {
   for (const operation of transaction.operations) {
     if (operation.type !== 'manageData') {
@@ -904,6 +923,24 @@ async function handleAuthToken(
     return;
   }
 
+  const securityConfig = context.config.get('security');
+  if (
+    securityConfig.enableClientAttribution &&
+    (!securityConfig.clientDomain ||
+      !securityConfig.clientDomainSigningKey ||
+      !hasValidClientDomainSignature(
+        transaction,
+        securityConfig.clientDomain,
+        securityConfig.clientDomainSigningKey,
+      ))
+  ) {
+    sendJson(res, 401, {
+      error: 'invalid_challenge',
+      message: 'Challenge is missing a valid client domain signature',
+    });
+    return;
+  }
+
   const stored = await context.database.getAuthChallengeByChallenge(nonce);
   if (!stored || stored.account !== account) {
     sendJson(res, 401, { error: 'invalid_challenge', message: 'Challenge not found' });
@@ -945,6 +982,9 @@ async function handleAuthToken(
       aud: ACCESS_TOKEN_AUDIENCE,
       scope: 'anchor_api',
       typ: 'access_token',
+      ...(securityConfig.enableClientAttribution
+        ? { client_domain: securityConfig.clientDomain }
+        : {}),
     },
     context.config.get('security').interactiveJwtSecret,
     { expiresIn: tokenLifetime },
