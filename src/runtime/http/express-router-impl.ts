@@ -88,6 +88,28 @@ function sendJson(
   }
 }
 
+function sendStellarToml(context: ExpressRouterContext, res: ServerResponse, method: string): void {
+  const server = context.config.get('server');
+  const lines = [
+    `SIGNING_KEY = ${JSON.stringify(context.sep10ServerKeypair.publicKey())}`,
+    `NETWORK_PASSPHRASE = ${JSON.stringify(context.networkPassphrase)}`,
+  ];
+
+  if (server.webAuthEndpoint) {
+    lines.push(`WEB_AUTH_ENDPOINT = ${JSON.stringify(server.webAuthEndpoint)}`);
+  }
+  if (server.transferServerSep24) {
+    lines.push(`TRANSFER_SERVER_SEP0024 = ${JSON.stringify(server.transferServerSep24)}`);
+  }
+
+  const body = `${lines.join('\n')}\n`;
+  res.statusCode = 200;
+  res.setHeader('content-type', 'text/plain; charset=utf-8');
+  res.setHeader('access-control-allow-origin', '*');
+  res.setHeader('content-length', String(Buffer.byteLength(body, 'utf8')));
+  res.end(method === 'HEAD' ? undefined : body);
+}
+
 function setCorsHeaders(
   res: ServerResponse,
   origin: string | undefined,
@@ -1422,6 +1444,11 @@ export async function handleExpressRouterRequest(
   // Skip timeout for health endpoint (should always respond quickly)
   if ((method === 'GET' || method === 'HEAD') && path === '/health') {
     await handleHealth(res, method);
+    return;
+  }
+
+  if ((method === 'GET' || method === 'HEAD') && path === '/.well-known/stellar.toml') {
+    sendStellarToml(context, res, method);
     return;
   }
 

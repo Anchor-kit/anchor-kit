@@ -80,6 +80,12 @@ export interface ServerConfig {
    */
   interactiveDomain?: string;
 
+  /** HTTPS SEP-10 authentication endpoint published in stellar.toml. */
+  webAuthEndpoint?: string;
+
+  /** HTTPS SEP-24 transfer server published in stellar.toml. */
+  transferServerSep24?: string;
+
   /**
    * Allowed origins for CORS
    * @optional
