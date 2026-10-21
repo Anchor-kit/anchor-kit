@@ -1,5 +1,10 @@
 import type { TransactionStatus } from '@/types/transaction-status.ts';
 
+export interface AccountSigner {
+  publicKey: string;
+  weight: number;
+}
+
 export interface AuthChallengeRecord {
   id: string;
   account: string;
