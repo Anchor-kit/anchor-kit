@@ -96,13 +96,18 @@ for (const file of walkDts(distRoot)) {
   const lines = content.split('\n');
   for (let i = 0; i < lines.length; i++) {
     if (/@\//.test(lines[i])) {
-      dtsViolations.push({ file: file.replace(repoRoot + '/', ''), line: i + 1, text: lines[i].trim() });
+      dtsViolations.push({
+        file: file.replace(repoRoot + '/', ''),
+        line: i + 1,
+        text: lines[i].trim(),
+      });
     }
   }
 }
 
 if (dtsViolations.length > 0) {
-  const preview = dtsViolations.slice(0, 5)
+  const preview = dtsViolations
+    .slice(0, 5)
     .map(({ file, line, text }) => `    ${file}:${line}  ${text}`)
     .join('\n');
   fail(`${dtsViolations.length} @/ import(s) remain in .d.ts files:\n${preview}`);

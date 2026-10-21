@@ -57,9 +57,7 @@ if (violations.length > 0) {
   for (const v of violations) {
     console.error(`  ${v.file}:${v.line}  ${v.text}`);
   }
-  console.error(
-    '\nRun `npm run build` to rebuild, then rerun this check.',
-  );
+  console.error('\nRun `npm run build` to rebuild, then rerun this check.');
   process.exit(1);
 }
 

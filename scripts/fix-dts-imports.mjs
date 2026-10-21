@@ -79,15 +79,12 @@ for (const file of walkDts(DIST_ROOT)) {
 
   // Match both single- and double-quoted @/ imports.
   // Handles:  from '@/path'  from '@/path.ts'  import('@/path')  /// <reference ... '@/path' />
-  const replaced = original.replace(
-    /(['"])@\/([^'"]+)\1/g,
-    (match, quote, rest) => {
-      const specifier = `@/${rest}`;
-      const rel = resolveAlias(file, specifier);
-      importsReplaced++;
-      return `${quote}${rel}${quote}`;
-    },
-  );
+  const replaced = original.replace(/(['"])@\/([^'"]+)\1/g, (match, quote, rest) => {
+    const specifier = `@/${rest}`;
+    const rel = resolveAlias(file, specifier);
+    importsReplaced++;
+    return `${quote}${rel}${quote}`;
+  });
 
   if (replaced !== original) {
     writeFileSync(file, replaced, 'utf8');
