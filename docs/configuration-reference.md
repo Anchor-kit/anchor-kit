@@ -126,18 +126,18 @@ security: {
 
 ### Fields
 
-| Field                        | Type      | Default | Status         | Notes                                                                                                       |
-| ---------------------------- | --------- | ------- | -------------- | ----------------------------------------------------------------------------------------------------------- |
-| `sep10SigningKey`            | `string`  | —       | ✅ Required    | Private key (hex or base64) used to sign SEP-10 authentication challenges                                   |
-| `interactiveJwtSecret`       | `string`  | —       | ✅ Required    | Secret used to sign and verify SEP-24 interactive flow bearer tokens                                        |
+| Field                        | Type      | Default | Status         | Notes                                                                                                                         |
+| ---------------------------- | --------- | ------- | -------------- | ----------------------------------------------------------------------------------------------------------------------------- |
+| `sep10SigningKey`            | `string`  | —       | ✅ Required    | Private key (hex or base64) used to sign SEP-10 authentication challenges                                                     |
+| `interactiveJwtSecret`       | `string`  | —       | ✅ Required    | Secret used to sign and verify SEP-24 interactive flow bearer tokens                                                          |
 | `distributionAccountSecret`  | `string`  | —       | ✅ Required    | Private key for constructing `LocalKeypairSigner`; never log or expose it. The SDK does not submit transactions automatically |
-| `webhookSecret`              | `string`  | —       | ✅ Optional    | HMAC-SHA256 secret for webhook signature verification; required if `verifyWebhookSignatures` is true        |
-| `verifyWebhookSignatures`    | `boolean` | `true`  | ✅ Implemented | Enable/disable webhook signature verification via `x-anchor-signature` header                               |
-| `challengeExpirationSeconds` | `number`  | `300`   | ✅ Implemented | SEP-10 challenge expiry window (5 minutes default)                                                          |
-| `enableClientAttribution`    | `boolean` | `false` | ✅ Implemented | Enable SEP-10 client attribution (requires `clientDomain` and `clientDomainSigningKey`)                     |
-| `clientDomain`               | `string`  | —       | ✅ Conditional | Client's DNS hostname (without scheme); required when `enableClientAttribution` is true                     |
-| `clientDomainSigningKey`     | `string`  | —       | ✅ Conditional | Stellar public key from client's SEP-1 `SIGNING_KEY` entry; required when `enableClientAttribution` is true |
-| `authTokenLifetimeSeconds`   | `number`  | `3600`  | ✅ Implemented | SEP-10 auth token lifetime (1 hour default)                                                                 |
+| `webhookSecret`              | `string`  | —       | ✅ Optional    | HMAC-SHA256 secret for webhook signature verification; required if `verifyWebhookSignatures` is true                          |
+| `verifyWebhookSignatures`    | `boolean` | `true`  | ✅ Implemented | Enable/disable webhook signature verification via `x-anchor-signature` header                                                 |
+| `challengeExpirationSeconds` | `number`  | `300`   | ✅ Implemented | SEP-10 challenge expiry window (5 minutes default)                                                                            |
+| `enableClientAttribution`    | `boolean` | `false` | ✅ Implemented | Enable SEP-10 client attribution (requires `clientDomain` and `clientDomainSigningKey`)                                       |
+| `clientDomain`               | `string`  | —       | ✅ Conditional | Client's DNS hostname (without scheme); required when `enableClientAttribution` is true                                       |
+| `clientDomainSigningKey`     | `string`  | —       | ✅ Conditional | Stellar public key from client's SEP-1 `SIGNING_KEY` entry; required when `enableClientAttribution` is true                   |
+| `authTokenLifetimeSeconds`   | `number`  | `3600`  | ✅ Implemented | SEP-10 auth token lifetime (1 hour default)                                                                                   |
 
 ### Example
 
