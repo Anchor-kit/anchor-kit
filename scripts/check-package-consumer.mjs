@@ -34,7 +34,14 @@ try {
   }
   run(
     'npm',
-    ['install', '--no-audit', '--no-fund', join(tempDir, packageArchive), 'typescript@^5'],
+    [
+      'install',
+      '--no-audit',
+      '--no-fund',
+      join(tempDir, packageArchive),
+      'typescript@^5',
+      '@types/node@^22',
+    ],
     tempDir,
   );
   run('npm', ['exec', '--', 'tsc', '--project', 'tsconfig.json'], tempDir);

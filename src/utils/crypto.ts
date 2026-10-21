@@ -76,7 +76,17 @@ export const CryptoUtils = {
 
     // Honor an explicit expiresIn of 0 (immediate expiry). Only skip when option omitted.
     if (options.expiresIn !== undefined) {
-      builder.setExpirationTime(options.expiresIn);
+      if (typeof options.expiresIn === 'number') {
+        if (!Number.isFinite(options.expiresIn) || options.expiresIn < 0) {
+          throw new TypeError(
+            'expiresIn must be a non-negative finite number or a duration string',
+          );
+        }
+
+        builder.setExpirationTime(issuedAt + options.expiresIn);
+      } else {
+        builder.setExpirationTime(options.expiresIn);
+      }
     }
 
     return builder.sign(secretKey);

@@ -21,6 +21,14 @@ function watcherTaskId(job: QueueJob): number {
   return Number(job.payload.watcherTaskId);
 }
 
+function watcherTaskLabel(job: QueueJob): string {
+  if (job.type !== 'process_watcher_task') {
+    throw new Error('Expected process_watcher_task job');
+  }
+
+  return job.payload.watcherTaskId;
+}
+
 describe('InMemoryQueueAdapter', () => {
   it('rejects invalid constructor concurrency values', () => {
     for (const value of [0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY]) {
@@ -602,13 +610,13 @@ describe('InMemoryQueueAdapter', () => {
     });
 
     await queue.start(async (job) => {
-      const id = job.payload.id as string;
+      const id = watcherTaskLabel(job);
       if (id === 'fail') throw new Error('worker failed');
       completed.push(id);
       resolveCompleted?.();
     });
-    await queue.enqueue({ type: 'process_watcher_task', payload: { id: 'fail' } });
-    await queue.enqueue({ type: 'cleanup_records', payload: { id: 'succeed' } });
+    await queue.enqueue({ type: 'process_watcher_task', payload: { watcherTaskId: 'fail' } });
+    await queue.enqueue({ type: 'process_watcher_task', payload: { watcherTaskId: 'succeed' } });
     await completedPromise;
     await queue.stop();
 
@@ -626,9 +634,9 @@ describe('InMemoryQueueAdapter', () => {
       resolveDrained = resolve;
     });
 
-    await queue.enqueue({ type: 'cleanup_records', payload: { id: 1 } });
+    await queue.enqueue({ type: 'process_watcher_task', payload: { watcherTaskId: '1' } });
     await expect(
-      queue.enqueue({ type: 'cleanup_records', payload: { id: 2 } }),
+      queue.enqueue({ type: 'process_watcher_task', payload: { watcherTaskId: '2' } }),
     ).rejects.toThrow('In-memory queue is full');
 
     await queue.start(async () => {
@@ -636,7 +644,7 @@ describe('InMemoryQueueAdapter', () => {
       if (completedCount === 2) resolveDrained?.();
     });
     await new Promise<void>((resolve) => setTimeout(resolve, 0));
-    await queue.enqueue({ type: 'cleanup_records', payload: { id: 3 } });
+    await queue.enqueue({ type: 'process_watcher_task', payload: { watcherTaskId: '3' } });
     await drained;
     await queue.stop();
 
@@ -660,7 +668,7 @@ describe('InMemoryQueueAdapter', () => {
     const completed: string[] = [];
 
     await queue.start(async (job) => {
-      const id = job.payload.id as string;
+      const id = watcherTaskLabel(job);
       if (id === 'in-flight') {
         signalWorkerStarted?.();
         await workerGate;
@@ -668,17 +676,20 @@ describe('InMemoryQueueAdapter', () => {
       completed.push(id);
       if (id === 'pending-1') signalPendingComplete?.();
     });
-    await queue.enqueue({ type: 'cleanup_records', payload: { id: 'in-flight' } });
+    await queue.enqueue({
+      type: 'process_watcher_task',
+      payload: { watcherTaskId: 'in-flight' },
+    });
     await workerStarted;
 
     const enqueueResults = await Promise.allSettled([
-      queue.enqueue({ type: 'cleanup_records', payload: { id: 'pending-1' } }),
-      queue.enqueue({ type: 'cleanup_records', payload: { id: 'pending-2' } }),
+      queue.enqueue({ type: 'process_watcher_task', payload: { watcherTaskId: 'pending-1' } }),
+      queue.enqueue({ type: 'process_watcher_task', payload: { watcherTaskId: 'pending-2' } }),
     ]);
     expect(enqueueResults.map((result) => result.status)).toEqual(['fulfilled', 'rejected']);
 
     releaseWorker?.();
-  await pendingComplete;
+    await pendingComplete;
     await queue.stop();
 
     expect(completed).toEqual(['in-flight', 'pending-1']);

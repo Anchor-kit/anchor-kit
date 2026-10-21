@@ -37,6 +37,7 @@ export class AnchorInstance {
   private plugins: Map<string, AnchorPlugin> = new Map();
 
   private database: DatabaseAdapter | null = null;
+  private readonly injectedDatabaseAdapter?: DatabaseAdapter;
   private queue: QueueAdapter | null = null;
   private webhookProcessor: WebhookProcessor | null = null;
   private watchers: Watcher[] = [];
@@ -245,7 +246,10 @@ export class AnchorInstance {
   }
 
   protected createDatabaseAdapter(): DatabaseAdapter {
-    return createSqlDatabaseAdapter(this.config.get('framework').database);
+    return (
+      this.injectedDatabaseAdapter ??
+      createSqlDatabaseAdapter(this.config.get('framework').database)
+    );
   }
 
   /**

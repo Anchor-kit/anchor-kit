@@ -38,6 +38,7 @@
   },
   "dependencies": {
     "@stellar/stellar-sdk": "^14.6.0",
+    "@types/big.js": "^6.2.2",
     "bcryptjs": "^3.0.3",
     "big.js": "^7.0.1",
     "express": "^5.2.1",
@@ -50,7 +51,6 @@
     "@eslint/js": "^10.0.1",
     "@types/bcryptjs": "^3.0.0",
     "@types/better-sqlite3": "^7.6.13",
-    "@types/big.js": "^6.2.2",
     "@types/bun": "latest",
     "@types/express": "^5.0.6",
     "@types/jsonwebtoken": "^9.0.10",
