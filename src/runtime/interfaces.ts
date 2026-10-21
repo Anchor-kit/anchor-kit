@@ -1,4 +1,13 @@
 import type { TransactionStatus } from '@/types/transaction-status.ts';
+import type { KycData, KycVerificationDecision } from '@/types/foundation.ts';
+
+export interface KycVerificationProvider {
+  verify(input: {
+    customerId: string;
+    operationKey: string;
+    data: KycData;
+  }): Promise<KycVerificationDecision>;
+}
 
 export interface AuthChallengeRecord {
   id: string;
