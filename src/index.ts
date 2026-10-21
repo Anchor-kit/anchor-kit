@@ -27,6 +27,7 @@ export type {
   QueueJob,
   QueueDrainStatus,
   QueueAdapter,
+  SettlementJobRecord,
   Watcher,
   WebhookProcessor,
   WatcherTaskRecord,

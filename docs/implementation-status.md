@@ -18,6 +18,7 @@ This file tracks where the codebase currently aligns or diverges from the canoni
 - Express HTTP adapter for health, info, authentication, transaction, and webhook routes, including request limits and rate limiting.
 - Webhook processing with optional signature verification, event deduplication, persistence, callback dispatch, and failure status updates.
 - In-memory queue adapter for bounded background work and graceful shutdown.
+- SQL-backed settlement job records with stable operation identity and reconnect-safe pending state.
 - Transaction watcher lifecycle for polling pending transactions, persisting watcher tasks, and dispatching work through the queue.
 
 ## Planned Per Unified Spec (Not Yet Implemented)

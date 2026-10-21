@@ -52,6 +52,15 @@ export interface WatcherTaskRecord {
   createdAt: string;
 }
 
+export interface SettlementJobRecord {
+  id: string;
+  operationId: string;
+  payloadRef: string;
+  status: 'pending' | 'processing' | 'completed' | 'failed';
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface DatabaseAdapter {
   connect(): Promise<void>;
   disconnect(): Promise<void>;
@@ -151,6 +160,17 @@ export interface DatabaseAdapter {
     errorMessage?: string;
   }): Promise<void>;
   countProcessedWatcherTasks(): Promise<number>;
+  insertOrGetSettlementJob(input: {
+    id: string;
+    operationId: string;
+    payloadRef: string;
+  }): Promise<{ record: SettlementJobRecord; inserted: boolean }>;
+  getSettlementJobByOperationId(operationId: string): Promise<SettlementJobRecord | null>;
+  listPendingSettlementJobs(limit: number): Promise<SettlementJobRecord[]>;
+  updateSettlementJobStatus(input: {
+    operationId: string;
+    status: SettlementJobRecord['status'];
+  }): Promise<boolean>;
   cleanupOldRecords(cutoffIso: string): Promise<void>;
 }
 

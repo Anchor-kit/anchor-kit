@@ -124,6 +124,18 @@ class ControllableFakeDatabaseAdapter implements DatabaseAdapter {
   async countProcessedWatcherTasks(): Promise<number> {
     return 0;
   }
+  async insertOrGetSettlementJob(): Promise<never> {
+    throw new Error('Not implemented');
+  }
+  async getSettlementJobByOperationId() {
+    return null;
+  }
+  async listPendingSettlementJobs(): Promise<never[]> {
+    return [];
+  }
+  async updateSettlementJobStatus(): Promise<boolean> {
+    return false;
+  }
   async cleanupOldRecords(): Promise<void> {}
 }
 
