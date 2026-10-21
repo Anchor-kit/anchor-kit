@@ -16,9 +16,13 @@ This file tracks where the codebase currently aligns or diverges from the canoni
 
 - SQL persistence through the `DatabaseAdapter` interface, with SQLite support for local development and tests and PostgreSQL support through the configured SQL client.
 - Express HTTP adapter for health, info, authentication, transaction, and webhook routes, including request limits and rate limiting.
+- Request deadline abort signals for route extensions and deposit hooks, with a single timeout response and pre-write deadline checks.
 - Webhook processing with optional signature verification, event deduplication, persistence, callback dispatch, and failure status updates.
+- Configured SEP-10 client-domain signatures are verified before token issuance and included in the token claim.
 - In-memory queue adapter for bounded background work and graceful shutdown.
+- SQL-backed settlement job records with stable operation identity and reconnect-safe pending state.
 - Transaction watcher lifecycle for polling pending transactions, persisting watcher tasks, and dispatching work through the queue.
+- Provider-neutral payment rail adapter contract for initiation, event verification, status lookup, and recovery; no provider implementation is bundled.
 
 ## Planned Per Unified Spec (Not Yet Implemented)
 

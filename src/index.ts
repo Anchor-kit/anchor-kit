@@ -26,10 +26,13 @@ export type {
   DatabaseAdapter,
   IdempotencyRecord,
   InteractiveTransactionRecord,
+  PaymentRailAdapter,
   QueueJob,
   QueueDrainStatus,
   QueueAdapter,
+  SettlementJobRecord,
   Watcher,
+  WebhookEventRecord,
   WebhookProcessor,
   WatcherTaskRecord,
 } from './runtime/interfaces.ts';

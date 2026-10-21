@@ -68,6 +68,16 @@ written atomically. If either write fails, the request returns `500`, both write
 the reservation is removed so the key can be retried. An incomplete cached response returns
 `503 idempotency_response_unavailable` with `Retry-After`.
 
+### Request deadlines
+
+`server.requestTimeout` defaults to 30 seconds. When it expires, the API returns `504` and aborts
+the signal supplied to plugin routes and deposit hooks. Extensions should check the signal before
+side effects and pass it to I/O that supports cancellation. The SDK checks the signal before its
+own database writes. A write already in progress may still commit after the timeout response. A
+deposit sent with an `Idempotency-Key` can be retried with the same key and body to retrieve the
+stored result; without a key, a concurrent commit may leave a transaction without a response to
+that request.
+
 ### SEP-10 challenge expiry
 
 The signed XDR time bounds allow a challenge from `minTime` up to, but not including, `maxTime`.

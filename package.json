@@ -22,7 +22,9 @@
   "type": "module",
   "scripts": {
     "dev": "bun run --watch src/index.ts",
-    "build": "rm -rf dist && bun build src/index.ts --outdir dist --target node --format esm --packages bundle --external @stellar/stellar-sdk --external bcryptjs --external big.js --external express --external isomorphic-dompurify --external jose --external jsonwebtoken --external pg && bunx tsc -p tsconfig.types.json && node scripts/fix-dts-imports.mjs",
+    "build": "rm -rf dist && npx rolldown --config rolldown.config.mjs && npx tsc -p tsconfig.types.json && node scripts/fix-dts-imports.mjs",
+    "check:aliases": "node scripts/check-alias-imports.mjs",
+    "check:consumer": "node fixtures/consumer/verify.mjs",
     "test": "bun test",
     "test:watch": "bun test --watch",
     "test:coverage": "bun test --coverage",
@@ -48,6 +50,7 @@
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
+    "rolldown": "1.1.3",
     "@types/bcryptjs": "^3.0.0",
     "@types/better-sqlite3": "^7.6.13",
     "@types/big.js": "^6.2.2",
