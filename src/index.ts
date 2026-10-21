@@ -24,6 +24,7 @@ export type {
   DatabaseAdapter,
   IdempotencyRecord,
   InteractiveTransactionRecord,
+  PaymentRailAdapter,
   QueueJob,
   QueueDrainStatus,
   QueueAdapter,

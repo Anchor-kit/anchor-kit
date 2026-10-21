@@ -19,6 +19,7 @@ This file tracks where the codebase currently aligns or diverges from the canoni
 - Webhook processing with optional signature verification, event deduplication, persistence, callback dispatch, and failure status updates.
 - In-memory queue adapter for bounded background work and graceful shutdown.
 - Transaction watcher lifecycle for polling pending transactions, persisting watcher tasks, and dispatching work through the queue.
+- Provider-neutral payment rail adapter contract for initiation, event verification, status lookup, and recovery; no provider implementation is bundled.
 
 ## Planned Per Unified Spec (Not Yet Implemented)
 
