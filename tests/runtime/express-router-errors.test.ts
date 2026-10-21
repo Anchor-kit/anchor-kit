@@ -1,7 +1,11 @@
 import { AnchorConfig } from '@/core/config.ts';
 import { PayloadTooLargeError, ValidationError } from '@/core/errors.ts';
 import { AnchorExpressRouter } from '@/runtime/http/express-router.ts';
-import type { DatabaseAdapter } from '@/runtime/interfaces.ts';
+import type {
+  AccountLookup,
+  AccountLookupResult,
+  DatabaseAdapter,
+} from '@/runtime/interfaces.ts';
 import { Keypair } from '@stellar/stellar-sdk';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { Readable } from 'node:stream';
@@ -35,10 +39,14 @@ const config = new AnchorConfig({
   },
 });
 
-function createMiddleware(database: Partial<DatabaseAdapter> = {}) {
+function createMiddleware(
+  database: Partial<DatabaseAdapter> = {},
+  accountLookup?: AccountLookup,
+) {
   return new AnchorExpressRouter({
     config,
     database: database as DatabaseAdapter,
+    accountLookup,
     webhookProcessor: {
       async process(input) {
         return { duplicate: false, eventId: input.eventId, provider: input.provider };
@@ -125,6 +133,67 @@ describe('AnchorExpressRouter error responses', () => {
     expect(response.body).toEqual({
       error: 'PAYLOAD_TOO_LARGE',
       message: 'Request exceeded the configured size',
+    });
+  });
+
+  it('loads signers and thresholds for an existing account through the injectable lookup', async () => {
+    const account = Keypair.random().publicKey();
+    const signer = Keypair.random().publicKey();
+    const accountLookup: AccountLookup = {
+      async loadAccount() {
+        return {
+          kind: 'found',
+          account: {
+            accountId: account,
+            signers: [
+              { key: account, weight: 1 },
+              { key: signer, weight: 2 },
+            ],
+            thresholds: { low: 1, medium: 2, high: 2 },
+          },
+        };
+      },
+    };
+    const middleware = createMiddleware({}, accountLookup);
+    const response = await invoke(middleware, {
+      method: 'GET',
+      path: `/auth/challenge?account=${account}`,
+    });
+
+    expect(response.status).toBe(200);
+    expect(response.body).toMatchObject({ account });
+  });
+
+  it('distinguishes a nonexistent account from an unavailable upstream lookup', async () => {
+    const account = Keypair.random().publicKey();
+    const notFoundLookup: AccountLookup = {
+      async loadAccount(): Promise<AccountLookupResult> {
+        return { kind: 'not_found' };
+      },
+    };
+    const notFoundResponse = await invoke(
+      createMiddleware({}, notFoundLookup),
+      { method: 'GET', path: `/auth/challenge?account=${account}` },
+    );
+    expect(notFoundResponse.status).toBe(404);
+    expect(notFoundResponse.body).toEqual({
+      error: 'ACCOUNT_NOT_FOUND',
+      message: 'Account not found.',
+    });
+
+    const unavailableLookup: AccountLookup = {
+      async loadAccount(): Promise<AccountLookupResult> {
+        return { kind: 'upstream_error', message: 'horizon unavailable' };
+      },
+    };
+    const unavailableResponse = await invoke(
+      createMiddleware({}, unavailableLookup),
+      { method: 'GET', path: `/auth/challenge?account=${account}` },
+    );
+    expect(unavailableResponse.status).toBe(502);
+    expect(unavailableResponse.body).toEqual({
+      error: 'ACCOUNT_LOOKUP_UNAVAILABLE',
+      message: 'Account lookup is temporarily unavailable.',
     });
   });
 

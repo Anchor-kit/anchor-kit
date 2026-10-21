@@ -1,7 +1,7 @@
 import type { AnchorConfig } from '@/core/config.ts';
 import { ConfigError, PayloadTooLargeError, ValidationError } from '@/core/errors.ts';
 import { InMemoryRateLimiter, type RateLimitRule } from '@/runtime/http/rate-limiter.ts';
-import type { DatabaseAdapter, WebhookProcessor } from '@/runtime/interfaces.ts';
+import type { AccountLookup, DatabaseAdapter, WebhookProcessor } from '@/runtime/interfaces.ts';
 import type { PluginRouteContext, RouteDefinition } from '@/types/foundation.ts';
 import type { AnchorPluginHooks, DepositRequestBody } from '@/types/plugin.ts';
 import { IdempotencyUtils } from '@/utils/idempotency.ts';
@@ -40,6 +40,7 @@ export interface ExpressRouterContext {
   config: AnchorConfig;
   database: DatabaseAdapter;
   webhookProcessor: WebhookProcessor;
+  accountLookup?: AccountLookup;
   sep10ServerKeypair: Keypair;
   networkPassphrase: string;
   maxBodyBytes: number;
@@ -475,6 +476,50 @@ function extractNonceFromChallenge(transaction: Transaction): string | null {
   return null;
 }
 
+function isValidSignerWeight(weight: unknown): weight is number {
+  return typeof weight === 'number' && Number.isInteger(weight) && weight >= 0 && weight <= 255;
+}
+
+function isValidThreshold(value: unknown): value is number {
+  return typeof value === 'number' && Number.isInteger(value) && value >= 0 && value <= 255;
+}
+
+/**
+ * Resolves the signer set and thresholds for a SEP-10 account through the
+ * injectable account lookup boundary. Returns `null` when the account does not
+ * exist so the caller can distinguish not-found from upstream failures.
+ */
+async function loadAccountSigners(
+  context: ExpressRouterContext,
+  account: string,
+): Promise<{ signers: Array<{ key: string; weight: number }>; thresholds: { low: number; medium: number; high: number } } | null> {
+  if (!context.accountLookup) {
+    // No lookup configured: fall back to the account master key as the sole signer.
+    return {
+      signers: [{ key: account, weight: 1 }],
+      thresholds: { low: 1, medium: 1, high: 1 },
+    };
+  }
+
+  const result = await context.accountLookup.getAccount(account);
+  if (result.kind === 'not_found') {
+    return null;
+  }
+  if (result.kind === 'error') {
+    throw result.error;
+  }
+
+  const { signers, thresholds } = result.account;
+  if (!Array.isArray(signers) || !signers.every((s) => typeof s.key === 'string' && isValidSignerWeight(s.weight))) {
+    throw new Error('Account lookup returned malformed signers');
+  }
+  if (!isValidThreshold(thresholds?.low) || !isValidThreshold(thresholds?.medium) || !isValidThreshold(thresholds?.high)) {
+    throw new Error('Account lookup returned malformed thresholds');
+  }
+
+  return { signers, thresholds };
+}
+
 function authenticate(
   context: ExpressRouterContext,
   req: IncomingMessage,
@@ -752,6 +797,25 @@ async function handleAuthChallenge(
     return;
   }
 
+  let accountSigners: Awaited<ReturnType<typeof loadAccountSigners>>;
+  try {
+    accountSigners = await loadAccountSigners(context, account);
+  } catch {
+    sendJson(res, 502, {
+      error: 'account_lookup_failed',
+      message: 'Account signer lookup failed',
+    });
+    return;
+  }
+
+  if (!accountSigners) {
+    sendJson(res, 404, {
+      error: 'account_not_found',
+      message: 'Account not found',
+    });
+    return;
+  }
+
   const nonce = randomUUID();
   const now = Math.floor(Date.now() / 1000);
   const expirationSeconds = context.config.get('security').challengeExpirationSeconds ?? 300;
@@ -860,6 +924,25 @@ async function handleAuthToken(
     return;
   }
 
+  let accountSigners: Awaited<ReturnType<typeof loadAccountSigners>>;
+  try {
+    accountSigners = await loadAccountSigners(context, account);
+  } catch {
+    sendJson(res, 502, {
+      error: 'account_lookup_failed',
+      message: 'Account signer lookup failed',
+    });
+    return;
+  }
+
+  if (!accountSigners) {
+    sendJson(res, 404, {
+      error: 'account_not_found',
+      message: 'Account not found',
+    });
+    return;
+  }
+
   let transaction: Transaction;
   try {
     transaction = new Transaction(signedChallenge, context.networkPassphrase);
@@ -896,10 +979,19 @@ async function handleAuthToken(
     return;
   }
 
-  if (!hasValidSignature(transaction, account)) {
+  const signerKeys = accountSigners.signers.map((signer) => signer.key);
+  const hasAccountSignature = signerKeys.some((signerKey) => {
+    try {
+      return hasValidSignature(transaction, signerKey);
+    } catch {
+      return false;
+    }
+  });
+
+  if (!hasAccountSignature) {
     sendJson(res, 401, {
       error: 'invalid_challenge',
-      message: 'Challenge is missing account signature',
+      message: 'Challenge is missing a valid account signer signature',
     });
     return;
   }

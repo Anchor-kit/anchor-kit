@@ -7,6 +7,7 @@ import {
 import { AnchorExpressRouter, type ExpressLikeMiddleware } from '@/runtime/http/express-router.ts';
 import { validatePluginRoutes } from '@/runtime/http/express-router-impl.ts';
 import type {
+  AccountLookup,
   DatabaseAdapter,
   InteractiveTransactionRecord,
   QueueAdapter,
@@ -33,6 +34,7 @@ export class AnchorInstance {
   private webhookProcessor: WebhookProcessor | null = null;
   private watchers: Watcher[] = [];
   private expressRouter: ExpressLikeMiddleware | null = null;
+  private accountLookup: AccountLookup | null = null;
 
   private initialized = false;
   private backgroundJobsRunning = false;
@@ -59,6 +61,20 @@ export class AnchorInstance {
       throw new Error(`Plugin with id "${plugin.id}" is already registered.`);
     }
     this.plugins.set(plugin.id, plugin);
+    return this;
+  }
+
+  /**
+   * Inject an account lookup used by SEP-10 authentication to resolve
+   * signers and thresholds. Must be configured before init().
+   */
+  public setAccountLookup(lookup: AccountLookup): this {
+    if (this.initialized) {
+      throw new ConfigError(
+        'Account lookup cannot be set after init() has been called. Set it before initialization.',
+      );
+    }
+    this.accountLookup = lookup;
     return this;
   }
 
@@ -96,7 +112,7 @@ export class AnchorInstance {
         const queueConcurrency = frameworkConfig.queue?.concurrency ?? 1;
         this.queue = new InMemoryQueueAdapter({ concurrency: queueConcurrency });
 
-        this.webhookProcessor = new DefaultWebhookProcessor({
+        this.webhookProcessor = new DefaultWebhookProcessor( {
           config: this.config.getConfig(),
           database: this.database,
         });
@@ -131,6 +147,7 @@ export class AnchorInstance {
           depositRequestHooks,
           sep10ChallengeHooks,
           pluginRoutes,
+          accountLookup: this.accountLookup,
         }).getMiddleware();
 
         this.initialized = true;
@@ -256,7 +273,7 @@ export class AnchorInstance {
    * Get a registered plugin by its ID.
    */
   public getPlugin<T extends AnchorPlugin>(id: string): T | undefined {
-    return this.plugins.get(id) as T;
+    return this.plugins.get(id) as T | undefined;
   }
 
   /**
@@ -372,39 +389,25 @@ export class AnchorInstance {
         return;
       }
 
-      const cutoffMs = Date.now() - retentionDaysValue * 24 * 60 * 60 * 1000;
-      const cutoffIso = new Date(cutoffMs).toISOString();
-      await database.cleanupOldRecords(cutoffIso);
+      await database.cleanupRecords(retentionDaysValue);
       return;
     }
-
-    throw new Error(`Unknown queue job type: ${String(job.type)}`);
   }
 
   private async notifyTransactionStatusChange(
     transaction: InteractiveTransactionRecord,
-    oldStatus: InteractiveTransactionRecord['status'],
-    newStatus: InteractiveTransactionRecord['status'],
+    previousStatus: string,
+    newStatus: string,
   ): Promise<void> {
-    for (const plugin of this.plugins.values()) {
-      const hook = plugin.hooks?.onTransactionStatusChange;
-      if (!hook) continue;
-
-      try {
-        await hook(transaction, oldStatus, newStatus);
-      } catch (error) {
-        // The in-memory queue is best-effort and drops failed jobs without retry.
-        // Log hook failures and continue so one plugin cannot block other hooks.
-        console.error(`[AnchorKit] Plugin "${plugin.id}" transaction status hook failed`, error);
-      }
-    }
+    if (!this.webhookProcessor) return;
+    await this.webhookProcessor.onTransactionStatusChange({
+      transaction,
+      previousStatus,
+      newStatus,
+    });
   }
 }
 
-/**
- * createAnchor
- * Factory function to initialize a new Anchor-Kit instance.
- */
 export function createAnchor(config: Partial<AnchorKitConfig>): AnchorInstance {
   return new AnchorInstance(config);
 }

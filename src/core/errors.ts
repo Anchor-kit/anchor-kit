@@ -147,3 +147,40 @@ export class MalformedPersistedDataError extends AnchorKitError {
     super(message, context);
   }
 }
+
+/**
+ * Error raised when a SEP-10 account lookup cannot find the requested account.
+ */
+export class AccountNotFoundError extends AnchorKitError {
+  public readonly statusCode = 404;
+  public readonly errorCode = 'ACCOUNT_NOT_FOUND';
+  public accountId?: string;
+
+  constructor(message: string, accountId?: string, context?: Record<string, unknown>) {
+    const meta = { ...context, accountId } as Record<string, unknown>;
+    super(message, meta);
+    this.accountId = accountId;
+  }
+}
+
+/**
+ * Error raised when a SEP-10 account lookup fails due to an upstream or transport failure.
+ */
+export class AccountLookupUpStreamError extends AnchorKitError {
+  public readonly statusCode = 502;
+  public readonly errorCode = 'ACCOUNT_LOOKUP_UPSTREAM_ERROR';
+  public accountId?: string;
+  public cause?: unknown;
+
+  constructor(
+    message: string,
+    accountId?: string,
+    cause?: unknown,
+    context?: Record<string, unknown>,
+  ) {
+    const meta = { ...context, accountId, cause } as Record<string, unknown>;
+    super(message, meta);
+    this.accountId = accountId;
+    this.cause = cause;
+  }
+}

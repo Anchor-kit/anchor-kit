@@ -52,6 +52,33 @@ export interface WatcherTaskRecord {
   createdAt: string;
 }
 
+export interface Sep10AccountSigner {
+  key: string;
+  weight: number;
+}
+
+export interface Sep10AccountThresholds {
+  masterWeight: number;
+  low: number;
+  medium: number;
+  high: number;
+}
+
+export interface Sep10Account {
+  accountId: string;
+  signers: Sep10AccountSigner[];
+  thresholds: Sep10AccountThresholds;
+}
+
+export type Sep10AccountLookupResult =
+  | { status: 'found'; account: Sep10Account }
+  | { status: 'not_found' }
+  | { status: 'unavailable'; message: string };
+
+export interface Sep10AccountLookup {
+  lookupAccount(accountId: string): Promise<Sep10AccountLookupResult>;
+}
+
 export interface DatabaseAdapter {
   connect(): Promise<void>;
   disconnect(): Promise<void>;
