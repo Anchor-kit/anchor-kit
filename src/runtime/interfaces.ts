@@ -1,3 +1,6 @@
+import type { Customer } from '@/types/customer.ts';
+import type { TransactionStatus } from '@/types/transaction-status.ts';
+
 export interface AuthChallengeRecord {
   id: string;
   account: string;
@@ -17,6 +20,14 @@ export interface InteractiveTransactionRecord {
   createdAt: string;
   updatedAt: string;
 }
+
+export type TransactionTransitionResult =
+  | { outcome: 'updated'; transaction: InteractiveTransactionRecord }
+  | {
+      outcome: 'conflict';
+      reason: 'invalid_transition' | 'status_mismatch' | 'not_found';
+      transaction: InteractiveTransactionRecord | null;
+    };
 
 export interface IdempotencyRecord {
   id: string;
@@ -74,6 +85,15 @@ export interface DatabaseAdapter {
   getInteractiveTransactionById(id: string): Promise<InteractiveTransactionRecord | null>;
   listPendingTransactionsBefore(cutoffIso: string): Promise<InteractiveTransactionRecord[]>;
   updateTransactionStatus(id: string, status: string): Promise<void>;
+  transitionInteractiveTransaction(input: {
+    id: string;
+    expectedStatus: TransactionStatus;
+    status: TransactionStatus;
+    amount?: string;
+  }): Promise<TransactionTransitionResult>;
+
+  insertOrGetCustomer(input: Omit<Customer, 'created_at'>): Promise<Customer>;
+  getCustomerByAccountId(accountId: string): Promise<Customer | null>;
 
   getIdempotencyRecord(scope: string, idempotencyKey: string): Promise<IdempotencyRecord | null>;
   insertOrGetIdempotencyRecord(input: {

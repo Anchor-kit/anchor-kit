@@ -115,13 +115,47 @@ export class AnchorInstance {
     if (this.backgroundJobsPromise) return this.backgroundJobsPromise;
 
     this.backgroundJobsPromise = (async () => {
-      await this.requireQueue().start(async (job) => this.processQueueJob(job));
+      const queue = this.requireQueue();
+      const startedWatchers: Watcher[] = [];
+      let queueStarted = false;
 
-      for (const watcher of this.watchers) {
-        await watcher.start();
+      try {
+        await queue.start(async (job) => this.processQueueJob(job));
+        queueStarted = true;
+
+        for (const watcher of this.watchers) {
+          await watcher.start();
+          startedWatchers.push(watcher);
+        }
+
+        this.backgroundJobsRunning = true;
+      } catch (startupError) {
+        const rollbackErrors: unknown[] = [];
+        for (const watcher of startedWatchers.reverse()) {
+          try {
+            await watcher.stop();
+          } catch (error) {
+            rollbackErrors.push(error);
+          }
+        }
+
+        if (queueStarted) {
+          try {
+            await queue.stop();
+          } catch (error) {
+            rollbackErrors.push(error);
+          }
+        }
+
+        if (rollbackErrors.length > 0) {
+          console.error(
+            'Background service startup rollback failed',
+            new AggregateError(rollbackErrors, 'One or more background services failed to stop'),
+          );
+        }
+
+        throw startupError;
       }
-
-      this.backgroundJobsRunning = true;
     })().finally(() => {
       this.backgroundJobsPromise = null;
     });
@@ -219,7 +253,11 @@ export class AnchorInstance {
         return;
       }
 
-      await database.updateTransactionStatus(transactionIdValue, 'expired');
+      await database.transitionInteractiveTransaction({
+        id: transactionIdValue,
+        expectedStatus: 'pending_user_transfer_start',
+        status: 'expired',
+      });
       return;
     }
 

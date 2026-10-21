@@ -30,5 +30,6 @@ export type {
   Watcher,
   WebhookProcessor,
   WatcherTaskRecord,
+  TransactionTransitionResult,
 } from './runtime/interfaces.ts';
 export type { ExpressLikeMiddleware } from './runtime/http/express-router.ts';

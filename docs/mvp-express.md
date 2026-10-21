@@ -41,8 +41,14 @@ Anchor-Kit auto-creates MVP tables during `anchor.init()`:
 - `idempotency_keys`
 - `webhook_events`
 - `watcher_tasks`
+- `customers`
+- `customer_accounts`
 
 PostgreSQL is the preferred production path.
+
+Web authentication supports the standard `GET /auth?account=...` and `POST /auth` JSON flow using
+the `transaction` field. The legacy `/auth/challenge` and `/auth/token` routes remain available;
+see [auth-token-response.md](./auth-token-response.md) for the request and response shapes.
 
 ## 4) Express integration
 

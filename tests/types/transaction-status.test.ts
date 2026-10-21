@@ -1,4 +1,5 @@
 import {
+  getAllowedNextTransactionStatuses,
   isPendingTransactionStatus,
   isTerminalTransactionStatus,
   TRANSACTION_STATUSES,
@@ -51,6 +52,17 @@ describe('TransactionStatus', () => {
     for (const status of TRANSACTION_STATUSES) {
       expect(isTerminalTransactionStatus(status)).toBe(terminalStatuses.has(status));
     }
+  });
+
+  it('exposes the allowed initial deposit transitions and rejects terminal regressions', () => {
+    expect(getAllowedNextTransactionStatuses('pending_user_transfer_start')).toEqual([
+      'pending_user_transfer_complete',
+      'pending_external',
+      'error',
+      'expired',
+    ]);
+    expect(getAllowedNextTransactionStatuses('completed')).toEqual([]);
+    expect(getAllowedNextTransactionStatuses('refunded')).toEqual([]);
   });
 
   it('acts as a type guard for terminal statuses', () => {

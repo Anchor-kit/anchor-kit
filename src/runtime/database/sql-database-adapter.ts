@@ -4,9 +4,13 @@ import type {
   DatabaseAdapter,
   IdempotencyRecord,
   InteractiveTransactionRecord,
+  TransactionTransitionResult,
   WatcherTaskRecord,
   WebhookEventRecord,
 } from '@/runtime/interfaces.ts';
+import type { Customer } from '@/types/customer.ts';
+import { getAllowedNextTransactionStatuses } from '@/types/transaction-status.ts';
+import type { TransactionStatus } from '@/types/transaction-status.ts';
 import type { FrameworkConfig } from '@/types/config.ts';
 import { Database } from 'bun:sqlite';
 import { randomUUID } from 'node:crypto';
@@ -112,6 +116,20 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
           updated_at TEXT NOT NULL
         );
 
+        CREATE TABLE IF NOT EXISTS customers (
+          id TEXT PRIMARY KEY,
+          email_address TEXT,
+          phone_number TEXT,
+          kyc_data TEXT,
+          created_at INTEGER NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS customer_accounts (
+          account_id TEXT PRIMARY KEY,
+          customer_id TEXT NOT NULL REFERENCES customers(id),
+          created_at INTEGER NOT NULL
+        );
+
         CREATE TABLE IF NOT EXISTS idempotency_keys (
           id TEXT PRIMARY KEY,
           scope TEXT NOT NULL,
@@ -168,6 +186,22 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
           status TEXT NOT NULL,
           created_at TIMESTAMPTZ NOT NULL,
           updated_at TIMESTAMPTZ NOT NULL
+        );
+      `);
+      await this.postgres.query(`
+        CREATE TABLE IF NOT EXISTS customers (
+          id TEXT PRIMARY KEY,
+          email_address TEXT,
+          phone_number TEXT,
+          kyc_data JSONB,
+          created_at BIGINT NOT NULL
+        );
+      `);
+      await this.postgres.query(`
+        CREATE TABLE IF NOT EXISTS customer_accounts (
+          account_id TEXT PRIMARY KEY,
+          customer_id TEXT NOT NULL REFERENCES customers(id),
+          created_at BIGINT NOT NULL
         );
       `);
       await this.postgres.query(`
@@ -390,6 +424,172 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
       'UPDATE interactive_transactions SET status = $1, updated_at = $2 WHERE id = $3',
       [status, updatedAt, id],
     );
+  }
+
+  public async transitionInteractiveTransaction(input: {
+    id: string;
+    expectedStatus: TransactionStatus;
+    status: TransactionStatus;
+    amount?: string;
+  }): Promise<TransactionTransitionResult> {
+    if (!getAllowedNextTransactionStatuses(input.expectedStatus).includes(input.status)) {
+      const transaction = await this.getInteractiveTransactionById(input.id);
+      return {
+        outcome: 'conflict',
+        reason: transaction ? 'invalid_transition' : 'not_found',
+        transaction,
+      };
+    }
+
+    const updatedAt = nowIso();
+    let updated = false;
+
+    if (this.sqlite) {
+      const result =
+        input.amount === undefined
+          ? this.sqlite
+              .prepare(
+                'UPDATE interactive_transactions SET status = ?, updated_at = ? WHERE id = ? AND status = ?',
+              )
+              .run(input.status, updatedAt, input.id, input.expectedStatus)
+          : this.sqlite
+              .prepare(
+                'UPDATE interactive_transactions SET status = ?, amount = ?, updated_at = ? WHERE id = ? AND status = ?',
+              )
+              .run(input.status, input.amount, updatedAt, input.id, input.expectedStatus);
+      updated = result.changes > 0;
+    } else {
+      const response =
+        input.amount === undefined
+          ? await this.requirePostgres().query<Record<string, unknown>>(
+              'UPDATE interactive_transactions SET status = $1, updated_at = $2 WHERE id = $3 AND status = $4 RETURNING *',
+              [input.status, updatedAt, input.id, input.expectedStatus],
+            )
+          : await this.requirePostgres().query<Record<string, unknown>>(
+              'UPDATE interactive_transactions SET status = $1, amount = $2, updated_at = $3 WHERE id = $4 AND status = $5 RETURNING *',
+              [input.status, input.amount, updatedAt, input.id, input.expectedStatus],
+            );
+
+      const row = response.rows[0];
+      if (row) {
+        return { outcome: 'updated', transaction: this.mapTransactionRow(row) };
+      }
+    }
+
+    if (updated) {
+      const transaction = await this.getInteractiveTransactionById(input.id);
+      if (!transaction) {
+        throw new ConfigError('Transaction disappeared after a successful status transition');
+      }
+      return { outcome: 'updated', transaction };
+    }
+
+    const transaction = await this.getInteractiveTransactionById(input.id);
+    return {
+      outcome: 'conflict',
+      reason: transaction ? 'status_mismatch' : 'not_found',
+      transaction,
+    };
+  }
+
+  public async insertOrGetCustomer(input: Omit<Customer, 'created_at'>): Promise<Customer> {
+    const createdAt = Date.now();
+    const kycData = input.kyc_data ? JSON.stringify(input.kyc_data) : null;
+
+    if (this.sqlite) {
+      const database = this.sqlite;
+      return database.transaction(() => {
+        database
+          .prepare(
+            'INSERT INTO customers (id, email_address, phone_number, kyc_data, created_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT(id) DO NOTHING',
+          )
+          .run(
+            input.id,
+            input.email_address ?? null,
+            input.phone_number ?? null,
+            kycData,
+            createdAt,
+          );
+        database
+          .prepare(
+            'INSERT INTO customer_accounts (account_id, customer_id, created_at) VALUES (?, ?, ?) ON CONFLICT(account_id) DO NOTHING',
+          )
+          .run(input.account_id, input.id, createdAt);
+
+        const row = database
+          .prepare(
+            'SELECT customers.id, customer_accounts.account_id, customers.email_address, customers.phone_number, customers.kyc_data, customers.created_at FROM customer_accounts INNER JOIN customers ON customers.id = customer_accounts.customer_id WHERE customer_accounts.account_id = ? LIMIT 1',
+          )
+          .get(input.account_id) as Record<string, unknown> | null;
+
+        if (!row || String(row.id) !== input.id) {
+          throw new ConfigError('Account is already associated with a different customer');
+        }
+        return this.mapCustomerRow(row);
+      })();
+    }
+
+    const postgres = this.requirePostgres();
+    await postgres.query('BEGIN');
+    try {
+      await postgres.query(
+        'INSERT INTO customers (id, email_address, phone_number, kyc_data, created_at) VALUES ($1, $2, $3, $4, $5) ON CONFLICT(id) DO NOTHING',
+        [input.id, input.email_address ?? null, input.phone_number ?? null, kycData, createdAt],
+      );
+      await postgres.query(
+        'INSERT INTO customer_accounts (account_id, customer_id, created_at) VALUES ($1, $2, $3) ON CONFLICT(account_id) DO NOTHING',
+        [input.account_id, input.id, createdAt],
+      );
+
+      const response = await postgres.query<Record<string, unknown>>(
+        'SELECT customers.id, customer_accounts.account_id, customers.email_address, customers.phone_number, customers.kyc_data, customers.created_at FROM customer_accounts INNER JOIN customers ON customers.id = customer_accounts.customer_id WHERE customer_accounts.account_id = $1 LIMIT 1',
+        [input.account_id],
+      );
+      const row = response.rows[0];
+
+      if (!row || String(row.id) !== input.id) {
+        throw new ConfigError('Account is already associated with a different customer');
+      }
+
+      await postgres.query('COMMIT');
+      return this.mapCustomerRow(row);
+    } catch (error) {
+      let rollbackError: unknown;
+      let rollbackFailed = false;
+      try {
+        await postgres.query('ROLLBACK');
+      } catch (error) {
+        rollbackFailed = true;
+        rollbackError = error;
+      }
+      if (rollbackFailed) {
+        throw new AggregateError(
+          [rollbackError],
+          'Customer creation failed and its database transaction could not be rolled back',
+          { cause: error },
+        );
+      }
+      throw new Error(error instanceof Error ? error.message : 'Customer creation failed', {
+        cause: error,
+      });
+    }
+  }
+
+  public async getCustomerByAccountId(accountId: string): Promise<Customer | null> {
+    const sql =
+      'SELECT customers.id, customer_accounts.account_id, customers.email_address, customers.phone_number, customers.kyc_data, customers.created_at FROM customer_accounts INNER JOIN customers ON customers.id = customer_accounts.customer_id WHERE customer_accounts.account_id = ? LIMIT 1';
+
+    if (this.sqlite) {
+      const row = this.sqlite.prepare(sql).get(accountId) as Record<string, unknown> | null;
+      return row ? this.mapCustomerRow(row) : null;
+    }
+
+    const response = await this.requirePostgres().query<Record<string, unknown>>(
+      sql.replace('?', '$1'),
+      [accountId],
+    );
+    const row = response.rows[0];
+    return row ? this.mapCustomerRow(row) : null;
   }
 
   public async getIdempotencyRecord(
@@ -703,6 +903,23 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
       status: String(row.status),
       createdAt: String(row.created_at),
       updatedAt: String(row.updated_at),
+    };
+  }
+
+  private mapCustomerRow(row: Record<string, unknown>): Customer {
+    const kycValue = row.kyc_data;
+    const kycData =
+      typeof kycValue === 'string'
+        ? (JSON.parse(kycValue) as Customer['kyc_data'])
+        : (kycValue as Customer['kyc_data'] | null);
+
+    return {
+      id: String(row.id),
+      account_id: String(row.account_id),
+      ...(row.email_address ? { email_address: String(row.email_address) } : {}),
+      ...(row.phone_number ? { phone_number: String(row.phone_number) } : {}),
+      created_at: Number(row.created_at),
+      ...(kycData ? { kyc_data: kycData } : {}),
     };
   }
 

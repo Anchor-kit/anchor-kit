@@ -5,6 +5,7 @@
 
 export {
   TRANSACTION_STATUSES,
+  getAllowedNextTransactionStatuses,
   isPendingTransactionStatus,
   isTerminalTransactionStatus,
   isTransactionStatus,

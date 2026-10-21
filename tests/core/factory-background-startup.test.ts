@@ -40,11 +40,17 @@ class MockQueueAdapter {
 class MockWatcher {
   public startCalls = 0;
   public stopCalls = 0;
+  public startError: Error | null = null;
   public stopGate: Promise<void> | null = null;
   public stopError: Error | null = null;
   public stopEntered = deferred();
   public async start(): Promise<void> {
     this.startCalls += 1;
+    if (this.startError) {
+      const error = this.startError;
+      this.startError = null;
+      throw error;
+    }
   }
 
   public async stop(): Promise<void> {
@@ -60,6 +66,60 @@ class MockWatcher {
 }
 
 describe('AnchorInstance concurrent background startup', () => {
+  it('rolls back started services and preserves the startup error for a retry', async () => {
+    const anchor = createAnchor({
+      network: { network: 'testnet' },
+      server: { interactiveDomain: 'https://anchor.example.com' },
+      security: {
+        sep10SigningKey: Keypair.random().secret(),
+        interactiveJwtSecret: 'jwt-test-secret',
+        distributionAccountSecret: 'distribution-test-secret',
+      },
+      assets: {
+        assets: [
+          {
+            code: 'USDC',
+            issuer: 'GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5',
+          },
+        ],
+      },
+      framework: {
+        database: {
+          provider: 'sqlite',
+          url: 'file::memory:',
+        },
+      },
+    });
+    const queue = new MockQueueAdapter();
+    const startedWatcher = new MockWatcher();
+    const failingWatcher = new MockWatcher();
+    const startupError = new Error('watcher startup failed');
+    failingWatcher.startError = startupError;
+
+    await anchor.init();
+    (anchor as unknown as { queue: unknown }).queue = queue;
+    (anchor as unknown as { watchers: unknown[] }).watchers = [
+      startedWatcher as never,
+      failingWatcher as never,
+    ];
+
+    await expect(anchor.startBackgroundJobs()).rejects.toBe(startupError);
+    expect(queue.started).toBe(false);
+    expect(queue.startCalls).toBe(1);
+    expect(queue.stopCalls).toBe(1);
+    expect(startedWatcher.startCalls).toBe(1);
+    expect(startedWatcher.stopCalls).toBe(1);
+    expect(failingWatcher.startCalls).toBe(1);
+    expect(failingWatcher.stopCalls).toBe(0);
+
+    await expect(anchor.startBackgroundJobs()).resolves.toBeUndefined();
+    expect(queue.started).toBe(true);
+    expect(queue.startCalls).toBe(2);
+    expect(failingWatcher.startCalls).toBe(2);
+    await anchor.stopBackgroundJobs();
+    await anchor.shutdown();
+  });
+
   it('does not start duplicate background work when startBackgroundJobs is called concurrently', async () => {
     const anchor = createAnchor({
       network: { network: 'testnet' },

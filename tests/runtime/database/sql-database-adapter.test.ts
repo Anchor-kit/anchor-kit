@@ -106,6 +106,101 @@ describe('SqlDatabaseAdapter (sqlite)', () => {
     expect(pending[0]?.id).toBe('tx-old');
   });
 
+  it('allows only one competing transaction transition to win', async () => {
+    await adapter.insertInteractiveTransaction({
+      id: 'tx-transition-race',
+      account: 'GBTRANSITIONTESTACCOUNT',
+      kind: 'deposit',
+      assetCode: 'USDC',
+      amount: '100.00',
+      status: 'pending_user_transfer_start',
+    });
+
+    const results = await Promise.all([
+      adapter.transitionInteractiveTransaction({
+        id: 'tx-transition-race',
+        expectedStatus: 'pending_user_transfer_start',
+        status: 'pending_user_transfer_complete',
+        amount: '99.00',
+      }),
+      adapter.transitionInteractiveTransaction({
+        id: 'tx-transition-race',
+        expectedStatus: 'pending_user_transfer_start',
+        status: 'expired',
+        amount: '0.00',
+      }),
+    ]);
+
+    const updated = results.filter((result) => result.outcome === 'updated');
+    const conflicts = results.filter((result) => result.outcome === 'conflict');
+    expect(updated).toHaveLength(1);
+    expect(conflicts).toEqual([
+      expect.objectContaining({ outcome: 'conflict', reason: 'status_mismatch' }),
+    ]);
+
+    const stored = await adapter.getInteractiveTransactionById('tx-transition-race');
+    expect(stored).toEqual(updated[0]?.transaction);
+    expect(['pending_user_transfer_complete', 'expired']).toContain(stored?.status);
+  });
+
+  it('leaves amount, status, and timestamps unchanged for an invalid transition', async () => {
+    const inserted = await adapter.insertInteractiveTransaction({
+      id: 'tx-invalid-transition',
+      account: 'GBINVALIDTRANSITIONACCOUNT',
+      kind: 'deposit',
+      assetCode: 'USDC',
+      amount: '100.00',
+      status: 'pending_user_transfer_start',
+    });
+
+    const result = await adapter.transitionInteractiveTransaction({
+      id: inserted.id,
+      expectedStatus: 'pending_user_transfer_start',
+      status: 'completed',
+      amount: '1.00',
+    });
+
+    expect(result).toEqual({
+      outcome: 'conflict',
+      reason: 'invalid_transition',
+      transaction: inserted,
+    });
+    await expect(adapter.getInteractiveTransactionById(inserted.id)).resolves.toEqual(inserted);
+  });
+
+  it('persists account-scoped customer identities across reconnects and creation replay', async () => {
+    const customerInput = {
+      id: 'customer-one',
+      account_id: 'GACCOUNTONE',
+      email_address: 'one@example.com',
+      phone_number: '+123456789',
+      kyc_data: { status: 'pending' as const, first_name: 'Ada' },
+    };
+    const first = await adapter.insertOrGetCustomer(customerInput);
+    await expect(adapter.insertOrGetCustomer(customerInput)).resolves.toEqual(first);
+
+    const second = await adapter.insertOrGetCustomer({
+      id: 'customer-two',
+      account_id: 'GACCOUNTTWO',
+      email_address: 'two@example.com',
+    });
+    await expect(
+      adapter.insertOrGetCustomer({
+        id: 'customer-three',
+        account_id: 'GACCOUNTONE',
+      }),
+    ).rejects.toThrow('Account is already associated with a different customer');
+    await expect(adapter.getCustomerByAccountId('GACCOUNTONE')).resolves.toEqual(first);
+    await expect(adapter.getCustomerByAccountId('GACCOUNTTWO')).resolves.toEqual(second);
+    await expect(adapter.getCustomerByAccountId('GUNKNOWN')).resolves.toBeNull();
+
+    await adapter.disconnect();
+    await adapter.connect();
+    await adapter.migrate();
+    await expect(adapter.getCustomerByAccountId('GACCOUNTONE')).resolves.toEqual(first);
+    await expect(adapter.getCustomerByAccountId('GACCOUNTTWO')).resolves.toEqual(second);
+  });
+
   it('updates an idempotency record without changing its identity fields', async () => {
     const initial = await adapter.insertOrGetIdempotencyRecord({
       id: 'idempotency-1',
