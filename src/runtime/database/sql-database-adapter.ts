@@ -876,11 +876,27 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
         }
 
         if (record.status === 'failed') {
-          this.sqlite
+          // Compare-and-set: only claim execution if the row is still 'failed'.
+          // A concurrent retry may have already flipped the status to 'pending',
+          // in which case changes === 0 and this caller loses the race.
+          const cas = this.sqlite
             .prepare(
-              'UPDATE webhook_events SET provider = ?, payload = ?, status = ?, error_message = NULL, processed_at = NULL WHERE id = ?',
+              "UPDATE webhook_events SET provider = ?, payload = ?, status = 'pending', error_message = NULL, processed_at = NULL WHERE id = ? AND status = 'failed'",
             )
-            .run(provider, JSON.stringify(input.payload), 'pending', record.id);
+            .run(provider, JSON.stringify(input.payload), record.id);
+
+          if (cas.changes === 0) {
+            // Lost the race – return the current stored record without executing callbacks.
+            const current = this.sqlite
+              .prepare('SELECT * FROM webhook_events WHERE id = ? LIMIT 1')
+              .get(record.id) as Record<string, unknown> | null;
+
+            if (!current) {
+              throw new ConfigError('Failed to retry failed webhook event');
+            }
+
+            return { record: this.mapWebhookRow(current), inserted: false };
+          }
 
           const refreshed = this.sqlite
             .prepare('SELECT * FROM webhook_events WHERE id = ? LIMIT 1')
@@ -927,10 +943,27 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
       }
 
       if (record.status === 'failed') {
-        await this.requirePostgres().query(
-          'UPDATE webhook_events SET provider = $1, payload = $2::jsonb, status = $3, error_message = NULL, processed_at = NULL WHERE id = $4',
-          [provider, JSON.stringify(input.payload), 'pending', record.id],
+        // Compare-and-set: only claim execution if the row is still 'failed'.
+        // RETURNING id lets us detect whether the UPDATE matched any row.
+        const cas = await this.requirePostgres().query<{ id: string }>(
+          "UPDATE webhook_events SET provider = $1, payload = $2::jsonb, status = 'pending', error_message = NULL, processed_at = NULL WHERE id = $3 AND status = 'failed' RETURNING id",
+          [provider, JSON.stringify(input.payload), record.id],
         );
+
+        if (cas.rows.length === 0) {
+          // Lost the race – return the current stored record without executing callbacks.
+          const currentPg = await this.requirePostgres().query<Record<string, unknown>>(
+            'SELECT * FROM webhook_events WHERE id = $1 LIMIT 1',
+            [record.id],
+          );
+
+          const currentRow = currentPg.rows[0];
+          if (!currentRow) {
+            throw new ConfigError('Failed to retry failed webhook event');
+          }
+
+          return { record: this.mapWebhookRow(currentRow), inserted: false };
+        }
 
         const refreshedPg = await this.requirePostgres().query<Record<string, unknown>>(
           'SELECT * FROM webhook_events WHERE id = $1 LIMIT 1',
