@@ -1,6 +1,6 @@
 import type { AnchorConfig } from '@/core/config.ts';
-import { errorHandler } from '@/utils/error-handler.ts';
-import { InMemoryRateLimiter, type RateLimitRule } from '@/runtime/http/rate-limiter.ts';
+import { errorHandler } from '../../utils/error-handler.ts';
+import { InMemoryRateLimiter, type RateLimitRule } from './rate-limiter.ts';
 import type { DatabaseAdapter, WebhookProcessor } from '@/runtime/interfaces.ts';
 import type { RouteDefinition } from '@/types/foundation.ts';
 import type { AnchorPluginHooks } from '@/types/plugin.ts';

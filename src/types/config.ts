@@ -16,6 +16,28 @@ export type StellarNetwork = 'public' | 'testnet' | 'futurenet';
 export type KycLevel = 'none' | 'basic' | 'strict';
 
 /**
+ * KYC requirement field names. Additional non-empty provider-specific fields are supported.
+ */
+export type KycRequiredField =
+  | 'first_name'
+  | 'last_name'
+  | 'email_address'
+  | 'email'
+  | 'address'
+  | 'phone_number'
+  | 'birth_date'
+  | 'documents'
+  | (string & {});
+
+/**
+ * Resolved KYC policy for one asset.
+ */
+export interface KycPolicyResolution {
+  requiredFields: KycRequiredField[];
+  errors: string[];
+}
+
+/**
  * Postal address for operational metadata
  */
 export interface OperationalAddress {
@@ -80,6 +102,12 @@ export interface ServerConfig {
    */
   interactiveDomain?: string;
 
+  /** HTTPS SEP-10 authentication endpoint published in stellar.toml. */
+  webAuthEndpoint?: string;
+
+  /** HTTPS SEP-24 transfer server published in stellar.toml. */
+  transferServerSep24?: string;
+
   /**
    * Allowed origins for CORS
    * @optional
@@ -112,8 +140,8 @@ export interface SecurityConfig {
   interactiveJwtSecret: string;
 
   /**
-   * Distribution account secret key
-   * Used to sign and submit Stellar transactions for asset distribution
+   * Distribution account secret key for constructing a LocalKeypairSigner.
+   * Keep this value private; the SDK does not log it or submit transactions automatically.
    * @required
    */
   distributionAccountSecret: string;
@@ -238,8 +266,8 @@ export interface AssetsConfig {
  */
 export interface KycConfig {
   /**
-   * Required KYC level
-   * @optional - defaults to 'basic'
+   * Required KYC level. When omitted, explicitly enabled requirements still apply.
+   * A level of 'none' suppresses all resolved requirements for the asset.
    */
   level?: KycLevel;
 
@@ -614,7 +642,7 @@ export interface AnchorKitConfig {
   kyc?: KycConfig;
 
   /**
-   * Required KYC fields by asset code
+   * Additional required KYC fields by asset code. An absent policy contributes no fields.
    * @optional
    */
   kycRequired?: Record<string, string[]>;

@@ -1,11 +1,11 @@
-import { AnchorConfig } from '@/core/config.ts';
-import { ConfigError } from '@/core/errors.ts';
+import { AnchorConfig } from './config.ts';
+import { ConfigError } from './errors.ts';
 import {
   createSqlDatabaseAdapter,
   makeSqliteDbUrlForTests,
-} from '@/runtime/database/sql-database-adapter.ts';
-import { AnchorExpressRouter, type ExpressLikeMiddleware } from '@/runtime/http/express-router.ts';
-import { validatePluginRoutes } from '@/runtime/http/express-router-impl.ts';
+} from '../runtime/database/sql-database-adapter.ts';
+import { AnchorExpressRouter, type ExpressLikeMiddleware } from '../runtime/http/express-router.ts';
+import { validatePluginRoutes } from '../runtime/http/express-router-impl.ts';
 import type {
   DatabaseAdapter,
   InteractiveTransactionRecord,
@@ -14,10 +14,10 @@ import type {
   Watcher,
   WebhookProcessor,
 } from '@/runtime/interfaces.ts';
-import { InMemoryQueueAdapter } from '@/runtime/queue/in-memory-queue.ts';
-import { TransactionWatcher } from '@/runtime/watchers/transaction-watcher.ts';
-import { DefaultWebhookProcessor } from '@/runtime/webhooks/default-webhook-processor.ts';
-import { AnchorKitConfig } from '@/types/config.ts';
+import { InMemoryQueueAdapter } from '../runtime/queue/in-memory-queue.ts';
+import { TransactionWatcher } from '../runtime/watchers/transaction-watcher.ts';
+import { DefaultWebhookProcessor } from '../runtime/webhooks/default-webhook-processor.ts';
+import type { AnchorKitConfig } from '../types/config.ts';
 import type { AnchorPlugin, AnchorPluginHooks } from '@/types/plugin.ts';
 
 export interface CreateAnchorOptions {
