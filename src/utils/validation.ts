@@ -2,6 +2,16 @@ import type { AnchorKitConfig, NetworkConfig, SecurityConfig } from '@/types/con
 import { StrKey } from '@stellar/stellar-sdk';
 import DOMPurify from 'isomorphic-dompurify';
 
+function getDomainHost(value: string): string | null {
+  try {
+    const url = new URL(value.includes('://') ? value : `https://${value}`);
+    if ((url.protocol !== 'http:' && url.protocol !== 'https:') || !url.hostname) return null;
+    return url.hostname;
+  } catch {
+    return null;
+  }
+}
+
 /**
  * ValidationUtils helper object
  * Provides standard validation for common fields used in SEPs.
@@ -190,6 +200,12 @@ export const SecurityConfigSchema = {
       throw new Error('Missing required secret: security.interactiveJwtSecret');
     if (!config.distributionAccountSecret)
       throw new Error('Missing required secret: security.distributionAccountSecret');
+    if (config.homeDomain !== undefined) {
+      const homeDomain = getDomainHost(config.homeDomain);
+      if (!homeDomain || Buffer.byteLength(`${homeDomain} auth`, 'utf8') > 64) {
+        throw new Error('security.homeDomain must be a valid domain usable in a SEP-10 operation');
+      }
+    }
     if (
       config.authTokenLifetimeSeconds !== undefined &&
       (typeof config.authTokenLifetimeSeconds !== 'number' ||
@@ -297,6 +313,21 @@ export const AnchorKitConfigSchema = {
     if (!ValidationUtils.isValidDatabaseUrl(framework.database.url)) {
       throw new Error('Invalid database URL format');
     }
+    if (
+      framework.database.schema !== undefined &&
+      (typeof framework.database.schema !== 'string' ||
+        framework.database.schema.length > 63 ||
+        !/^[A-Za-z_][A-Za-z0-9_]*$/.test(framework.database.schema))
+    ) {
+      throw new Error('framework.database.schema must be a 1-63 character PostgreSQL identifier');
+    }
+    if (
+      framework.database.provider === 'sqlite' &&
+      framework.database.schema !== undefined &&
+      framework.database.schema !== 'main'
+    ) {
+      throw new Error('SQLite only supports the default "main" database schema');
+    }
 
     // Framework Numbers
     if (framework.queue?.concurrency !== undefined && framework.queue.concurrency < 1) {
@@ -323,11 +354,25 @@ export const AnchorKitConfigSchema = {
       if (rateValues.some((value) => value !== undefined && value <= 0)) {
         throw new Error('framework.rateLimit values must be > 0');
       }
+      if (
+        config.webhooks?.timeoutMs !== undefined &&
+        (!Number.isInteger(config.webhooks.timeoutMs) ||
+          config.webhooks.timeoutMs <= 0 ||
+          config.webhooks.timeoutMs > 2_147_483_647)
+      ) {
+        throw new Error('webhooks.timeoutMs must be an integer between 1 and 2147483647');
+      }
     }
 
     // Other URLs
     if (server.interactiveDomain && !ValidationUtils.isValidUrl(server.interactiveDomain)) {
       throw new Error('Invalid URL format for server.interactiveDomain');
+    }
+    if (server.webAuthDomain !== undefined) {
+      const webAuthDomain = getDomainHost(server.webAuthDomain);
+      if (!webAuthDomain || Buffer.byteLength(webAuthDomain, 'utf8') > 64) {
+        throw new Error('server.webAuthDomain must be a valid domain of at most 64 bytes');
+      }
     }
     if (metadata?.tomlUrl && !ValidationUtils.isValidUrl(metadata.tomlUrl)) {
       throw new Error('Invalid URL format for metadata.tomlUrl');
@@ -389,6 +434,13 @@ export const ServerConfigSchema: Record<keyof Required<ServerConfig>, SchemaFiel
         return false;
       }
     },
+  },
+  webAuthDomain: {
+    type: 'string',
+    required: false,
+    description: 'Domain serving the SEP-10 web authentication endpoint.',
+    validate: (value) =>
+      typeof value === 'string' && value.length > 0 && Buffer.byteLength(value, 'utf8') <= 64,
   },
   corsOrigins: {
     type: 'string[]',

@@ -15,6 +15,12 @@ export interface InteractiveTransactionRecord {
   kind: 'deposit';
   assetCode: string;
   amount: string;
+  amountIn?: string;
+  amountOut?: string;
+  amountFee?: string;
+  currency?: string;
+  railReference?: string;
+  stellarTransactionHash?: string;
   status: TransactionStatus;
   createdAt: string;
   updatedAt: string;
@@ -72,6 +78,12 @@ export interface DatabaseAdapter {
     kind: 'deposit';
     assetCode: string;
     amount: string;
+    amountIn?: string;
+    amountOut?: string;
+    amountFee?: string;
+    currency?: string;
+    railReference?: string;
+    stellarTransactionHash?: string;
     status: TransactionStatus;
   }): Promise<InteractiveTransactionRecord>;
   getInteractiveTransactionById(id: string): Promise<InteractiveTransactionRecord | null>;
@@ -92,6 +104,12 @@ export interface DatabaseAdapter {
       kind: 'deposit';
       assetCode: string;
       amount: string;
+      amountIn?: string;
+      amountOut?: string;
+      amountFee?: string;
+      currency?: string;
+      railReference?: string;
+      stellarTransactionHash?: string;
       status: TransactionStatus;
       createdAt: string;
     };
@@ -169,4 +187,5 @@ export interface WebhookProcessor {
     rawBody: string;
     signature?: string;
   }): Promise<{ duplicate: boolean; eventId: string }>;
+  shutdown?(): Promise<void>;
 }

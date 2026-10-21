@@ -44,6 +44,8 @@ Anchor-Kit auto-creates MVP tables during `anchor.init()`:
 
 PostgreSQL is the preferred production path.
 
+For PostgreSQL, `framework.database.schema` selects the schema used for migrations and every adapter query; it defaults to `public`. It must be a 1-63 character ASCII identifier beginning with a letter or underscore and containing only letters, digits, or underscores. SQLite accepts only `main`. Configuring separate PostgreSQL schemas isolates anchors sharing one database.
+
 Deposit idempotency is scoped to the authenticated account. Reusing a key with a different
 request body returns `409 idempotency_conflict`. A matching request that is still being processed
 returns `409 idempotency_in_progress` with `Retry-After: 1`; retry after that interval. Once
@@ -55,6 +57,12 @@ reservation is removed so the same key can be retried safely. An incomplete cach
 For SEP-10 challenges, the signed XDR time bounds are valid from `minTime` through the instant
 before `maxTime`; a challenge is expired exactly at `maxTime`. Native XLM configuration omits
 `issuer`; every issued asset requires a valid Stellar public key issuer.
+
+[SEP-10](https://github.com/stellar/stellar-protocol/blob/master/ecosystem/sep-0010.md) challenge
+envelopes use sequence number zero, a 48-byte cryptographic nonce encoded as base64 in the first
+`{homeDomain} auth` Manage Data operation, and a `web_auth_domain` operation. Set
+`security.homeDomain` and `server.webAuthDomain` explicitly for production; when omitted, both
+default from the configured interactive domain (or `localhost`).
 
 ## 4) Express integration
 
@@ -130,6 +138,33 @@ process.on('SIGTERM', async () => {
 3. Idempotency check by `event_id`
 
 Your callback receives provider-agnostic payload as `event.payload`.
+
+Callbacks also receive `ctx.signal`. It is aborted when the callback deadline is reached
+(`webhooks.timeoutMs`, default 30 seconds) or when `anchor.shutdown()` begins. Pass the signal to
+cooperative APIs and stop local work when aborted. Cancellation does not guarantee that an
+external payment or other side effect was undone; use provider idempotency and reconciliation.
+
+## Focused acceptance checks
+
+Run the focused checks from the repository root:
+
+```powershell
+bun test tests/runtime/sql-adapter-interactive-tx.test.ts tests/runtime/sql-adapter-migrations.test.ts tests/runtime/postgres-schema.integration.test.ts tests/runtime/webhook-processor.unit.test.ts tests/mvp-express.integration.test.ts
+```
+
+Expected: `46 pass`, `1 skip` when `ANCHOR_KIT_TEST_POSTGRES_URL` is unset; all `47` pass when the
+PostgreSQL URL is configured.
+
+To run the real two-schema isolation assertion against a disposable PostgreSQL database:
+
+```powershell
+$env:ANCHOR_KIT_TEST_POSTGRES_URL = "postgres://localhost/anchor_kit_test"
+bun test tests/runtime/postgres-schema.integration.test.ts
+```
+
+Expected: both PostgreSQL schema tests pass with no skipped test. The integration test creates
+unique temporary schemas, confirms a transaction in one cannot be read from the other, and drops
+the schemas afterward.
 
 ## 6) Background jobs lifecycle
 

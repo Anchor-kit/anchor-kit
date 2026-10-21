@@ -1,7 +1,7 @@
 import { makeSqliteDbUrlForTests } from '@/core/factory.ts';
 import { createAnchor, type AnchorInstance } from '@/index.ts';
 import type { DatabaseAdapter } from '@/runtime/interfaces.ts';
-import { Keypair, Transaction } from '@stellar/stellar-sdk';
+import { Account, Keypair, Operation, Transaction, TransactionBuilder } from '@stellar/stellar-sdk';
 import { Database } from 'bun:sqlite';
 import { createHash, createHmac, randomUUID } from 'node:crypto';
 import { unlinkSync } from 'node:fs';
@@ -21,6 +21,80 @@ interface TestRequestOptions {
   path: string;
   headers?: Record<string, string>;
   body?: Record<string, unknown>;
+}
+
+function signChallengeVariant(
+  xdr: string,
+  networkPassphrase: string,
+  client: Keypair,
+  server: Keypair,
+  variant:
+    | 'sequence'
+    | 'expired-bounds'
+    | 'duplicate-nonce'
+    | 'unauthorized-operation'
+    | 'malformed-nonce',
+): string {
+  const challenge = new Transaction(xdr, networkPassphrase);
+  const nonceOperation = challenge.operations[0] as unknown as {
+    name: string;
+    value: string | Buffer;
+  };
+  const webAuthOperation = challenge.operations[1] as unknown as {
+    value: string | Buffer;
+  };
+  const nonceValue = Buffer.isBuffer(nonceOperation.value)
+    ? nonceOperation.value.toString('utf8')
+    : nonceOperation.value;
+  const webAuthDomain = Buffer.isBuffer(webAuthOperation.value)
+    ? webAuthOperation.value.toString('utf8')
+    : webAuthOperation.value;
+  const authManageData = Operation.manageData({
+    name: nonceOperation.name,
+    value: variant === 'malformed-nonce' ? 'too-short' : nonceValue,
+    source: client.publicKey(),
+  });
+  const webAuth = Operation.manageData({
+    name: 'web_auth_domain',
+    value: webAuthDomain,
+    source: server.publicKey(),
+  });
+  const transactionBuilder = new TransactionBuilder(
+    new Account(challenge.source, variant === 'sequence' ? '0' : '-1'),
+    { fee: '100', networkPassphrase },
+  ).addOperation(authManageData);
+
+  if (variant === 'duplicate-nonce') {
+    transactionBuilder.addOperation(
+      Operation.manageData({
+        name: nonceOperation.name,
+        value: nonceValue,
+        source: client.publicKey(),
+      }),
+    );
+  }
+
+  if (variant === 'unauthorized-operation') {
+    transactionBuilder.addOperation(
+      Operation.manageData({
+        name: 'unauthorized',
+        value: 'not-allowed',
+        source: server.publicKey(),
+      }),
+    );
+  } else {
+    transactionBuilder.addOperation(webAuth);
+  }
+
+  const minTime = variant === 'expired-bounds' ? 0 : Number(challenge.timeBounds?.minTime ?? 0);
+  const maxTime =
+    variant === 'expired-bounds'
+      ? Math.floor(Date.now() / 1000) - 1
+      : Number(challenge.timeBounds?.maxTime ?? 0);
+  const signed = transactionBuilder.setTimebounds(minTime, maxTime).build();
+  signed.sign(server);
+  signed.sign(client);
+  return signed.toXDR();
 }
 
 function createMountedInvoker(anchor: AnchorInstance) {
@@ -303,6 +377,17 @@ describe('MVP Express-mounted integration', () => {
     expect(challengeXdr.length).toBeGreaterThan(0);
     const networkPassphrase = String(challengeResponse.body.network_passphrase ?? '');
     const challengeTx = new Transaction(challengeXdr, networkPassphrase);
+    expect(challengeTx.sequence).toBe('0');
+    expect(challengeTx.operations).toHaveLength(2);
+    const nonceOperation = challengeTx.operations[0] as unknown as {
+      name: string;
+      value: string | Buffer;
+    };
+    expect(nonceOperation.name).toBe('anchor.example.com auth');
+    const nonceValue = Buffer.isBuffer(nonceOperation.value)
+      ? nonceOperation.value.toString('utf8')
+      : nonceOperation.value;
+    expect(Buffer.from(nonceValue, 'base64')).toHaveLength(48);
     challengeTx.sign(clientKeypair);
     const signedChallengeXdr = challengeTx.toXDR();
 
@@ -320,6 +405,59 @@ describe('MVP Express-mounted integration', () => {
     expect(tokenResponse.headers['cache-control']).toBe('no-store');
     // Verify default TTL is used when not configured
     expect(tokenResponse.body.expires_in).toBe(3600);
+  });
+
+  it('rejects malformed SEP-10 envelopes without consuming their valid challenge', async () => {
+    const variants = [
+      'sequence',
+      'expired-bounds',
+      'duplicate-nonce',
+      'unauthorized-operation',
+      'malformed-nonce',
+    ] as const;
+
+    for (const [index, variant] of variants.entries()) {
+      const account = clientKeypair.publicKey();
+      const forwardedFor = `10.0.3.${index + 1}`;
+      const challengeResponse = await invoke({
+        path: `/auth/challenge?account=${account}`,
+        headers: { 'x-forwarded-for': forwardedFor },
+      });
+      expect(challengeResponse.status).toBe(200);
+      const challengeXdr = String(challengeResponse.body.challenge);
+      const networkPassphrase = String(challengeResponse.body.network_passphrase);
+      const invalidChallenge = signChallengeVariant(
+        challengeXdr,
+        networkPassphrase,
+        clientKeypair,
+        sep10ServerKeypair,
+        variant,
+      );
+      const invalidResponse = await invoke({
+        method: 'POST',
+        path: '/auth/token',
+        headers: {
+          'content-type': 'application/json',
+          'x-forwarded-for': forwardedFor,
+        },
+        body: { account, challenge: invalidChallenge },
+      });
+      expect(invalidResponse.status).toBe(401);
+      expect(invalidResponse.body.error).toBe('invalid_challenge');
+
+      const validChallenge = new Transaction(challengeXdr, networkPassphrase);
+      validChallenge.sign(clientKeypair);
+      const validResponse = await invoke({
+        method: 'POST',
+        path: '/auth/token',
+        headers: {
+          'content-type': 'application/json',
+          'x-forwarded-for': forwardedFor,
+        },
+        body: { account, challenge: validChallenge.toXDR() },
+      });
+      expect(validResponse.status).toBe(200);
+    }
   });
 
   it('3b) auth token with custom TTL returns correct expires_in', async () => {
@@ -1326,6 +1464,6 @@ describe('MVP Express-mounted integration', () => {
     // doesn't match the one the challenge was generated for in the DB.
     expect(tokenResponse.status).toBe(401);
     expect(tokenResponse.body.error).toBe('invalid_challenge');
-    expect(tokenResponse.body.message).toBe('Challenge not found');
+    expect(tokenResponse.body.message).toBe('Challenge transaction envelope is invalid');
   });
 });

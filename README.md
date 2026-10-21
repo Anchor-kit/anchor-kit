@@ -90,6 +90,7 @@ const anchor = createAnchor({
   },
   webhooks: {
     onEvent: async (event, ctx) => {
+      if (ctx.signal.aborted) return;
       console.log('webhook event', event.eventId, ctx.receivedAt);
     },
   },
@@ -108,6 +109,8 @@ app.listen(3000);
 Webhook signature verification signs the exact request body bytes, so Anchor-Kit must receive the unmodified raw body. If Express parses or normalizes JSON before the SDK can verify the signature, an otherwise valid `x-anchor-signature` can fail.
 
 When mounting Anchor-Kit behind Express, configure `express.json()` with a `verify` hook before `anchor.getExpressRouter()` and store `req.rawBody`, as shown in the Quick Start. Verify the webhook signature before parsing, transforming, or rebuilding the body for any custom middleware.
+
+Webhook callbacks receive `ctx.signal`, which is aborted after `webhooks.timeoutMs` (30 seconds by default) or when `anchor.shutdown()` begins. Pass it to cooperative APIs such as `fetch` and stop local work when it is aborted. Cancellation only stops work that honors the signal; it does not prove that an external payment or other side effect was undone. Use provider idempotency and reconciliation for those operations.
 
 ## Background Job Lifecycle
 

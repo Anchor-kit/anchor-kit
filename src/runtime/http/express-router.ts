@@ -12,7 +12,7 @@ import {
   TransactionBuilder,
 } from '@stellar/stellar-sdk';
 import jwt from 'jsonwebtoken';
-import { createHash, randomUUID } from 'node:crypto';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { IdempotencyUtils } from '@/utils/idempotency.ts';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 
@@ -35,8 +35,6 @@ interface AuthenticatedRequestData {
 interface RawBodyCarrier {
   rawBody?: string;
 }
-
-const SEP10_NONCE_OP = 'anchor_auth';
 
 function sendJson(res: ServerResponse, status: number, body: Record<string, unknown>): void {
   if (!res.headersSent) {
@@ -146,37 +144,67 @@ function hasValidSignature(transaction: Transaction, publicKey: string): boolean
   return false;
 }
 
-function extractNonceFromChallenge(transaction: Transaction): string | null {
-  for (const operation of transaction.operations) {
-    if (operation.type !== 'manageData') {
-      continue;
-    }
+function getOperationData(operation: unknown): {
+  type?: unknown;
+  name?: unknown;
+  value?: unknown;
+  source?: unknown;
+} {
+  return operation && typeof operation === 'object'
+    ? (operation as {
+        type?: unknown;
+        name?: unknown;
+        value?: unknown;
+        source?: unknown;
+      })
+    : {};
+}
 
-    const manageDataOp = operation as unknown as {
-      name?: unknown;
-      value?: unknown;
-    };
+function getManageDataValue(value: unknown): string | null {
+  if (typeof value === 'string') return value;
+  if (value instanceof Buffer || value instanceof Uint8Array) {
+    return Buffer.from(value).toString('utf8');
+  }
+  return null;
+}
 
-    const name = manageDataOp.name;
-    if (typeof name !== 'string' || name !== SEP10_NONCE_OP) {
-      continue;
-    }
+function getConfiguredDomain(explicitDomain: string | undefined, fallbackUrl?: string): string {
+  if (explicitDomain) {
+    return explicitDomain.includes('://') ? new URL(explicitDomain).hostname : explicitDomain;
+  }
+  return fallbackUrl ? new URL(fallbackUrl).hostname : 'localhost';
+}
 
-    const value = manageDataOp.value;
-    if (value instanceof Buffer) {
-      return value.toString('utf8');
-    }
-
-    if (value instanceof Uint8Array) {
-      return Buffer.from(value).toString('utf8');
-    }
-
-    if (typeof value === 'string') {
-      return value;
-    }
+function hasValidChallengeEnvelope(
+  transaction: Transaction,
+  input: {
+    account: string;
+    homeDomain: string;
+    webAuthDomain: string;
+  },
+): boolean {
+  if (transaction.sequence !== '0' || transaction.operations.length !== 2) return false;
+  const authOperation = getOperationData(transaction.operations[0]);
+  const webAuthOperation = getOperationData(transaction.operations[1]);
+  const nonce = getManageDataValue(authOperation.value);
+  if (
+    authOperation.type !== 'manageData' ||
+    authOperation.name !== `${input.homeDomain} auth` ||
+    authOperation.source !== input.account ||
+    !nonce ||
+    !/^[A-Za-z0-9+/]{64}$/.test(nonce) ||
+    Buffer.from(nonce, 'base64').length !== 48 ||
+    Buffer.from(nonce, 'base64').toString('base64') !== nonce
+  ) {
+    return false;
   }
 
-  return null;
+  return (
+    webAuthOperation.type === 'manageData' &&
+    webAuthOperation.name === 'web_auth_domain' &&
+    getManageDataValue(webAuthOperation.value) === input.webAuthDomain &&
+    (webAuthOperation.source ?? transaction.source) === transaction.source
+  );
 }
 
 export class AnchorExpressRouter {
@@ -279,13 +307,26 @@ export class AnchorExpressRouter {
         return;
       }
 
-      const nonce = randomUUID();
+      const nonce = randomBytes(48).toString('base64');
       const now = Math.floor(Date.now() / 1000);
       const expirationSeconds = this.config.get('security').challengeExpirationSeconds ?? 300;
       const expiresAtUnix = now + expirationSeconds;
+      const securityConfig = this.config.get('security');
+      const serverConfig = this.config.get('server');
+      const homeDomain = getConfiguredDomain(
+        securityConfig.homeDomain,
+        serverConfig.interactiveDomain,
+      );
+      const webAuthDomain = getConfiguredDomain(
+        serverConfig.webAuthDomain,
+        serverConfig.interactiveDomain ?? `https://${homeDomain}`,
+      );
+      if (Buffer.byteLength(webAuthDomain, 'utf8') > 64) {
+        throw new ValidationError('SEP-10 web authentication domain exceeds 64 bytes');
+      }
 
       const challengeTx = new TransactionBuilder(
-        new Account(this.sep10ServerKeypair.publicKey(), '0'),
+        new Account(this.sep10ServerKeypair.publicKey(), '-1'),
         {
           fee: '100',
           networkPassphrase: this.networkPassphrase,
@@ -293,9 +334,16 @@ export class AnchorExpressRouter {
       )
         .addOperation(
           Operation.manageData({
-            name: SEP10_NONCE_OP,
+            name: `${homeDomain} auth`,
             value: nonce,
             source: account,
+          }),
+        )
+        .addOperation(
+          Operation.manageData({
+            name: 'web_auth_domain',
+            value: webAuthDomain,
+            source: this.sep10ServerKeypair.publicKey(),
           }),
         )
         .setTimebounds(now, expiresAtUnix)
@@ -366,7 +414,30 @@ export class AnchorExpressRouter {
         return;
       }
 
-      const nonce = extractNonceFromChallenge(transaction);
+      const securityConfig = this.config.get('security');
+      const serverConfig = this.config.get('server');
+      const homeDomain = getConfiguredDomain(
+        securityConfig.homeDomain,
+        serverConfig.interactiveDomain,
+      );
+      const webAuthDomain = getConfiguredDomain(
+        serverConfig.webAuthDomain,
+        serverConfig.interactiveDomain ?? `https://${homeDomain}`,
+      );
+      if (
+        !hasValidChallengeEnvelope(transaction, {
+          account,
+          homeDomain,
+          webAuthDomain,
+        })
+      ) {
+        sendJson(res, 401, {
+          error: 'invalid_challenge',
+          message: 'Challenge transaction envelope is invalid',
+        });
+        return;
+      }
+      const nonce = getManageDataValue(getOperationData(transaction.operations[0]).value);
       if (!nonce) {
         sendJson(res, 401, {
           error: 'invalid_challenge',
@@ -404,10 +475,17 @@ export class AnchorExpressRouter {
 
       const now = Date.now();
       const timeBounds = transaction.timeBounds;
+      const minTime = Number(timeBounds?.minTime);
+      const maxTime = Number(timeBounds?.maxTime);
       if (
         !timeBounds ||
-        Date.parse(stored.expiresAt) !== Number(timeBounds.maxTime) * 1000 ||
-        !Number.isFinite(Number(timeBounds.minTime))
+        !/^\d+$/.test(timeBounds.minTime) ||
+        !/^\d+$/.test(timeBounds.maxTime) ||
+        !Number.isSafeInteger(minTime) ||
+        !Number.isSafeInteger(maxTime) ||
+        minTime < 0 ||
+        minTime >= maxTime ||
+        Date.parse(stored.expiresAt) !== maxTime * 1000
       ) {
         sendJson(res, 401, {
           error: 'invalid_challenge',
@@ -416,7 +494,7 @@ export class AnchorExpressRouter {
         return;
       }
 
-      if (now < Number(timeBounds.minTime) * 1000) {
+      if (now < minTime * 1000) {
         sendJson(res, 401, { error: 'invalid_challenge', message: 'Challenge not yet valid' });
         return;
       }

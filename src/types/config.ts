@@ -79,6 +79,13 @@ export interface ServerConfig {
   interactiveDomain?: string;
 
   /**
+   * Domain serving the SEP-10 web authentication endpoint.
+   * Defaults to the host in interactiveDomain, then homeDomain.
+   * @optional
+   */
+  webAuthDomain?: string;
+
+  /**
    * Allowed origins for CORS
    * @optional
    */
@@ -101,6 +108,13 @@ export interface SecurityConfig {
    * @required
    */
   sep10SigningKey: string;
+
+  /**
+   * SEP-10 home domain used in the authentication Manage Data key.
+   * Defaults to the host in server.interactiveDomain, then "localhost".
+   * @optional
+   */
+  homeDomain?: string;
 
   /**
    * JWT secret for interactive flow tokens
@@ -391,7 +405,7 @@ export interface FrameworkConfig {
     /**
      * Database provider type
      */
-    provider: 'postgres' | 'sqlite';
+    provider: 'postgres' | 'sqlite' | 'mysql';
 
     /**
      * Database connection URL
@@ -399,7 +413,9 @@ export interface FrameworkConfig {
     url: string;
 
     /**
-     * Database schema name
+     * PostgreSQL schema name (1-63 ASCII letters, digits, or underscores;
+     * must start with a letter or underscore). Defaults to "public".
+     * SQLite accepts only "main".
      * @optional
      */
     schema?: string;
@@ -624,6 +640,12 @@ export interface AnchorKitConfig {
    */
   webhooks?: {
     /**
+     * Maximum time allowed for a cooperative webhook callback.
+     * @optional - defaults to 30000
+     */
+    timeoutMs?: number;
+
+    /**
      * Called after webhook event verification and persistence.
      */
     onEvent?: (
@@ -636,6 +658,7 @@ export interface AnchorKitConfig {
       context: {
         receivedAt: string;
         signature?: string;
+        signal: AbortSignal;
       },
     ) => Promise<void> | void;
   };

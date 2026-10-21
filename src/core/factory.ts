@@ -141,6 +141,7 @@ export class AnchorInstance {
   public async shutdown(): Promise<void> {
     if (!this.initialized) return;
     await this.stopBackgroundJobs();
+    await this.webhookProcessor?.shutdown?.();
     await this.requireDatabase().disconnect();
     this.initialized = false;
   }

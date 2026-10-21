@@ -96,4 +96,103 @@ describe('DefaultWebhookProcessor Unit Tests', () => {
       status: 'processed',
     });
   });
+
+  it('aborts a cooperative callback when its deadline expires', async () => {
+    const mockDatabase = {
+      insertWebhookEvent: vi.fn().mockResolvedValue({
+        inserted: true,
+        record: {
+          id: 'timeout-id',
+          eventId: 'timeout-event',
+          provider: 'generic',
+          payload: {},
+          createdAt: new Date().toISOString(),
+        },
+      }),
+      updateWebhookEventStatus: vi.fn().mockResolvedValue(undefined),
+    } as unknown as DatabaseAdapter;
+    let callbackSignal: AbortSignal | undefined;
+    const mockConfig = {
+      security: { verifyWebhookSignatures: false },
+      webhooks: {
+        timeoutMs: 10,
+        onEvent: vi.fn(
+          (_event, context: { signal: AbortSignal }) =>
+            new Promise<void>((resolve) => {
+              callbackSignal = context.signal;
+              context.signal.addEventListener('abort', () => resolve(), { once: true });
+            }),
+        ),
+      },
+    } as unknown as AnchorKitConfig;
+    const processor = new DefaultWebhookProcessor({
+      config: mockConfig,
+      database: mockDatabase,
+    });
+
+    await expect(
+      processor.process({
+        eventId: 'timeout-event',
+        provider: 'generic',
+        payload: {},
+        rawBody: '{}',
+      }),
+    ).rejects.toThrow('Webhook callback deadline exceeded');
+    expect(callbackSignal?.aborted).toBe(true);
+    expect(mockDatabase.updateWebhookEventStatus).toHaveBeenCalledWith({
+      id: 'timeout-id',
+      status: 'failed',
+      errorMessage: 'Webhook callback deadline exceeded',
+    });
+  });
+
+  it('aborts active callbacks during shutdown', async () => {
+    const mockDatabase = {
+      insertWebhookEvent: vi.fn().mockResolvedValue({
+        inserted: true,
+        record: {
+          id: 'shutdown-id',
+          eventId: 'shutdown-event',
+          provider: 'generic',
+          payload: {},
+          createdAt: new Date().toISOString(),
+        },
+      }),
+      updateWebhookEventStatus: vi.fn().mockResolvedValue(undefined),
+    } as unknown as DatabaseAdapter;
+    let callbackSignal: AbortSignal | undefined;
+    let callbackStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      callbackStarted = resolve;
+    });
+    const mockConfig = {
+      security: { verifyWebhookSignatures: false },
+      webhooks: {
+        onEvent: vi.fn(
+          (_event, context: { signal: AbortSignal }) =>
+            new Promise<void>((resolve) => {
+              callbackSignal = context.signal;
+              callbackStarted();
+              context.signal.addEventListener('abort', () => resolve(), { once: true });
+            }),
+        ),
+      },
+    } as unknown as AnchorKitConfig;
+    const processor = new DefaultWebhookProcessor({
+      config: mockConfig,
+      database: mockDatabase,
+    });
+    const processing = processor.process({
+      eventId: 'shutdown-event',
+      provider: 'generic',
+      payload: {},
+      rawBody: '{}',
+    });
+
+    await started;
+    await processor.shutdown();
+
+    await expect(processing).rejects.toThrow('Webhook processor is shutting down');
+    expect(callbackSignal?.aborted).toBe(true);
+  });
 });

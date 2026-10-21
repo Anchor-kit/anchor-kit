@@ -49,10 +49,22 @@ describe('SqlDatabaseAdapter – interactive transaction status updates', () => 
         kind: 'deposit',
         assetCode: 'USDC',
         amount: '50.00',
+        amountIn: '12345678901234567890.00000001',
+        amountOut: '0.00000009',
+        amountFee: '0.0000000000000000001',
+        currency: 'USD',
+        railReference: 'rail-ref-001',
+        stellarTransactionHash: 'stellar-hash-001',
         status: 'pending_user_transfer_start',
       });
 
       expect(inserted.status).toBe('pending_user_transfer_start');
+      expect(inserted.amountIn).toBe('12345678901234567890.00000001');
+      expect(inserted.amountOut).toBe('0.00000009');
+      expect(inserted.amountFee).toBe('0.0000000000000000001');
+      expect(inserted.currency).toBe('USD');
+      expect(inserted.railReference).toBe('rail-ref-001');
+      expect(inserted.stellarTransactionHash).toBe('stellar-hash-001');
 
       currentTime = new RealDate('2026-01-01T00:00:01.000Z').getTime();
       await db.updateTransactionStatus(txId, 'completed');
@@ -60,6 +72,12 @@ describe('SqlDatabaseAdapter – interactive transaction status updates', () => 
       const fetched = await db.getInteractiveTransactionById(txId);
       expect(fetched).not.toBeNull();
       expect(fetched!.status).toBe('completed');
+      expect(fetched!.amountIn).toBe('12345678901234567890.00000001');
+      expect(fetched!.amountOut).toBe('0.00000009');
+      expect(fetched!.amountFee).toBe('0.0000000000000000001');
+      expect(fetched!.currency).toBe('USD');
+      expect(fetched!.railReference).toBe('rail-ref-001');
+      expect(fetched!.stellarTransactionHash).toBe('stellar-hash-001');
       expect(fetched!.updatedAt).not.toBe(inserted.updatedAt);
     } finally {
       globalThis.Date = RealDate;

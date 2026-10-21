@@ -25,6 +25,9 @@ function safeEquals(left: string, right: string): boolean {
 export class DefaultWebhookProcessor implements WebhookProcessor {
   private readonly config: AnchorKitConfig;
   private readonly database: DatabaseAdapter;
+  private readonly activeControllers = new Set<AbortController>();
+  private readonly activeProcesses = new Set<Promise<{ duplicate: boolean; eventId: string }>>();
+  private shuttingDown = false;
 
   constructor(options: DefaultWebhookProcessorOptions) {
     this.config = options.config;
@@ -32,6 +35,33 @@ export class DefaultWebhookProcessor implements WebhookProcessor {
   }
 
   public async process(input: {
+    eventId: string;
+    provider: string;
+    payload: Record<string, unknown>;
+    rawBody: string;
+    signature?: string;
+  }): Promise<{ duplicate: boolean; eventId: string }> {
+    if (this.shuttingDown) {
+      throw new Error('Webhook processor is shutting down');
+    }
+    const process = this.processEvent(input);
+    this.activeProcesses.add(process);
+    try {
+      return await process;
+    } finally {
+      this.activeProcesses.delete(process);
+    }
+  }
+
+  public async shutdown(): Promise<void> {
+    this.shuttingDown = true;
+    for (const controller of this.activeControllers) {
+      controller.abort(new Error('Webhook processor is shutting down'));
+    }
+    await Promise.allSettled(this.activeProcesses);
+  }
+
+  private async processEvent(input: {
     eventId: string;
     provider: string;
     payload: Record<string, unknown>;
@@ -52,18 +82,21 @@ export class DefaultWebhookProcessor implements WebhookProcessor {
     }
 
     try {
-      await this.config.webhooks?.onEvent?.(
-        {
-          id: insertion.record.id,
-          eventId: insertion.record.eventId,
-          provider: insertion.record.provider,
-          payload: insertion.record.payload,
-        },
-        {
-          receivedAt: insertion.record.createdAt,
-          signature: input.signature,
-        },
-      );
+      const callback = this.config.webhooks?.onEvent;
+      if (callback) {
+        await this.invokeCallback(callback, {
+          event: {
+            id: insertion.record.id,
+            eventId: insertion.record.eventId,
+            provider: insertion.record.provider,
+            payload: insertion.record.payload,
+          },
+          context: {
+            receivedAt: insertion.record.createdAt,
+            signature: input.signature,
+          },
+        });
+      }
 
       await this.database.updateWebhookEventStatus({
         id: insertion.record.id,
@@ -80,6 +113,51 @@ export class DefaultWebhookProcessor implements WebhookProcessor {
     }
 
     return { duplicate: false, eventId: insertion.record.eventId };
+  }
+
+  private async invokeCallback(
+    callback: NonNullable<AnchorKitConfig['webhooks']>['onEvent'],
+    input: {
+      event: {
+        id: string;
+        eventId: string;
+        provider: string;
+        payload: Record<string, unknown>;
+      };
+      context: { receivedAt: string; signature?: string };
+    },
+  ): Promise<void> {
+    if (!callback) return;
+    if (this.shuttingDown) {
+      throw new Error('Webhook processor is shutting down');
+    }
+
+    const controller = new AbortController();
+    this.activeControllers.add(controller);
+    const timeoutMs = this.config.webhooks?.timeoutMs ?? 30_000;
+    const timeout = setTimeout(
+      () => controller.abort(new Error('Webhook callback deadline exceeded')),
+      timeoutMs,
+    );
+    const aborted = new Promise<never>((_, reject) => {
+      controller.signal.addEventListener(
+        'abort',
+        () => reject(controller.signal.reason ?? new Error('Webhook callback aborted')),
+        { once: true },
+      );
+    });
+
+    try {
+      await Promise.race([
+        Promise.resolve().then(() =>
+          callback(input.event, { ...input.context, signal: controller.signal }),
+        ),
+        aborted,
+      ]);
+    } finally {
+      clearTimeout(timeout);
+      this.activeControllers.delete(controller);
+    }
   }
 
   private verifySignatureIfEnabled(input: {

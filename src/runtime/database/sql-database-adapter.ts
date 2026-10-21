@@ -43,15 +43,34 @@ function parseJsonObject(value: string): Record<string, unknown> {
   return parsed as Record<string, unknown>;
 }
 
+function validateSchemaIdentifier(schema: string): string {
+  if (schema.length > 63 || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(schema)) {
+    throw new ConfigError(
+      'Database schema must be a PostgreSQL identifier (1-63 ASCII letters, digits, or underscores; it cannot start with a digit)',
+    );
+  }
+  return schema;
+}
+
 export class SqlDatabaseAdapter implements DatabaseAdapter {
   private readonly provider: FrameworkConfig['database']['provider'];
   private readonly url: string;
+  private readonly schema: string | null;
   private sqlite: SqliteLike | null = null;
   private postgres: PostgresClient | null = null;
 
   constructor(databaseConfig: FrameworkConfig['database']) {
     this.provider = databaseConfig.provider;
     this.url = databaseConfig.url;
+    this.schema =
+      databaseConfig.schema !== undefined
+        ? validateSchemaIdentifier(databaseConfig.schema)
+        : this.provider === 'postgres'
+          ? 'public'
+          : null;
+    if (this.provider === 'sqlite' && this.schema && this.schema !== 'main') {
+      throw new ConfigError('SQLite only supports the default "main" database schema');
+    }
   }
 
   public async connect(): Promise<void> {
@@ -68,6 +87,9 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
       };
       this.postgres = new pgModule.Client({ connectionString: this.url });
       await this.postgres.connect();
+      const schema = this.schema ?? 'public';
+      await this.postgres.query(`CREATE SCHEMA IF NOT EXISTS "${schema}"`);
+      await this.postgres.query(`SET search_path TO "${schema}"`);
       return;
     }
 
@@ -141,6 +163,11 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
           processed_at TEXT,
           created_at TEXT NOT NULL
         );
+
+        CREATE TABLE IF NOT EXISTS anchor_kit_schema_migrations (
+          version INTEGER PRIMARY KEY,
+          applied_at TEXT NOT NULL
+        );
       `);
       const idempotencyColumns = this.sqlite
         .prepare('PRAGMA table_info(idempotency_keys)')
@@ -149,6 +176,32 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
         this.sqlite.exec(
           "ALTER TABLE idempotency_keys ADD COLUMN status TEXT NOT NULL DEFAULT 'completed'",
         );
+      }
+      const financialMigration = this.sqlite
+        .prepare('SELECT version FROM anchor_kit_schema_migrations WHERE version = ?')
+        .get(1);
+      if (!financialMigration) {
+        const transactionColumns = this.sqlite
+          .prepare('PRAGMA table_info(interactive_transactions)')
+          .all() as Array<{ name?: unknown }>;
+        const existingTransactionColumns = new Set(transactionColumns.map((column) => column.name));
+        for (const column of [
+          'amount_in',
+          'amount_out',
+          'amount_fee',
+          'currency',
+          'rail_reference',
+          'stellar_transaction_hash',
+        ]) {
+          if (!existingTransactionColumns.has(column)) {
+            this.sqlite.exec(`ALTER TABLE interactive_transactions ADD COLUMN ${column} TEXT`);
+          }
+        }
+        this.sqlite
+          .prepare(
+            'INSERT INTO anchor_kit_schema_migrations (version, applied_at) VALUES (?, ?) ON CONFLICT(version) DO NOTHING',
+          )
+          .run(1, nowIso());
       }
       return;
     }
@@ -192,6 +245,31 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
       await this.postgres.query(
         "ALTER TABLE idempotency_keys ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'completed'",
       );
+      await this.postgres.query(`
+        CREATE TABLE IF NOT EXISTS anchor_kit_schema_migrations (
+          version INTEGER PRIMARY KEY,
+          applied_at TIMESTAMPTZ NOT NULL
+        )
+      `);
+      const financialMigration = await this.postgres.query<Record<string, unknown>>(
+        'SELECT version FROM anchor_kit_schema_migrations WHERE version = $1',
+        [1],
+      );
+      if (financialMigration.rows.length === 0) {
+        await this.postgres.query(`
+          ALTER TABLE interactive_transactions
+            ADD COLUMN IF NOT EXISTS amount_in TEXT,
+            ADD COLUMN IF NOT EXISTS amount_out TEXT,
+            ADD COLUMN IF NOT EXISTS amount_fee TEXT,
+            ADD COLUMN IF NOT EXISTS currency TEXT,
+            ADD COLUMN IF NOT EXISTS rail_reference TEXT,
+            ADD COLUMN IF NOT EXISTS stellar_transaction_hash TEXT
+        `);
+        await this.postgres.query(
+          'INSERT INTO anchor_kit_schema_migrations (version, applied_at) VALUES ($1, $2) ON CONFLICT (version) DO NOTHING',
+          [1, nowIso()],
+        );
+      }
       await this.postgres.query(`
         CREATE TABLE IF NOT EXISTS webhook_events (
           id TEXT PRIMARY KEY,
@@ -298,6 +376,12 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
     kind: 'deposit';
     assetCode: string;
     amount: string;
+    amountIn?: string;
+    amountOut?: string;
+    amountFee?: string;
+    currency?: string;
+    railReference?: string;
+    stellarTransactionHash?: string;
     status: TransactionStatus;
   }): Promise<InteractiveTransactionRecord> {
     const createdAt = nowIso();
@@ -306,7 +390,7 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
     if (this.sqlite) {
       this.sqlite
         .prepare(
-          'INSERT INTO interactive_transactions (id, account, kind, asset_code, amount, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+          'INSERT INTO interactive_transactions (id, account, kind, asset_code, amount, amount_in, amount_out, amount_fee, currency, rail_reference, stellar_transaction_hash, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
         )
         .run(
           input.id,
@@ -314,19 +398,31 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
           input.kind,
           input.assetCode,
           input.amount,
+          input.amountIn ?? null,
+          input.amountOut ?? null,
+          input.amountFee ?? null,
+          input.currency ?? null,
+          input.railReference ?? null,
+          input.stellarTransactionHash ?? null,
           input.status,
           createdAt,
           updatedAt,
         );
     } else {
       await this.requirePostgres().query(
-        'INSERT INTO interactive_transactions (id, account, kind, asset_code, amount, status, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)',
+        'INSERT INTO interactive_transactions (id, account, kind, asset_code, amount, amount_in, amount_out, amount_fee, currency, rail_reference, stellar_transaction_hash, status, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)',
         [
           input.id,
           input.account,
           input.kind,
           input.assetCode,
           input.amount,
+          input.amountIn ?? null,
+          input.amountOut ?? null,
+          input.amountFee ?? null,
+          input.currency ?? null,
+          input.railReference ?? null,
+          input.stellarTransactionHash ?? null,
           input.status,
           createdAt,
           updatedAt,
@@ -340,6 +436,12 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
       kind: input.kind,
       assetCode: input.assetCode,
       amount: input.amount,
+      amountIn: input.amountIn,
+      amountOut: input.amountOut,
+      amountFee: input.amountFee,
+      currency: input.currency,
+      railReference: input.railReference,
+      stellarTransactionHash: input.stellarTransactionHash,
       status: input.status,
       createdAt,
       updatedAt,
@@ -460,6 +562,12 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
       kind: 'deposit';
       assetCode: string;
       amount: string;
+      amountIn?: string;
+      amountOut?: string;
+      amountFee?: string;
+      currency?: string;
+      railReference?: string;
+      stellarTransactionHash?: string;
       status: TransactionStatus;
       createdAt: string;
     };
@@ -478,7 +586,7 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
       const create = sqlite.transaction(() => {
         sqlite
           .prepare(
-            'INSERT INTO interactive_transactions (id, account, kind, asset_code, amount, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+            'INSERT INTO interactive_transactions (id, account, kind, asset_code, amount, amount_in, amount_out, amount_fee, currency, rail_reference, stellar_transaction_hash, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
           )
           .run(
             transaction.id,
@@ -486,6 +594,12 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
             transaction.kind,
             transaction.assetCode,
             transaction.amount,
+            transaction.amountIn ?? null,
+            transaction.amountOut ?? null,
+            transaction.amountFee ?? null,
+            transaction.currency ?? null,
+            transaction.railReference ?? null,
+            transaction.stellarTransactionHash ?? null,
             transaction.status,
             transaction.createdAt,
             transaction.createdAt,
@@ -512,13 +626,19 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
       await postgres.query('BEGIN');
       try {
         await postgres.query(
-          'INSERT INTO interactive_transactions (id, account, kind, asset_code, amount, status, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $7)',
+          'INSERT INTO interactive_transactions (id, account, kind, asset_code, amount, amount_in, amount_out, amount_fee, currency, rail_reference, stellar_transaction_hash, status, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $13)',
           [
             transaction.id,
             transaction.account,
             transaction.kind,
             transaction.assetCode,
             transaction.amount,
+            transaction.amountIn ?? null,
+            transaction.amountOut ?? null,
+            transaction.amountFee ?? null,
+            transaction.currency ?? null,
+            transaction.railReference ?? null,
+            transaction.stellarTransactionHash ?? null,
             transaction.status,
             transaction.createdAt,
           ],
@@ -549,6 +669,12 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
       kind: transaction.kind,
       assetCode: transaction.assetCode,
       amount: transaction.amount,
+      amountIn: transaction.amountIn,
+      amountOut: transaction.amountOut,
+      amountFee: transaction.amountFee,
+      currency: transaction.currency,
+      railReference: transaction.railReference,
+      stellarTransactionHash: transaction.stellarTransactionHash,
       status: transaction.status,
       createdAt: transaction.createdAt,
       updatedAt: transaction.createdAt,
@@ -834,6 +960,13 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
       kind: 'deposit',
       assetCode: String(row.asset_code),
       amount: String(row.amount),
+      amountIn: row.amount_in == null ? undefined : String(row.amount_in),
+      amountOut: row.amount_out == null ? undefined : String(row.amount_out),
+      amountFee: row.amount_fee == null ? undefined : String(row.amount_fee),
+      currency: row.currency == null ? undefined : String(row.currency),
+      railReference: row.rail_reference == null ? undefined : String(row.rail_reference),
+      stellarTransactionHash:
+        row.stellar_transaction_hash == null ? undefined : String(row.stellar_transaction_hash),
       status,
       createdAt: String(row.created_at),
       updatedAt: String(row.updated_at),
