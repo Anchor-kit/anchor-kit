@@ -258,8 +258,15 @@ describe('Webhook Provider Fallback', () => {
       });
 
       expect(response.status).toBe(200);
-      expect(response.body.duplicate).toBe(true);
-      expect(response.body.status).toBe(status);
+      if (status === 'failed') {
+        // Failed events are intentionally retried; the retry is a new
+        // processing attempt rather than a duplicate response.
+        expect(response.body.duplicate).toBe(false);
+        expect(response.body).not.toHaveProperty('status');
+      } else {
+        expect(response.body.duplicate).toBe(true);
+        expect(response.body.status).toBe(status);
+      }
       expect(JSON.stringify(response.body)).not.toContain(errorMessage);
     }
   });

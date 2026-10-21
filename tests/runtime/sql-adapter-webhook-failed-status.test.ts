@@ -25,7 +25,7 @@ describe('SqlDatabaseAdapter – webhook event failed-status persistence (sqlite
     }
   });
 
-  it('persists failed status and error message, and populates processedAt', async () => {
+  it('resets a failed event to pending when it is retried', async () => {
     const eventId = `evt-failed-${randomUUID()}`;
     const internalId = randomUUID();
     const errorText = 'downstream service unavailable';
@@ -44,37 +44,28 @@ describe('SqlDatabaseAdapter – webhook event failed-status persistence (sqlite
     expect(pending.processedAt).toBeNull();
 
     // Mark the event as failed with a descriptive error message
-    const beforeUpdate = new Date();
     await db.updateWebhookEventStatus({
       id: internalId,
       status: 'failed',
       errorMessage: errorText,
     });
-    const afterUpdate = new Date();
-
-    // Re-fetch the canonical record by re-using insertOrGetWebhookEvent (same eventId →
-    // ON CONFLICT DO NOTHING, then SELECT returns the existing, now-updated row)
-    const { record: failed, inserted: reinserted } = await db.insertOrGetWebhookEvent({
+    // Re-using the event ID retries the failed record and clears failure metadata.
+    const { record: retry, inserted: reinserted } = await db.insertOrGetWebhookEvent({
       id: randomUUID(), // different id – conflict fires, existing row is returned
       eventId,
       provider: 'test-provider',
-      payload: {},
+      payload: { type: 'payment.retry', amount: '50' },
     });
 
-    expect(reinserted).toBe(false);
-
-    // Core acceptance criteria
-    expect(failed.status).toBe('failed');
-    expect(failed.errorMessage).toBe(errorText);
-    expect(failed.processedAt).not.toBeNull();
-
-    // processedAt must be a valid ISO timestamp within the window of the update call
-    const processedAt = new Date(failed.processedAt as string);
-    expect(processedAt.getTime()).toBeGreaterThanOrEqual(beforeUpdate.getTime() - 1000);
-    expect(processedAt.getTime()).toBeLessThanOrEqual(afterUpdate.getTime() + 1000);
+    expect(reinserted).toBe(true);
+    expect(retry.id).toBe(internalId);
+    expect(retry.status).toBe('pending');
+    expect(retry.errorMessage).toBeNull();
+    expect(retry.processedAt).toBeNull();
+    expect(retry.payload).toEqual({ type: 'payment.retry', amount: '50' });
   });
 
-  it('preserves the original payload and provider after marking failed', async () => {
+  it('replaces the payload and preserves the provider when retrying a failed event', async () => {
     const eventId = `evt-payload-check-${randomUUID()}`;
     const internalId = randomUUID();
     const originalPayload = { type: 'deposit.completed', amount: '100', currency: 'USD' };
@@ -92,16 +83,17 @@ describe('SqlDatabaseAdapter – webhook event failed-status persistence (sqlite
       errorMessage: 'processing error',
     });
 
-    const { record } = await db.insertOrGetWebhookEvent({
+    const { record, inserted } = await db.insertOrGetWebhookEvent({
       id: randomUUID(),
       eventId,
       provider: 'stripe',
       payload: {},
     });
 
-    expect(record.status).toBe('failed');
+    expect(inserted).toBe(true);
+    expect(record.status).toBe('pending');
     expect(record.provider).toBe('stripe');
-    expect(record.payload).toEqual(originalPayload);
+    expect(record.payload).toEqual({});
   });
 
   it('a failed event with no errorMessage stores null for error_message', async () => {
@@ -121,16 +113,17 @@ describe('SqlDatabaseAdapter – webhook event failed-status persistence (sqlite
       // errorMessage intentionally omitted
     });
 
-    const { record } = await db.insertOrGetWebhookEvent({
+    const { record, inserted } = await db.insertOrGetWebhookEvent({
       id: randomUUID(),
       eventId,
       provider: 'test-provider',
       payload: {},
     });
 
-    expect(record.status).toBe('failed');
+    expect(inserted).toBe(true);
+    expect(record.status).toBe('pending');
     expect(record.errorMessage).toBeNull();
-    expect(record.processedAt).not.toBeNull();
+    expect(record.processedAt).toBeNull();
   });
 
   it('processed status also populates processedAt and leaves errorMessage null', async () => {

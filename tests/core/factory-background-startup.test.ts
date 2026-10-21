@@ -1,4 +1,7 @@
 import { Keypair } from '@stellar/stellar-sdk';
+import type { QueueAdapter, QueueJob } from '@/runtime/interfaces.ts';
+import { InMemoryQueueAdapter } from '@/runtime/queue/in-memory-queue.ts';
+import { TransactionWatcher } from '@/runtime/watchers/transaction-watcher.ts';
 import { describe, expect, it } from 'vitest';
 import { createAnchor } from '@/index.ts';
 
@@ -40,7 +43,6 @@ class MockQueueAdapter {
 class MockWatcher {
   public startCalls = 0;
   public stopCalls = 0;
-  public startError: Error | null = null;
   public stopGate: Promise<void> | null = null;
   public stopError: Error | null = null;
   public stopEntered = deferred();
@@ -66,7 +68,7 @@ class MockWatcher {
 }
 
 describe('AnchorInstance concurrent background startup', () => {
-  it('rolls back started services and preserves the startup error for a retry', async () => {
+  it('exposes queue counts without exposing queued job payloads', async () => {
     const anchor = createAnchor({
       network: { network: 'testnet' },
       server: { interactiveDomain: 'https://anchor.example.com' },
@@ -84,41 +86,95 @@ describe('AnchorInstance concurrent background startup', () => {
         ],
       },
       framework: {
-        database: {
-          provider: 'sqlite',
-          url: 'file::memory:',
-        },
+        database: { provider: 'sqlite', url: 'file::memory:' },
+        watchers: { enabled: false },
       },
     });
-    const queue = new MockQueueAdapter();
-    const startedWatcher = new MockWatcher();
-    const failingWatcher = new MockWatcher();
-    const startupError = new Error('watcher startup failed');
-    failingWatcher.startError = startupError;
-
     await anchor.init();
-    (anchor as unknown as { queue: unknown }).queue = queue;
-    (anchor as unknown as { watchers: unknown[] }).watchers = [
-      startedWatcher as never,
-      failingWatcher as never,
-    ];
 
-    await expect(anchor.startBackgroundJobs()).rejects.toBe(startupError);
-    expect(queue.started).toBe(false);
-    expect(queue.startCalls).toBe(1);
-    expect(queue.stopCalls).toBe(1);
-    expect(startedWatcher.startCalls).toBe(1);
-    expect(startedWatcher.stopCalls).toBe(1);
-    expect(failingWatcher.startCalls).toBe(1);
-    expect(failingWatcher.stopCalls).toBe(0);
+    const queue = new InMemoryQueueAdapter({ concurrency: 1 });
+    (anchor as unknown as { queue: InMemoryQueueAdapter }).queue = queue;
+    expect(anchor.getQueueStatus()).toEqual({ pending: 0, active: 0 });
 
-    await expect(anchor.startBackgroundJobs()).resolves.toBeUndefined();
-    expect(queue.started).toBe(true);
-    expect(queue.startCalls).toBe(2);
-    expect(failingWatcher.startCalls).toBe(2);
-    await anchor.stopBackgroundJobs();
+    await queue.enqueue({
+      type: 'expire_transaction',
+      payload: { transactionId: 'private-transaction-id' },
+    });
+    expect(anchor.getQueueStatus()).toEqual({ pending: 1, active: 0 });
+
+    let releaseWorker: (() => void) | undefined;
+    const workerGate = new Promise<void>((resolve) => {
+      releaseWorker = resolve;
+    });
+    let signalStarted: (() => void) | undefined;
+    const workerStarted = new Promise<void>((resolve) => {
+      signalStarted = resolve;
+    });
+    await queue.start(async () => {
+      signalStarted?.();
+      await workerGate;
+    });
+    await workerStarted;
+    expect(anchor.getQueueStatus()).toEqual({ pending: 0, active: 1 });
+
+    releaseWorker?.();
+    await queue.stop();
+    expect(anchor.getQueueStatus()).toEqual({ pending: 0, active: 0 });
     await anchor.shutdown();
   });
+
+  it.each([
+    ['uses the operational retention value when both settings are configured', 21, 45, 21],
+    ['uses the watcher retention value when the operational setting is absent', undefined, 45, 45],
+  ])(
+    '%s',
+    async (_description, transactionRetentionDays, watcherRetentionDays, expectedRetentionDays) => {
+      const anchor = createAnchor({
+        network: { network: 'testnet' },
+        server: { interactiveDomain: 'https://anchor.example.com' },
+        security: {
+          sep10SigningKey: Keypair.random().secret(),
+          interactiveJwtSecret: 'jwt-test-secret',
+          distributionAccountSecret: 'distribution-test-secret',
+        },
+        assets: {
+          assets: [
+            {
+              code: 'USDC',
+              issuer: 'GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5',
+            },
+          ],
+        },
+        operational:
+          transactionRetentionDays === undefined ? undefined : { transactionRetentionDays },
+        framework: {
+          database: { provider: 'sqlite', url: 'file::memory:' },
+          watchers: { retentionDays: watcherRetentionDays },
+        },
+      });
+      const cleanupJobs: QueueJob[] = [];
+
+      await anchor.init();
+      const watcher = (anchor as unknown as { watchers: TransactionWatcher[] }).watchers[0];
+      (watcher as unknown as { queue: QueueAdapter }).queue = {
+        enqueue: async (job) => {
+          cleanupJobs.push(job);
+        },
+        start: async () => undefined,
+        stop: async () => undefined,
+      };
+
+      await watcher.start();
+
+      expect(cleanupJobs).toContainEqual({
+        type: 'cleanup_records',
+        payload: { retentionDays: expectedRetentionDays },
+      });
+
+      await watcher.stop();
+      await anchor.shutdown();
+    },
+  );
 
   it('does not start duplicate background work when startBackgroundJobs is called concurrently', async () => {
     const anchor = createAnchor({

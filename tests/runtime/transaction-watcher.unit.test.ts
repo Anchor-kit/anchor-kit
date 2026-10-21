@@ -1,6 +1,7 @@
 import type { DatabaseAdapter, QueueAdapter } from '@/runtime/interfaces.ts';
+import type { InteractiveTransactionRecord } from '@/runtime/interfaces.ts';
 import { TransactionWatcher } from '@/runtime/watchers/transaction-watcher.ts';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi, type Mock } from 'vitest';
 
 describe('TransactionWatcher Unit Tests', () => {
   let mockDatabase: DatabaseAdapter;
@@ -14,7 +15,7 @@ describe('TransactionWatcher Unit Tests', () => {
       migrate: vi.fn().mockResolvedValue(undefined),
       insertAuthChallenge: vi.fn().mockResolvedValue(undefined),
       getAuthChallengeByChallenge: vi.fn().mockResolvedValue(null),
-      markAuthChallengeConsumed: vi.fn().mockResolvedValue(undefined),
+      markAuthChallengeConsumed: vi.fn().mockResolvedValue(true),
       insertInteractiveTransaction: vi.fn().mockResolvedValue({
         id: 'test-tx-id',
         account: 'test-account',
@@ -69,6 +70,101 @@ describe('TransactionWatcher Unit Tests', () => {
     expect(mockDatabase.listPendingTransactionsBefore).not.toHaveBeenCalled();
     expect(mockQueue.enqueue).not.toHaveBeenCalled();
     expect(mockQueue.stop).not.toHaveBeenCalled();
+  });
+
+  it('waits for an in-progress initial tick before stopping and allows a clean restart', async () => {
+    vi.useFakeTimers();
+
+    try {
+      let resolveFirstTick!: (transactions: unknown[]) => void;
+      mockDatabase.listPendingTransactionsBefore = vi
+        .fn()
+        .mockImplementationOnce(
+          () => new Promise<unknown[]>((resolve) => (resolveFirstTick = resolve)),
+        )
+        .mockResolvedValue([]);
+
+      const firstStart = transactionWatcher.start();
+      const concurrentStart = transactionWatcher.start();
+      const stopping = transactionWatcher.stop();
+      resolveFirstTick([]);
+
+      await expect(Promise.all([firstStart, concurrentStart, stopping])).resolves.toBeDefined();
+      expect(mockDatabase.listPendingTransactionsBefore).toHaveBeenCalledTimes(1);
+
+      vi.advanceTimersByTime(1000);
+      expect(mockDatabase.listPendingTransactionsBefore).toHaveBeenCalledTimes(1);
+
+      await transactionWatcher.start();
+      expect(mockDatabase.listPendingTransactionsBefore).toHaveBeenCalledTimes(2);
+      await transactionWatcher.stop();
+    } finally {
+      vi.useRealTimers();
+      await transactionWatcher.stop();
+    }
+  });
+
+  it('does not restart polling when start races with stop during a scheduled tick', async () => {
+    vi.useFakeTimers();
+
+    try {
+      await transactionWatcher.start();
+
+      let resolveScheduledTick!: (transactions: InteractiveTransactionRecord[]) => void;
+      const pendingScheduledTick = vi.fn(
+        () =>
+          new Promise<InteractiveTransactionRecord[]>(
+            (resolve) => (resolveScheduledTick = resolve),
+          ),
+      );
+      mockDatabase.listPendingTransactionsBefore = pendingScheduledTick;
+      vi.advanceTimersByTime(1000);
+
+      const stopping = transactionWatcher.stop();
+      const startingDuringStop = transactionWatcher.start();
+      resolveScheduledTick([]);
+      await Promise.all([stopping, startingDuringStop]);
+
+      vi.advanceTimersByTime(1000);
+      expect(pendingScheduledTick).toHaveBeenCalledTimes(1);
+
+      mockDatabase.listPendingTransactionsBefore = vi.fn().mockResolvedValue([]);
+      await transactionWatcher.start();
+      expect(mockDatabase.listPendingTransactionsBefore).toHaveBeenCalledTimes(1);
+      await transactionWatcher.stop();
+    } finally {
+      vi.useRealTimers();
+      await transactionWatcher.stop();
+    }
+  });
+
+  it('keeps shutdown safe when an in-flight scheduled tick fails', async () => {
+    vi.useFakeTimers();
+
+    try {
+      await transactionWatcher.start();
+
+      let rejectScheduledTick!: (reason: Error) => void;
+      mockDatabase.listPendingTransactionsBefore = vi.fn(
+        () =>
+          new Promise<InteractiveTransactionRecord[]>((_, reject) => {
+            rejectScheduledTick = reject;
+          }),
+      );
+      vi.advanceTimersByTime(1000);
+
+      const stopping = transactionWatcher.stop();
+      rejectScheduledTick(new Error('transient tick failure'));
+      await expect(stopping).resolves.toBeUndefined();
+
+      mockDatabase.listPendingTransactionsBefore = vi.fn().mockResolvedValue([]);
+      await expect(transactionWatcher.start()).resolves.toBeUndefined();
+      expect(mockDatabase.listPendingTransactionsBefore).toHaveBeenCalledTimes(1);
+      await transactionWatcher.stop();
+    } finally {
+      vi.useRealTimers();
+      await transactionWatcher.stop();
+    }
   });
 
   it('enqueues expiration jobs for stale pending deposits', async () => {
@@ -237,15 +333,39 @@ describe('TransactionWatcher Unit Tests', () => {
 
     await shortIntervalWatcher.start();
 
-    // Wait for multiple polling cycles to occur
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    // Wait for multiple polling cycles to occur. Timing varies slightly by scheduler,
+    // so assert that polling kept running rather than relying on an exact count.
+    await new Promise((resolve) => setTimeout(resolve, 80));
 
     await shortIntervalWatcher.stop();
 
-    // The watcher should continue polling after a failed tick, even if the exact
-    // number of calls varies slightly with scheduler timing.
-    expect(mockDatabase.listPendingTransactionsBefore).toHaveBeenCalled();
-    expect(mockDatabase.listPendingTransactionsBefore.mock.calls.length).toBeGreaterThan(1);
+    // Polling should continue after a failed tick, even if the exact cycle count varies.
+    expect(
+      (mockDatabase.listPendingTransactionsBefore as Mock).mock.calls.length,
+    ).toBeGreaterThanOrEqual(3);
+  });
+
+  it('stop() resolves even when an active tick rejects and clears the timer', async () => {
+    const rejectTick = vi.fn();
+    mockDatabase.listPendingTransactionsBefore = vi.fn<
+      (cutoffIso: string) => Promise<InteractiveTransactionRecord[]>
+    >(
+      () =>
+        new Promise((_, reject) => {
+          rejectTick.mockImplementation(() => reject(new Error('db failure')));
+        }),
+    );
+
+    const startPromise = transactionWatcher.start();
+    await Promise.resolve();
+    const stopPromise = transactionWatcher.stop();
+    rejectTick();
+
+    await expect(startPromise).rejects.toThrow('db failure');
+    await expect(stopPromise).resolves.toBeUndefined();
+    expect(
+      (transactionWatcher as unknown as { timer: ReturnType<typeof setInterval> | null }).timer,
+    ).toBeNull();
   });
 
   it('enqueues a cleanup_records job with the configured retention days', async () => {

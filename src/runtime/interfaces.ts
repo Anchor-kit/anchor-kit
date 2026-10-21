@@ -1,4 +1,3 @@
-import type { Customer } from '@/types/customer.ts';
 import type { TransactionStatus } from '@/types/transaction-status.ts';
 
 export interface AuthChallengeRecord {
@@ -16,7 +15,7 @@ export interface InteractiveTransactionRecord {
   kind: 'deposit';
   assetCode: string;
   amount: string;
-  status: string;
+  status: TransactionStatus;
   createdAt: string;
   updatedAt: string;
 }
@@ -34,6 +33,7 @@ export interface IdempotencyRecord {
   scope: string;
   idempotencyKey: string;
   requestHash: string;
+  status: 'pending' | 'completed';
   statusCode: number;
   responseBody: string;
   createdAt: string;
@@ -72,7 +72,7 @@ export interface DatabaseAdapter {
     expiresAt: string;
   }): Promise<void>;
   getAuthChallengeByChallenge(challenge: string): Promise<AuthChallengeRecord | null>;
-  markAuthChallengeConsumed(id: string): Promise<void>;
+  markAuthChallengeConsumed(id: string): Promise<boolean>;
 
   insertInteractiveTransaction(input: {
     id: string;
@@ -80,20 +80,15 @@ export interface DatabaseAdapter {
     kind: 'deposit';
     assetCode: string;
     amount: string;
-    status: string;
+    status: TransactionStatus;
   }): Promise<InteractiveTransactionRecord>;
   getInteractiveTransactionById(id: string): Promise<InteractiveTransactionRecord | null>;
   listPendingTransactionsBefore(cutoffIso: string): Promise<InteractiveTransactionRecord[]>;
-  updateTransactionStatus(id: string, status: string): Promise<void>;
-  transitionInteractiveTransaction(input: {
-    id: string;
-    expectedStatus: TransactionStatus;
-    status: TransactionStatus;
-    amount?: string;
-  }): Promise<TransactionTransitionResult>;
-
-  insertOrGetCustomer(input: Omit<Customer, 'created_at'>): Promise<Customer>;
-  getCustomerByAccountId(accountId: string): Promise<Customer | null>;
+  updateTransactionStatus(
+    id: string,
+    status: TransactionStatus,
+    expectedStatus?: TransactionStatus,
+  ): Promise<boolean>;
 
   getIdempotencyRecord(scope: string, idempotencyKey: string): Promise<IdempotencyRecord | null>;
   insertOrGetIdempotencyRecord(input: {
@@ -110,6 +105,35 @@ export interface DatabaseAdapter {
     statusCode: number;
     responseBody: string;
   }): Promise<void>;
+  reserveIdempotencyRecord(input: {
+    id: string;
+    scope: string;
+    idempotencyKey: string;
+    requestHash: string;
+  }): Promise<{ record: IdempotencyRecord; inserted: boolean }>;
+  createDepositWithIdempotency(input: {
+    transaction: {
+      id: string;
+      account: string;
+      kind: 'deposit';
+      assetCode: string;
+      amount: string;
+      status: TransactionStatus;
+      createdAt: string;
+    };
+    idempotency: {
+      scope: string;
+      idempotencyKey: string;
+      requestHash: string;
+      statusCode: number;
+      responseBody: string;
+    };
+  }): Promise<InteractiveTransactionRecord>;
+  deletePendingIdempotencyRecord(
+    scope: string,
+    idempotencyKey: string,
+    requestHash: string,
+  ): Promise<void>;
 
   insertOrGetWebhookEvent(input: {
     id: string;
@@ -138,9 +162,14 @@ export interface DatabaseAdapter {
   cleanupOldRecords(cutoffIso: string): Promise<void>;
 }
 
-export interface QueueJob {
-  type: 'expire_transaction' | 'process_watcher_task' | 'cleanup_records';
-  payload: Record<string, unknown>;
+export type QueueJob =
+  | { type: 'expire_transaction'; payload: { transactionId: string } }
+  | { type: 'process_watcher_task'; payload: { watcherTaskId: string } }
+  | { type: 'cleanup_records'; payload: { retentionDays: number } };
+
+export interface QueueDrainStatus {
+  readonly pending: number;
+  readonly active: number;
 }
 
 export interface QueueDrainStatus {
@@ -149,7 +178,7 @@ export interface QueueDrainStatus {
 }
 
 export interface QueueAdapter {
-  readonly status: QueueDrainStatus;
+  readonly status?: QueueDrainStatus;
   enqueue(job: QueueJob): Promise<void>;
   start(worker: (job: QueueJob) => Promise<void>): Promise<void>;
   stop(): Promise<void>;
@@ -171,6 +200,7 @@ export interface WebhookProcessor {
   }): Promise<{
     duplicate: boolean;
     eventId: string;
+    provider: string;
     status?: WebhookEventRecord['status'];
   }>;
 }

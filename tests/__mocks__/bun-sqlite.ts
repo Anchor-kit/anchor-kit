@@ -32,10 +32,27 @@ class BunSqliteDatabase {
     }
   }
 
-  /** bun:sqlite db.query() returns an iterable of rows — we return an array */
-  query(sql: string, params?: unknown[]): Row[] {
+  /**
+   * bun:sqlite db.query() returns an iterable/statement-like object.
+   * Some code calls `.get()` on the result, so we return a wrapper
+   * that exposes `get`, `all`, and is iterable.
+   */
+  query(sql: string, params?: unknown[]): unknown {
     const stmt = this.db.prepare(sql);
-    return params && params.length > 0 ? (stmt.all(...params) as Row[]) : (stmt.all() as Row[]);
+    const wrapper = {
+      all: (...p: unknown[]) =>
+        p && p.length > 0 ? (stmt.all(...p) as Row[]) : (stmt.all() as Row[]),
+      get: (...p: unknown[]) => (p && p.length > 0 ? (stmt.get(...p) as Row) : (stmt.get() as Row)),
+      [Symbol.iterator]: function* () {
+        const rows =
+          params && params.length > 0
+            ? (stmt.all(...(params as unknown[])) as Row[])
+            : (stmt.all() as Row[]);
+        for (const r of rows) yield r;
+      },
+    };
+
+    return wrapper;
   }
 
   prepare(sql: string): Statement {

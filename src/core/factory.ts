@@ -5,10 +5,12 @@ import {
   makeSqliteDbUrlForTests,
 } from '@/runtime/database/sql-database-adapter.ts';
 import { AnchorExpressRouter, type ExpressLikeMiddleware } from '@/runtime/http/express-router.ts';
+import { validatePluginRoutes } from '@/runtime/http/express-router-impl.ts';
 import type {
   DatabaseAdapter,
+  InteractiveTransactionRecord,
   QueueAdapter,
-  QueueJob,
+  QueueDrainStatus,
   Watcher,
   WebhookProcessor,
 } from '@/runtime/interfaces.ts';
@@ -16,7 +18,7 @@ import { InMemoryQueueAdapter } from '@/runtime/queue/in-memory-queue.ts';
 import { TransactionWatcher } from '@/runtime/watchers/transaction-watcher.ts';
 import { DefaultWebhookProcessor } from '@/runtime/webhooks/default-webhook-processor.ts';
 import { AnchorKitConfig } from '@/types/config.ts';
-import { AnchorPlugin } from '@/types/plugin.ts';
+import type { AnchorPlugin, AnchorPluginHooks } from '@/types/plugin.ts';
 
 /**
  * AnchorInstance
@@ -34,6 +36,8 @@ export class AnchorInstance {
 
   private initialized = false;
   private backgroundJobsRunning = false;
+  private initPromise: Promise<void> | null = null;
+  private shutdownPromise: Promise<void> | null = null;
   private backgroundJobsPromise: Promise<void> | null = null;
   private backgroundJobsStopPromise: Promise<void> | null = null;
 
@@ -46,6 +50,11 @@ export class AnchorInstance {
    * Register a plugin with the anchor instance.
    */
   public use(plugin: AnchorPlugin): this {
+    if (this.initialized) {
+      throw new ConfigError(
+        `Plugin "${plugin.id}" cannot be registered after init() has been called. Register plugins before initialization.`,
+      );
+    }
     if (this.plugins.has(plugin.id)) {
       throw new Error(`Plugin with id "${plugin.id}" is already registered.`);
     }
@@ -54,56 +63,93 @@ export class AnchorInstance {
   }
 
   /**
-   * Initialize registered plugins and all runtime services.
+   * Initialize registered plugins and runtime services. Concurrent calls share
+   * one initialization attempt; calls made during shutdown run afterward.
    */
   public async init(): Promise<void> {
+    if (this.shutdownPromise) {
+      await this.shutdownPromise;
+      return this.init();
+    }
     if (this.initialized) return;
+    if (this.initPromise) return this.initPromise;
 
-    const frameworkConfig = this.config.get('framework');
-
-    this.database = createSqlDatabaseAdapter(frameworkConfig.database);
-    await this.database.connect();
-    await this.database.migrate();
-
-    const queueBackend = frameworkConfig.queue?.backend ?? 'memory';
-    if (queueBackend !== 'memory') {
-      throw new ConfigError(
-        `Unsupported queue backend: "${queueBackend}". Only "memory" queue backend is currently supported. Please remove or set queue.backend to "memory" in your configuration.`,
+    this.initPromise = (async () => {
+      const pluginRoutes = Array.from(this.plugins.values()).flatMap((plugin) =>
+        (plugin.routes ?? []).map((route) => ({ pluginId: plugin.id, route })),
       );
-    }
+      const frameworkConfig = this.config.get('framework');
 
-    const queueConcurrency = frameworkConfig.queue?.concurrency ?? 1;
-    this.queue = new InMemoryQueueAdapter({ concurrency: queueConcurrency });
+      try {
+        validatePluginRoutes(pluginRoutes);
+        this.database = this.createDatabaseAdapter();
+        await this.database.connect();
+        await this.database.migrate();
 
-    this.webhookProcessor = new DefaultWebhookProcessor({
-      config: this.config.getConfig(),
-      database: this.database,
-    });
+        const queueBackend = frameworkConfig.queue?.backend ?? 'memory';
+        if (queueBackend !== 'memory') {
+          throw new ConfigError(
+            `Unsupported queue backend: "${queueBackend}". Only "memory" queue backend is currently supported. Please remove or set queue.backend to "memory" in your configuration.`,
+          );
+        }
 
-    const watchersEnabled = frameworkConfig.watchers?.enabled ?? true;
-    if (watchersEnabled) {
-      this.watchers = [
-        new TransactionWatcher(this.database, this.queue, {
-          pollIntervalMs: frameworkConfig.watchers?.pollIntervalMs ?? 15000,
-          transactionTimeoutMs: frameworkConfig.watchers?.transactionTimeoutMs ?? 300000,
-          retentionDays: frameworkConfig.watchers?.retentionDays ?? 90,
-        }),
-      ];
-    }
+        const queueConcurrency = frameworkConfig.queue?.concurrency ?? 1;
+        this.queue = new InMemoryQueueAdapter({ concurrency: queueConcurrency });
 
-    this.expressRouter = new AnchorExpressRouter({
-      config: this.config,
-      database: this.database,
-      webhookProcessor: this.webhookProcessor,
-    }).getMiddleware();
+        this.webhookProcessor = new DefaultWebhookProcessor({
+          config: this.config.getConfig(),
+          database: this.database,
+        });
 
-    for (const plugin of this.plugins.values()) {
-      if (plugin.init) {
-        await plugin.init(this);
+        const watchersEnabled = frameworkConfig.watchers?.enabled ?? true;
+        if (watchersEnabled) {
+          const retentionDays = this.config.get('operational')?.transactionRetentionDays ?? 90;
+          this.watchers = [
+            new TransactionWatcher(this.database, this.queue, {
+              pollIntervalMs: frameworkConfig.watchers?.pollIntervalMs ?? 15000,
+              transactionTimeoutMs: frameworkConfig.watchers?.transactionTimeoutMs ?? 300000,
+              retentionDays,
+            }),
+          ];
+        }
+
+        const depositRequestHooks: NonNullable<AnchorPluginHooks['onDepositRequest']>[] = [];
+        const sep10ChallengeHooks: NonNullable<AnchorPluginHooks['onSep10Challenge']>[] = [];
+        for (const plugin of this.plugins.values()) {
+          if (plugin.hooks?.onDepositRequest) {
+            depositRequestHooks.push(plugin.hooks.onDepositRequest);
+          }
+          if (plugin.hooks?.onSep10Challenge) {
+            sep10ChallengeHooks.push(plugin.hooks.onSep10Challenge);
+          }
+        }
+
+        this.expressRouter = new AnchorExpressRouter({
+          config: this.config,
+          database: this.database,
+          webhookProcessor: this.webhookProcessor,
+          depositRequestHooks,
+          sep10ChallengeHooks,
+          pluginRoutes,
+        }).getMiddleware();
+
+        this.initialized = true;
+
+        for (const plugin of this.plugins.values()) {
+          if (plugin.init) {
+            await plugin.init(this);
+          }
+        }
+      } catch (error) {
+        const originalError = error instanceof Error ? error : new Error(String(error));
+        await this.rollbackInitialization();
+        throw originalError;
+      } finally {
+        this.initPromise = null;
       }
-    }
+    })();
 
-    this.initialized = true;
+    return this.initPromise;
   }
 
   /**
@@ -168,6 +214,8 @@ export class AnchorInstance {
    */
   public async stopBackgroundJobs(): Promise<void> {
     if (this.backgroundJobsStopPromise) return this.backgroundJobsStopPromise;
+    if (this.backgroundJobsPromise) await this.backgroundJobsPromise;
+    if (this.backgroundJobsStopPromise) return this.backgroundJobsStopPromise;
     if (!this.initialized || !this.backgroundJobsRunning) return;
 
     this.backgroundJobsStopPromise = (async () => {
@@ -186,14 +234,43 @@ export class AnchorInstance {
     return this.backgroundJobsStopPromise;
   }
 
+  /** Return pending and active queue counts without exposing job payloads. */
+  public getQueueStatus(): QueueDrainStatus {
+    return this.queue?.status ?? { pending: 0, active: 0 };
+  }
+
   /**
-   * Cleanly shutdown all services.
+   * Cleanly shut down all services. If initialization is pending, shutdown waits
+   * for it to settle before releasing resources. The instance can then be initialized again.
    */
   public async shutdown(): Promise<void> {
-    if (!this.initialized) return;
-    await this.stopBackgroundJobs();
-    await this.requireDatabase().disconnect();
-    this.initialized = false;
+    if (!this.initialized && !this.initPromise && !this.shutdownPromise) return;
+    if (this.shutdownPromise) return this.shutdownPromise;
+
+    this.shutdownPromise = (async () => {
+      try {
+        await this.initPromise?.catch(() => undefined);
+        if (!this.initialized) return;
+
+        await this.stopBackgroundJobs();
+        await this.requireDatabase().disconnect();
+        this.initialized = false;
+        this.backgroundJobsRunning = false;
+        this.watchers = [];
+        this.expressRouter = null;
+        this.webhookProcessor = null;
+        this.queue = null;
+        this.database = null;
+      } finally {
+        this.shutdownPromise = null;
+      }
+    })();
+
+    return this.shutdownPromise;
+  }
+
+  protected createDatabaseAdapter(): DatabaseAdapter {
+    return createSqlDatabaseAdapter(this.config.get('framework').database);
   }
 
   /**
@@ -224,6 +301,24 @@ export class AnchorInstance {
     return this.requireDatabase().countProcessedWatcherTasks();
   }
 
+  private async rollbackInitialization(): Promise<void> {
+    if (this.backgroundJobsRunning || this.initialized) {
+      await this.stopBackgroundJobs();
+    }
+
+    if (this.database) {
+      await this.database.disconnect().catch(() => undefined);
+    }
+
+    this.initialized = false;
+    this.backgroundJobsRunning = false;
+    this.database = null;
+    this.queue = null;
+    this.webhookProcessor = null;
+    this.watchers = [];
+    this.expressRouter = null;
+  }
+
   private ensureInitialized(): void {
     if (!this.initialized) {
       throw new ConfigError('Anchor is not initialized. Call init() first.');
@@ -244,25 +339,56 @@ export class AnchorInstance {
     return this.queue;
   }
 
-  private async processQueueJob(job: QueueJob): Promise<void> {
+  private async processQueueJob(input: unknown): Promise<void> {
     const database = this.requireDatabase();
+    if (
+      typeof input !== 'object' ||
+      input === null ||
+      !('type' in input) ||
+      !('payload' in input)
+    ) {
+      return;
+    }
+
+    const job = input as { type: unknown; payload: unknown };
+    if (typeof job.type !== 'string') {
+      return;
+    }
+
+    if (typeof job.payload !== 'object' || job.payload === null || Array.isArray(job.payload)) {
+      return;
+    }
+
+    const payload = job.payload as Record<string, unknown>;
 
     if (job.type === 'expire_transaction') {
-      const transactionIdValue = job.payload.transactionId;
+      const transactionIdValue = payload.transactionId;
       if (typeof transactionIdValue !== 'string' || transactionIdValue.length === 0) {
         return;
       }
 
-      await database.transitionInteractiveTransaction({
-        id: transactionIdValue,
-        expectedStatus: 'pending_user_transfer_start',
-        status: 'expired',
-      });
+      const transaction = await database.getInteractiveTransactionById(transactionIdValue);
+      if (!transaction || transaction.status !== 'pending_user_transfer_start') {
+        return;
+      }
+
+      const updated = await database.updateTransactionStatus(
+        transactionIdValue,
+        'expired',
+        'pending_user_transfer_start',
+      );
+      if (!updated) return;
+
+      await this.notifyTransactionStatusChange(
+        { ...transaction, status: 'expired' },
+        transaction.status,
+        'expired',
+      );
       return;
     }
 
     if (job.type === 'process_watcher_task') {
-      const watcherTaskIdValue = job.payload.watcherTaskId;
+      const watcherTaskIdValue = payload.watcherTaskId;
       if (typeof watcherTaskIdValue !== 'string' || watcherTaskIdValue.length === 0) {
         return;
       }
@@ -275,7 +401,7 @@ export class AnchorInstance {
     }
 
     if (job.type === 'cleanup_records') {
-      const retentionDaysValue = job.payload.retentionDays;
+      const retentionDaysValue = payload.retentionDays;
       if (typeof retentionDaysValue !== 'number' || !Number.isFinite(retentionDaysValue)) {
         return;
       }
@@ -284,6 +410,27 @@ export class AnchorInstance {
       const cutoffIso = new Date(cutoffMs).toISOString();
       await database.cleanupOldRecords(cutoffIso);
       return;
+    }
+
+    throw new Error(`Unknown queue job type: ${String(job.type)}`);
+  }
+
+  private async notifyTransactionStatusChange(
+    transaction: InteractiveTransactionRecord,
+    oldStatus: InteractiveTransactionRecord['status'],
+    newStatus: InteractiveTransactionRecord['status'],
+  ): Promise<void> {
+    for (const plugin of this.plugins.values()) {
+      const hook = plugin.hooks?.onTransactionStatusChange;
+      if (!hook) continue;
+
+      try {
+        await hook(transaction, oldStatus, newStatus);
+      } catch (error) {
+        // The in-memory queue is best-effort and drops failed jobs without retry.
+        // Log hook failures and continue so one plugin cannot block other hooks.
+        console.error(`[AnchorKit] Plugin "${plugin.id}" transaction status hook failed`, error);
+      }
     }
   }
 }

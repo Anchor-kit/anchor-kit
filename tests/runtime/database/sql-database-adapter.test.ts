@@ -52,7 +52,15 @@ describe('SqlDatabaseAdapter (sqlite)', () => {
     expect(stored?.account).toBe('GB7W6F6S6LFQXCNHZVKI53ZJHULPF4E66YW2LJ3F4PAEPGZF5FY2B7ZB');
     expect(stored?.consumedAt).toBeNull();
 
-    await adapter.markAuthChallengeConsumed('challenge-1');
+    const firstConsume = await adapter.markAuthChallengeConsumed('challenge-1');
+    expect(firstConsume).toBe(true);
+
+    const secondConsume = await adapter.markAuthChallengeConsumed('challenge-1');
+    expect(secondConsume).toBe(false);
+
+    const nonExistentConsume = await adapter.markAuthChallengeConsumed('non-existent');
+    expect(nonExistentConsume).toBe(false);
+
     const consumed = await adapter.getAuthChallengeByChallenge('live-test-challenge');
     expect(consumed).not.toBeNull();
     expect(consumed?.consumedAt).toEqual(expect.any(String));
@@ -224,6 +232,18 @@ describe('SqlDatabaseAdapter (sqlite)', () => {
       statusCode: 201,
       responseBody: '{"status":"complete"}',
     });
+  });
+
+  it('creates indexes for watcher and retention queries', async () => {
+    const sqlite = (adapter as unknown as { sqlite: Database }).sqlite;
+    const indexes = sqlite
+      .prepare("SELECT name FROM sqlite_master WHERE type = 'index'")
+      .all() as Array<{ name: string }>;
+    const indexNames = indexes.map((row) => row.name);
+
+    expect(indexNames).toContain('idx_watcher_tasks_status_created_at');
+    expect(indexNames).toContain('idx_webhook_events_status_created_at');
+    expect(indexNames).toContain('idx_auth_challenges_expires_at');
   });
 
   it('preserves records when migrations run twice', async () => {
