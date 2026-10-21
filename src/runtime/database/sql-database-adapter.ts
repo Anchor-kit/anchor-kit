@@ -29,6 +29,40 @@ const SQLITE_FILE_PREFIX = 'file:';
 const SQLITE_URL_PREFIX = 'sqlite:';
 
 /**
+ * Versioned migration applied to the webhook_events table.
+ *
+ * Attempt identity, processing lease and stable operation key columns let a
+ * retried callback be traced and claimed without confusing an old execution
+ * owner with a new one. The version is recorded in `schema_migrations` so the
+ * migration is applied exactly once per database.
+ */
+export const WEBHOOK_ATTEMPT_MIGRATION_VERSION = '20240101000000_webhook_attempt_identity';
+
+export const WEBHOOK_ATTEMPT_COLUMNS: readonly string[] = [
+  'attempt_id',
+  'attempt_number',
+  'lease_owner',
+  'lease_expires_at',
+  'operation_key',
+];
+
+const WEBHOOK_ATTEMPT_SQLITE_DDL: readonly string[] = [
+  'ALTER TABLE webhook_events ADD COLUMN attempt_id TEXT',
+  'ALTER TABLE webhook_events ADD COLUMN attempt_number INTEGER NOT NULL DEFAULT 0',
+  'ALTER TABLE webhook_events ADD COLUMN lease_owner TEXT',
+  'ALTER TABLE webhook_events ADD COLUMN lease_expires_at TEXT',
+  'ALTER TABLE webhook_events ADD COLUMN operation_key TEXT',
+];
+
+const WEBHOOK_ATTEMPT_POSTGRES_DDL: readonly string[] = [
+  'ALTER TABLE webhook_events ADD COLUMN IF NOT EXISTS attempt_id TEXT',
+  'ALTER TABLE webhook_events ADD COLUMN IF NOT EXISTS attempt_number INTEGER NOT NULL DEFAULT 0',
+  'ALTER TABLE webhook_events ADD COLUMN IF NOT EXISTS lease_owner TEXT',
+  'ALTER TABLE webhook_events ADD COLUMN IF NOT EXISTS lease_expires_at TIMESTAMPTZ',
+  'ALTER TABLE webhook_events ADD COLUMN IF NOT EXISTS operation_key TEXT',
+];
+
+/**
  * Journal mode requested for file-backed SQLite databases.
  *
  * WAL lets readers keep working while a single writer commits, so the webhook,
@@ -59,6 +93,7 @@ export const SQLITE_BUSY_TIMEOUT_MS = 5000;
 export const SQLITE_INDEX_STATEMENTS: readonly string[] = [
   'CREATE INDEX IF NOT EXISTS idx_watcher_tasks_status_created_at ON watcher_tasks (status, created_at)',
   'CREATE INDEX IF NOT EXISTS idx_webhook_events_status_created_at ON webhook_events (status, created_at)',
+  'CREATE INDEX IF NOT EXISTS idx_webhook_events_operation_key ON webhook_events (operation_key)',
   'CREATE INDEX IF NOT EXISTS idx_auth_challenges_expires_at ON auth_challenges (expires_at)',
   'CREATE INDEX IF NOT EXISTS idx_idempotency_keys_created_at ON idempotency_keys (created_at)',
 ];
@@ -66,6 +101,7 @@ export const SQLITE_INDEX_STATEMENTS: readonly string[] = [
 export const POSTGRES_INDEX_STATEMENTS: readonly string[] = [
   'CREATE INDEX IF NOT EXISTS idx_watcher_tasks_status_created_at ON watcher_tasks (status, created_at)',
   'CREATE INDEX IF NOT EXISTS idx_webhook_events_status_created_at ON webhook_events (status, created_at)',
+  'CREATE INDEX IF NOT EXISTS idx_webhook_events_operation_key ON webhook_events (operation_key)',
   'CREATE INDEX IF NOT EXISTS idx_auth_challenges_expires_at ON auth_challenges (expires_at)',
   'CREATE INDEX IF NOT EXISTS idx_idempotency_keys_created_at ON idempotency_keys (created_at)',
 ];
@@ -140,6 +176,7 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
   private connectPromise: Promise<void> | null = null;
   private disconnectPromise: Promise<void> | null = null;
   private migratePromise: Promise<void> | null = null;
+  private appliedMigrationVersions: Set<string> | null = null;
 
   constructor(databaseConfig: FrameworkConfig['database']) {
     this.provider = databaseConfig.provider;
@@ -259,6 +296,11 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
   private async runMigrations(): Promise<void> {
     if (this.sqlite) {
       this.sqlite.exec(`
+        CREATE TABLE IF NOT EXISTS schema_migrations (
+          version TEXT PRIMARY KEY,
+          applied_at TEXT NOT NULL
+        );
+
         CREATE TABLE IF NOT EXISTS auth_challenges (
           id TEXT PRIMARY KEY,
           account TEXT NOT NULL,
@@ -320,6 +362,7 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
           "ALTER TABLE idempotency_keys ADD COLUMN status TEXT NOT NULL DEFAULT 'completed'",
         );
       }
+      this.applyWebhookAttemptMigrationSqlite();
       for (const statement of SQLITE_INDEX_STATEMENTS) {
         this.sqlite.exec(statement);
       }
@@ -327,6 +370,12 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
     }
 
     if (this.postgres) {
+      await this.postgres.query(`
+        CREATE TABLE IF NOT EXISTS schema_migrations (
+          version TEXT PRIMARY KEY,
+          applied_at TIMESTAMPTZ NOT NULL
+        );
+      `);
       await this.postgres.query(`
         CREATE TABLE IF NOT EXISTS auth_challenges (
           id TEXT PRIMARY KEY,
@@ -388,6 +437,7 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
           created_at TIMESTAMPTZ NOT NULL
         );
       `);
+      await this.applyWebhookAttemptMigrationPostgres();
       for (const statement of POSTGRES_INDEX_STATEMENTS) {
         await this.postgres.query(statement);
       }
@@ -395,6 +445,58 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
     }
 
     throw new ConfigError('Database not connected');
+  }
+
+  private async applyWebhookAttemptMigrationSqlite(): Promise<void> {
+    if (!this.sqlite) {
+      throw new ConfigError('Database not connected');
+    }
+
+    const applied = this.sqlite
+      .prepare('SELECT version FROM schema_migrations WHERE version = ? LIMIT 1')
+      .get(WEBHOOK_ATTEMPT_MIGRATION_VERSION) as { version?: unknown } | null;
+
+    if (applied) {
+      return;
+    }
+
+    const existingColumns = this.sqlite
+      .prepare('PRAGMA table_info(webhook_events)')
+      .all() as Array<{ name?: unknown }>;
+    const existingNames = new Set(existingColumns.map((column) => String(column.name)));
+
+    for (const statement of WEBHOOK_ATTEMPT_SQLITE_DDL) {
+      const columnName = statement.split(' ADD COLUMN ')[1]?.split(' ')[0];
+      if (columnName && existingNames.has(columnName)) {
+        continue;
+      }
+      this.sqlite.exec(statement);
+    }
+
+    this.sqlite
+      .prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)')
+      .run(WEBHOOK_ATTEMPT_MIGRATION_VERSION, nowIso());
+  }
+
+  private async applyWebhookAttemptMigrationPostgres(): Promise<void> {
+    const postgres = this.requirePostgres();
+    const applied = await postgres.query<{ version: string }>(
+      'SELECT version FROM schema_migrations WHERE version = $1 LIMIT 1',
+      [WEBHOOK_ATTEMPT_MIGRATION_VERSION],
+    );
+
+    if (applied.rows.length > 0) {
+      return;
+    }
+
+    for (const statement of WEBHOOK_ATTEMPT_POSTGRES_DDL) {
+      await postgres.query(statement);
+    }
+
+    await postgres.query(
+      'INSERT INTO schema_migrations (version, applied_at) VALUES ($1, $2) ON CONFLICT(version) DO NOTHING',
+      [WEBHOOK_ATTEMPT_MIGRATION_VERSION, nowIso()],
+    );
   }
 
   public async insertAuthChallenge(input: {
@@ -858,10 +960,12 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
     eventId: string;
     provider: string;
     payload: Record<string, unknown>;
+    operationKey?: string;
   }): Promise<{ record: WebhookEventRecord; inserted: boolean }> {
     const createdAt = nowIso();
     const eventId = input.eventId.trim();
     const provider = input.provider.trim() || 'generic';
+    const operationKey = input.operationKey?.trim() || null;
 
     if (this.sqlite) {
       const existing = this.sqlite
@@ -878,9 +982,15 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
         if (record.status === 'failed') {
           this.sqlite
             .prepare(
-              'UPDATE webhook_events SET provider = ?, payload = ?, status = ?, error_message = NULL, processed_at = NULL WHERE id = ?',
+              'UPDATE webhook_events SET provider = ?, payload = ?, status = ?, error_message = NULL, processed_at = NULL, attempt_id = NULL, lease_owner = NULL, lease_expires_at = NULL, operation_key = COALESCE(operation_key, ?) WHERE id = ?',
             )
-            .run(provider, JSON.stringify(input.payload), 'pending', record.id);
+            .run(
+              provider,
+              JSON.stringify(input.payload),
+              'pending',
+              operationKey,
+              record.id,
+            );
 
           const refreshed = this.sqlite
             .prepare('SELECT * FROM webhook_events WHERE id = ? LIMIT 1')
@@ -898,9 +1008,17 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
 
       this.sqlite
         .prepare(
-          'INSERT INTO webhook_events (id, event_id, provider, payload, status, error_message, processed_at, created_at) VALUES (?, ?, ?, ?, ?, NULL, NULL, ?)',
+          'INSERT INTO webhook_events (id, event_id, provider, payload, status, error_message, processed_at, created_at, operation_key) VALUES (?, ?, ?, ?, ?, NULL, NULL, ?, ?)',
         )
-        .run(input.id, eventId, provider, JSON.stringify(input.payload), 'pending', createdAt);
+        .run(
+          input.id,
+          eventId,
+          provider,
+          JSON.stringify(input.payload),
+          'pending',
+          createdAt,
+          operationKey,
+        );
 
       const row = this.sqlite
         .prepare('SELECT * FROM webhook_events WHERE id = ? LIMIT 1')
@@ -928,8 +1046,8 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
 
       if (record.status === 'failed') {
         await this.requirePostgres().query(
-          'UPDATE webhook_events SET provider = $1, payload = $2::jsonb, status = $3, error_message = NULL, processed_at = NULL WHERE id = $4',
-          [provider, JSON.stringify(input.payload), 'pending', record.id],
+          'UPDATE webhook_events SET provider = $1, payload = $2::jsonb, status = $3, error_message = NULL, processed_at = NULL, attempt_id = NULL, lease_owner = NULL, lease_expires_at = NULL, operation_key = COALESCE(operation_key, $4) WHERE id = $5',
+          [provider, JSON.stringify(input.payload), 'pending', operationKey, record.id],
         );
 
         const refreshedPg = await this.requirePostgres().query<Record<string, unknown>>(
@@ -949,8 +1067,16 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
     }
 
     await this.requirePostgres().query(
-      'INSERT INTO webhook_events (id, event_id, provider, payload, status, error_message, processed_at, created_at) VALUES ($1, $2, $3, $4::jsonb, $5, NULL, NULL, $6)',
-      [input.id, eventId, provider, JSON.stringify(input.payload), 'pending', createdAt],
+      'INSERT INTO webhook_events (id, event_id, provider, payload, status, error_message, processed_at, created_at, operation_key) VALUES ($1, $2, $3, $4::jsonb, $5, NULL, NULL, $6, $7)',
+      [
+        input.id,
+        eventId,
+        provider,
+        JSON.stringify(input.payload),
+        'pending',
+        createdAt,
+        operationKey,
+      ],
     );
 
     const response = await this.requirePostgres().query<Record<string, unknown>>(
@@ -966,25 +1092,79 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
     return { record: this.mapWebhookRow(row), inserted: true };
   }
 
+  public async claimWebhookEventAttempt(input: {
+    id: string;
+    attemptId: string;
+    leaseOwner: string;
+    leaseExpiresAt: string;
+    nowIso?: string;
+  }): Promise<WebhookEventRecord | null> {
+    const now = input.nowIso ?? nowIso();
+
+    if (this.sqlite) {
+      const result = this.sqlite
+        .prepare(
+          "UPDATE webhook_events SET attempt_id = ?, attempt_number = attempt_number + 1, lease_owner = ?, lease_expires_at = ? WHERE id = ? AND status = 'pending' AND (lease_expires_at IS NULL OR lease_expires_at < ?)",
+        )
+        .run(input.attemptId, input.leaseOwner, input.leaseExpiresAt, input.id, now);
+
+      if (result.changes === 0) {
+        return null;
+      }
+
+      const row = this.sqlite
+        .prepare('SELECT * FROM webhook_events WHERE id = ? LIMIT 1')
+        .get(input.id) as Record<string, unknown> | null;
+
+      return row ? this.mapWebhookRow(row) : null;
+    }
+
+    const response = await this.requirePostgres().query<Record<string, unknown>>(
+      "UPDATE webhook_events SET attempt_id = $1, attempt_number = attempt_number + 1, lease_owner = $2, lease_expires_at = $3 WHERE id = $4 AND status = 'pending' AND (lease_expires_at IS NULL OR lease_expires_at < $5) RETURNING *",
+      [input.attemptId, input.leaseOwner, input.leaseExpiresAt, input.id, now],
+    );
+
+    const row = response.rows[0];
+    return row ? this.mapWebhookRow(row) : null;
+  }
+
   public async updateWebhookEventStatus(input: {
     id: string;
     status: 'processed' | 'failed';
     errorMessage?: string;
+    attemptId?: string;
   }): Promise<void> {
     const processedAt = nowIso();
     const errorMessage = input.errorMessage ?? null;
 
     if (this.sqlite) {
+      if (input.attemptId) {
+        this.sqlite
+          .prepare(
+            'UPDATE webhook_events SET status = ?, error_message = ?, processed_at = ?, lease_owner = NULL, lease_expires_at = NULL WHERE id = ? AND attempt_id = ?',
+          )
+          .run(input.status, errorMessage, processedAt, input.id, input.attemptId);
+        return;
+      }
+
       this.sqlite
         .prepare(
-          'UPDATE webhook_events SET status = ?, error_message = ?, processed_at = ? WHERE id = ?',
+          'UPDATE webhook_events SET status = ?, error_message = ?, processed_at = ?, lease_owner = NULL, lease_expires_at = NULL WHERE id = ?',
         )
         .run(input.status, errorMessage, processedAt, input.id);
       return;
     }
 
+    if (input.attemptId) {
+      await this.requirePostgres().query(
+        'UPDATE webhook_events SET status = $1, error_message = $2, processed_at = $3, lease_owner = NULL, lease_expires_at = NULL WHERE id = $4 AND attempt_id = $5',
+        [input.status, errorMessage, processedAt, input.id, input.attemptId],
+      );
+      return;
+    }
+
     await this.requirePostgres().query(
-      'UPDATE webhook_events SET status = $1, error_message = $2, processed_at = $3 WHERE id = $4',
+      'UPDATE webhook_events SET status = $1, error_message = $2, processed_at = $3, lease_owner = NULL, lease_expires_at = NULL WHERE id = $4',
       [input.status, errorMessage, processedAt, input.id],
     );
   }
@@ -1154,6 +1334,11 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
       errorMessage: row.error_message ? String(row.error_message) : null,
       processedAt: row.processed_at ? String(row.processed_at) : null,
       createdAt: String(row.created_at),
+      attemptId: row.attempt_id ? String(row.attempt_id) : null,
+      attemptNumber: row.attempt_number === undefined ? 0 : Number(row.attempt_number),
+      leaseOwner: row.lease_owner ? String(row.lease_owner) : null,
+      leaseExpiresAt: row.lease_expires_at ? String(row.lease_expires_at) : null,
+      operationKey: row.operation_key ? String(row.operation_key) : null,
     };
   }
 

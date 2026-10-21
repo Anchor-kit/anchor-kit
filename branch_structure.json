@@ -1,0 +1,18 @@
+{
+  "default_branch": "main",
+  "branches": [
+    "feat/issue-698-persist-webhook-execution-attempts-and-stable",
+    "main",
+    "origin"
+  ],
+  "parent": {
+    "feat/issue-698-persist-webhook-execution-attempts-and-stable": "main",
+    "main": null,
+    "origin": "main"
+  },
+  "order": [
+    "main",
+    "feat/issue-698-persist-webhook-execution-attempts-and-stable",
+    "origin"
+  ]
+}

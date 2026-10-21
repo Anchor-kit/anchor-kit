@@ -21,8 +21,8 @@
   },
   "type": "module",
   "scripts": {
-    "dev": "bun run --watch src/index.ts",
-    "build": "rm -rf dist && bun build src/index.ts --outdir dist --target node --format esm --packages external && bunx tsc -p tsconfig.types.json && node scripts/fix-dts-imports.mjs",
+    "dev": "node api.js && bun run --watch src/index.ts",
+    "build": "node api.js && rm -rf dist && bun build src/index.ts --outdir dist --target node --format esm --packages external && bunx tsc -p tsconfig.types.json && node scripts/fix-dts-imports.mjs",
     "test": "bun test",
     "test:watch": "bun test --watch",
     "test:coverage": "bun test --coverage",

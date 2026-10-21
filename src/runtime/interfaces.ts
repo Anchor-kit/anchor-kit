@@ -23,7 +23,7 @@ export interface InteractiveTransactionRecord {
 export interface IdempotencyRecord {
   id: string;
   scope: string;
-  idempotencyKey: string;
+ idempotencyKey: string;
   requestHash: string;
   status: 'pending' | 'completed';
   statusCode: number;
@@ -40,6 +40,16 @@ export interface WebhookEventRecord {
   errorMessage: string | null;
   processedAt: string | null;
   createdAt: string;
+  /** Stable identity for the external operation this event represents. Reused across all attempts and retries. */
+  operationKey: string;
+  /** Monotonically incrementing attempt counter for this event. */
+  attemptCount: number;
+  /** Identity of the currently claimed attempt (if any). */
+  attemptId: string | null;
+  /** Owner token of the current processing lease (if any). */
+  leaseOwner: string | null;
+  /** Expiration instant of the current processing lease (if any). */
+  leaseExpiresAt: string | null;
 }
 
 export interface WatcherTaskRecord {
@@ -50,6 +60,26 @@ export interface WatcherTaskRecord {
   errorMessage: string | null;
   processedAt: string | null;
   createdAt: string;
+}
+
+/** Typed context passed to the webhook callback for a specific attempt. */
+export interface WebhookCallbackContext {
+  /** Stable operation key shared by all attempts for this event. */
+  operationKey: string;
+  /** Unique identity of this attempt. */
+  attemptId: string;
+  /** Monotonically increasing attempt counter for this event. */
+  attemptCount: number;
+  /** Owner token of the processing lease held by this attempt. */
+  leaseOwner: string;
+  /** Expiration instant of the processing lease held by this attempt. */
+  leaseExpiresAt: string;
+  /** Time the underlying webhook event was received. */
+  receivedAt: string;
+  /** Optional raw request body. */
+  rawBody?: string | Buffer | Uint8Array;
+  /** Optional signature provided with the request. */
+  signature?: string;
 }
 
 export interface DatabaseAdapter {
@@ -132,7 +162,30 @@ export interface DatabaseAdapter {
     eventId: string;
     provider: string;
     payload: Record<string, unknown>;
+    /** Stable operation key for this event. Must be reused by all attempts and retries. */
+    operationKey: string;
   }): Promise<{ record: WebhookEventRecord; inserted: boolean }>;
+  /**
+   * Atomically claims the next attempt for a webhook event. Returns null when the event is already
+   * processed or is currently leased by another owner. On success the returned record carries a
+   * fresh attemptId, attemptCount, leaseOwner and leaseExpiresAt.
+   */
+  claimWebhookAttempt(input: {
+    id: string;
+    leaseOwner: string;
+    leaseDurationMs: number;
+  }): Promise<WebhookEventRecord | null>;
+  /**
+   * Records the final outcome of an attempt. Only the current lease owner may complete the
+   * attempt; stale owners receive false and must not retry the financial side effect.
+   */
+  completeWebhookAttempt(input: {
+    id: string;
+    attemptId: string;
+    leaseOwner: string;
+    status: 'processed' | 'failed';
+    errorMessage?: string;
+  }): Promise<boolean>;
   updateWebhookEventStatus(input: {
     id: string;
     status: 'processed' | 'failed';
@@ -189,5 +242,11 @@ export interface WebhookProcessor {
     eventId: string;
     provider: string;
     status?: WebhookEventRecord['status'];
+    /** Stable operation key for this event (reused by all attempts). */
+    operationKey?: string;
+    /** Identity of the attempt that was claimed for this call, if any. */
+    attemptId?: string;
+    /** Monotonically increasing attempt counter for this event. */
+    attemptCount?: number;
   }>;
 }
