@@ -28,7 +28,7 @@ jobs:
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
         with:
-          bun-version: latest
+          bun-version: 1.2.21
 
       - name: Install dependencies
         run: bun install --frozen-lockfile
@@ -41,6 +41,17 @@ jobs:
 
       - name: Test
         run: bun run test
+
+      - name: Verify pinned Bun version
+        run: |
+          EXPECTED_BUN_VERSION="1.2.21"
+          ACTUAL_BUN_VERSION="$(bun --version)"
+          echo "Expected Bun: ${EXPECTED_BUN_VERSION}"
+          echo "Actual Bun: ${ACTUAL_BUN_VERSION}"
+          if [ "${ACTUAL_BUN_VERSION}" != "${EXPECTED_BUN_VERSION}" ]; then
+            echo "Bun version mismatch. Refusing publish."
+            exit 1
+          fi
 
       - name: Verify release tag matches package version
         env:
