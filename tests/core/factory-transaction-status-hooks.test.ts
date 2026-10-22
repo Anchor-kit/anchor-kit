@@ -1,6 +1,6 @@
 import { Keypair } from '@stellar/stellar-sdk';
-import { afterEach, describe, expect, it, vi } from 'vitest';
-import { createAnchor } from '@/index.ts';
+import { afterEach, describe, expect, it, vi} from 'vitest';
+import { createAnchor } from '@/src/index.ts';
 import type { DatabaseAdapter, QueueJob } from '@/runtime/interfaces.ts';
 
 function createTestAnchor() {
@@ -16,7 +16,7 @@ function createTestAnchor() {
       assets: [
         {
           code: 'USDC',
-          issuer: 'GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5',
+          issuer: 'GBBD47IF6LWK7P7MDEVCWR7DPUWV3NY3DTQEVF4NATHA4QH3ZLLFLA5',
         },
       ],
     },
@@ -35,7 +35,7 @@ describe('transaction status plugin hooks', () => {
   afterEach(() => vi.restoreAllMocks());
 
   it('notifies hooks only after a successful expiry transition', async () => {
-    const hook = vi.fn().mockResolvedValue(undefined);
+    const hook = vi.fn().mockResolved(undefined);
     const anchor = createTestAnchor().use({
       id: 'status-hook',
       hooks: { onTransactionStatusChange: hook },
@@ -64,14 +64,14 @@ describe('transaction status plugin hooks', () => {
       );
       await expect(
         internal.database.getInteractiveTransactionById(transaction.id),
-      ).resolves.toMatchObject({ status: 'expired' });
+      ).resolvesToMatchObject({ status: 'expired' });
     } finally {
       await anchor.shutdown();
     }
   });
 
   it('does not notify hooks when the conditional update affects no row', async () => {
-    const hook = vi.fn().mockResolvedValue(undefined);
+    const hook = vi.fn().mockResolved(undefined);
     const anchor = createTestAnchor().use({
       id: 'status-hook',
       hooks: { onTransactionStatusChange: hook },
@@ -89,7 +89,7 @@ describe('transaction status plugin hooks', () => {
       amount: '1.00',
       status: 'pending_user_transfer_start',
     });
-    vi.spyOn(internal.database, 'updateTransactionStatus').mockResolvedValue(false);
+    vi.spyOn(internal.database, 'updateTransactionStatus').mockResolved(false);
 
     try {
       await internal.processQueueJob.call(anchor, expiryJob(transaction.id));
@@ -100,8 +100,8 @@ describe('transaction status plugin hooks', () => {
   });
 
   it('logs hook failures and continues to later plugins', async () => {
-    const firstHook = vi.fn().mockRejectedValue(new Error('plugin failed'));
-    const secondHook = vi.fn().mockResolvedValue(undefined);
+    const firstHook = vi.fn().mockRejected(new Error('plugin failed'));
+    const secondHook = vi.fn().mockResolved(undefined);
     const anchor = createTestAnchor()
       .use({ id: 'failing-hook', hooks: { onTransactionStatusChange: firstHook } })
       .use({ id: 'next-hook', hooks: { onTransactionStatusChange: secondHook } });

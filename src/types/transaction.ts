@@ -224,6 +224,9 @@ export interface Transaction {
   /** ISO 8601 timestamp when transaction record was last updated */
   updated_at?: string;
 
+  /** Durable audit trail of committed status transitions, oldest first */
+  transitions?: TransactionTransition[];
+
   // ============================================
   // Optional Rail-Specific Fields
   // ============================================
@@ -255,3 +258,31 @@ export interface Transaction {
   /** Refund details if transaction was refunded */
   refunds?: RefundInfo;
 }
+
+/**
+ * Durable audit record for a single committed status transition.
+ * Exactly one entry is persisted per committed transition and its hook is
+ * dispatched with a recoverable (at-least-once, deduplicated) policy.
+ */
+export interface TransactionTransition {
+  /** Monotonic sequence number scoped to the transaction (1-based) */
+  sequence: number;
+
+  /** Status before the transition (absent for the initial state) */
+  from_status?: TransactionStatus;
+
+  /** Status after the transition */
+  to_status: TransactionStatus;
+
+  /** Human-readable reason for the transition */
+  reason?: string;
+
+  /** Operation identity that caused the transition (idempotency key) */
+  operation_id: string;
+
+  /** ISO 8601 timestamp when the transition was committed */
+  occurred_at: string;
+}
+
+/** Alias for consumers that prefer an explicit record name. */
+export type TransactionTransitionRecord = TransactionTransition;

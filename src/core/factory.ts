@@ -17,7 +17,7 @@ import type {
 import { InMemoryQueueAdapter } from '../runtime/queue/in-memory-queue.ts';
 import { TransactionWatcher } from '../runtime/watchers/transaction-watcher.ts';
 import { DefaultWebhookProcessor } from '../runtime/webhooks/default-webhook-processor.ts';
-import type { AnchorKitConfig } from '../types/config.ts';
+import type { AnchorItConfig } from '../types/config.ts';
 import type { AnchorPlugin, AnchorPluginHooks } from '@/types/plugin.ts';
 
 export interface CreateAnchorOptions {
@@ -269,7 +269,7 @@ export class AnchorInstance {
    * Get a registered plugin by its ID.
    */
   public getPlugin<T extends AnchorPlugin>(id: string): T | undefined {
-    return this.plugins.get(id) as T;
+    return this.plugins.get(id) as T | undefined;
   }
 
   /**
@@ -367,65 +367,7 @@ export class AnchorInstance {
     }
 
     if (job.type === 'process_watcher_task') {
-      const watcherTaskIdValue = payload.watcherTaskId;
-      if (typeof watcherTaskIdValue !== 'string' || watcherTaskIdValue.length === 0) {
-        return;
-      }
-
-      await database.updateWatcherTaskStatus({
-        id: watcherTaskIdValue,
-        status: 'processed',
-      });
-      return;
-    }
-
-    if (job.type === 'cleanup_records') {
-      const retentionDaysValue = payload.retentionDays;
-      if (typeof retentionDaysValue !== 'number' || !Number.isFinite(retentionDaysValue)) {
-        return;
-      }
-
-      const cutoffMs = Date.now() - retentionDaysValue * 24 * 60 * 60 * 1000;
-      const cutoffIso = new Date(cutoffMs).toISOString();
-      await database.cleanupOldRecords(cutoffIso);
-      return;
-    }
-
-    throw new Error(`Unknown queue job type: ${String(job.type)}`);
-  }
-
-  private async notifyTransactionStatusChange(
-    transaction: InteractiveTransactionRecord,
-    oldStatus: InteractiveTransactionRecord['status'],
-    newStatus: InteractiveTransactionRecord['status'],
-  ): Promise<void> {
-    for (const plugin of this.plugins.values()) {
-      const hook = plugin.hooks?.onTransactionStatusChange;
-      if (!hook) continue;
-
-      try {
-        await hook(transaction, oldStatus, newStatus);
-      } catch (error) {
-        // The in-memory queue is best-effort and drops failed jobs without retry.
-        // Log hook failures and continue so one plugin cannot block other hooks.
-        console.error(`[AnchorKit] Plugin "${plugin.id}" transaction status hook failed`, error);
-      }
+      const watcherTaskIdValue = payload.watcher
     }
   }
 }
-
-/**
- * Create a new Anchor-Kit instance.
- *
- * A supplied database adapter is created and configured by the caller. The
- * instance manages its lifecycle: connect and migrate once per init cycle,
- * then disconnect once when that cycle shuts down.
- */
-export function createAnchor(
-  config: Partial<AnchorKitConfig>,
-  options: CreateAnchorOptions = {},
-): AnchorInstance {
-  return new AnchorInstance(config, options);
-}
-
-export { makeSqliteDbUrlForTests };

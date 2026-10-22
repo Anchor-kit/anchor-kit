@@ -51,6 +51,31 @@ export interface InteractiveTransactionRecord {
   updatedAt: string;
 }
 
+export interface TransactionTransitionRecord {
+  id: string;
+  transactionId: string;
+  operationId: string;
+  fromStatus: TransactionStatus | null;
+  toStatus: TransactionStatus;
+  reason: string | null;
+  createdAt: string;
+}
+
+export type TransitionRecord = TransactionTransitionRecord;
+
+export interface TransactionTransitionHookDispatchRecord {
+  id: string;
+  transitionId: string;
+  pluginId: string;
+  status: 'pending' | 'dispatched' | 'failed';
+  attempts: number;
+  errorMessage: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export type TransitionHookDispatchRecord = TransitionTransitionHookDispatchRecord;
+
 export interface IdempotencyRecord {
   id: string;
   scope: string;
@@ -121,6 +146,41 @@ export interface DatabaseAdapter {
     status: TransactionStatus,
     expectedStatus?: TransactionStatus,
   ): Promise<boolean>;
+
+  /**
+   * Atomically apply a transition and record its audit entry. The audit entry is
+   * idempotent on (transactionId, operationId): replaying the same operation returns
+   * the existing transition without creating a duplicate and without re-applying the
+   * status update. Returns the committed transition record, or null when the
+   * conditional update affected no row and no prior transition exists.
+   */
+  applyTransactionTransition(input: {
+    transitionId: string;
+    transactionId: string;
+    operationId: string;
+    fromStatus: TransactionStatus;
+    toStatus: TransactionStatus;
+    reason?: string;
+  }): Promise<TransactionTransitionRecord | null>;
+  getTransitionByOperationId(
+    transactionId: string,
+    operationId: string,
+  ): Promise<TransitionRecord | null>;
+  listTransitionsByTransactionId(
+    transactionId: string,
+  ): Promise<TransitionRecord[]>;
+
+  /** Record that a plugin hook for a transition is pending dispatch. Idempotent on (transitionId, pluginId). */
+  ensureTransitionHookDispatch(input: {
+    id: string;
+    transitionId: string;
+    pluginId: string;
+  }): Promise<TransitionHookDispatchRecord>;
+  markTransitionHookDispatched(id: string): Promise<void>;
+  markTransitionHookDispatchFailed(id: string, errorMessage: string): Promise<void>;
+  listPendingTransitionHookDispatches(
+    limit: number,
+  ): Promise<TransitionHookDispatchRecord[]>;
 
   getIdempotencyRecord(scope: string, idempotencyKey: string): Promise<IdempotencyRecord | null>;
   insertOrGetIdempotencyRecord(input: {
@@ -196,7 +256,7 @@ export interface DatabaseAdapter {
     operationId: string;
     payloadRef: string;
   }): Promise<{ record: SettlementJobRecord; inserted: boolean }>;
-  getSettlementJobByOperationId(operationId: string): Promise<SettlementJobRecord | null>;
+  getSettlementJobyOperationId(operationId: string): Promise<SettlementJobRecord | null>;
   listPendingSettlementJobs(limit: number): Promise<SettlementJobRecord[]>;
   updateSettlementJobStatus(input: {
     operationId: string;
@@ -206,9 +266,10 @@ export interface DatabaseAdapter {
 }
 
 export type QueueJob =
-  | { type: 'expire_transaction'; payload: { transactionId: string } }
+  | { type: 'expire_transaction'; payload: { transactionId: string; operationId?: string } }
   | { type: 'process_watcher_task'; payload: { watcherTaskId: string } }
-  | { type: 'cleanup_records'; payload: { retentionDays: number } };
+  | { type: 'cleanup_records'; payload: { retentionDays: number } }
+  | { type: 'dispatch_transition_hook'; payload: { transitionId: string } };
 
 export interface QueueDrainStatus {
   readonly pending: number;

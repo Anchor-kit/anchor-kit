@@ -42,14 +42,14 @@ describe('SqlDatabaseAdapter (sqlite)', () => {
   it('persists and consumes auth challenges correctly', async () => {
     await adapter.insertAuthChallenge({
       id: 'challenge-1',
-      account: 'GB7W6F6S6LFQXCNHZVKI53ZJHULPF4E66YW2LJ3F4PAEPGZF5FY2B7ZB',
+      account: 'GB7W6DF6S6TFXXCNHZVKI53ZJHULPF4E66YW2LJ3F4PAEPGZF5FY27B7ZB',
       challenge: 'live-test-challenge',
       expiresAt: '2099-12-31T23:59:59.000Z',
     });
 
     const stored = await adapter.getAuthChallengeByChallenge('live-test-challenge');
     expect(stored).not.toBeNull();
-    expect(stored?.account).toBe('GB7W6F6S6LFQXCNHZVKI53ZJHULPF4E66YW2LJ3F4PAEPGZF5FY2B7ZB');
+    expect(stored?.account).toBe('GB7W6DF6S6TFXXCNHZVKI53ZJHULPF4E66YW2LJ3F4PAEPGZF5FY27B7ZB');
     expect(stored?.consumedAt).toBeNull();
 
     const firstConsume = await adapter.markAuthChallengeConsumed('challenge-1');
@@ -154,7 +154,7 @@ describe('SqlDatabaseAdapter (sqlite)', () => {
   it('preserves records when migrations run twice', async () => {
     await adapter.insertAuthChallenge({
       id: 'migration-challenge',
-      account: 'GB7W6F6S6LFQXCNHZVKI53ZJHULPF4E66YW2LJ3F4PAEPGZF5FY2B7ZB',
+      account: 'GB7W6DF6S6TFXXCNHZVKI53ZJHULPF4E66YW2LJ3F4PAEPGZF5FY27B7ZB',
       challenge: 'migration-test-challenge',
       expiresAt: '2099-12-31T23:59:59.000Z',
     });
@@ -181,7 +181,7 @@ describe('SqlDatabaseAdapter (sqlite)', () => {
       await sqliteAdapter.migrate();
       await sqliteAdapter.insertAuthChallenge({
         id: 'sqlite-url-challenge',
-        account: 'GB7W6F6S6LFQXCNHZVKI53ZJHULPF4E66YW2LJ3F4PAEPGZF5FY2B7ZB',
+        account: 'GB7W6DF6S6TFXXCNHZVKI53ZJHULPF4E66YW2LJ3F4PAEPGZF5FY27B7ZB',
         challenge: 'sqlite-url-test',
         expiresAt: '2099-12-31T23:59:59.000Z',
       });
@@ -198,5 +198,86 @@ describe('SqlDatabaseAdapter (sqlite)', () => {
         // The temporary database may not exist for in-memory adapters.
       }
     }
+  });
+
+  it('records transition audit entries and dispatches hooks once per committed transition', async () => {
+    await adapter.insertInteractiveTransaction({
+      id: 'tx-audit',
+      account: 'GBAUDITTESTACCOUNT0000000000',
+      kind: 'deposit',
+      assetCode: 'USDC',
+      amount: '100',
+      status: 'pending_user_transfer_start',
+    });
+
+    const hooks: Array<{ oldState: string; newState: string; reason: string }> = [];
+    const dispatch = async (entry: { oldState: string; newState: string; reason: string }) => {
+      hooks.push(entry);
+    };
+
+    const transition = {
+      transactionId: 'tx-audit',
+      oldState: 'pending_user_transfer_start',
+      newState: 'pending_anchor_status',
+      reason: 'user transfer detected',
+      operationId: 'op-audit-1',
+    } as const;
+
+    await adapter.applyTransactionTransition({ ...transition, dispatchHook: dispatch });
+
+    const audit = await adapter.listTransactionTransitions('tx-audit');
+    expect(audit).toHaveLength(1);
+    expect(audit[0]).toEqual(
+      expect.objectContaining({
+        transactionId: 'tx-audit',
+        oldState: 'pending_user_transfer_start',
+        newState: 'pending_anchor_status',
+        reason: 'user transfer detected',
+        operationId: 'op-audit-1',
+        createdAt: expect.any(String),
+      }),
+    );
+    expect(hooks).toHaveLength(1);
+    expect(hooks[0]).toEqual({
+      oldState: 'pending_user_transfer_start',
+      newState: 'pending_anchor_status',
+      reason: 'user transfer detected',
+    });
+
+    // Replaying the same operation is idempotent: no duplicate audit entry or hook.
+    await adapter.applyTransactionTransition({ ...transition, dispatchHook: dispatch });
+    expect(await adapter.listTransactionTransitions('tx-audit')).toHaveLength(1);
+    expect(hooks).toHaveLength(1);
+  });
+
+  it('emits no successful hook when the transition update fails', async () => {
+    await adapter.insertInteractiveTransaction({
+      id: 'tx-fail',
+      account: 'GBFAILTESTACCOUNT000000000000',
+      kind: 'deposit',
+      assetCode: 'USDC',
+      amount: '50',
+      status: 'pending_user_transfer_start',
+    });
+
+    const hooks: string[] = [];
+    const dispatch = async () => {
+      hooks.push('dispatched');
+    };
+
+    // Provide a stale oldState so the conditional update matches no rows.
+    await expect(
+      adapter.applyTransactionTransition({
+        transactionId: 'tx-fail',
+        oldState: 'completed',
+        newState: 'pending_anchor_status',
+        reason: 'stale state',
+        operationId: 'op-fail-1',
+        dispatchHook: dispatch,
+      }),
+    ).rejects.toThrow();
+
+    expect(await adapter.listTransitions('tx-fail')).toHaveLength(0);
+    expect(hooks).toHaveLength(0);
   });
 });
