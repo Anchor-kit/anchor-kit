@@ -1,15 +1,16 @@
-import { ConfigError, MalformedPersistedDataError } from '@/core/errors.ts';
+import { ConfigError, MalformedPersistedDataError } from '../../core/errors.ts';
 import type {
   AuthChallengeRecord,
   DatabaseAdapter,
   IdempotencyRecord,
   InteractiveTransactionRecord,
+  SettlementJobRecord,
   WatcherTaskRecord,
   WebhookEventRecord,
 } from '@/runtime/interfaces.ts';
 import type { FrameworkConfig } from '@/types/config.ts';
-import { isTransactionStatus, type TransactionStatus } from '@/types/transaction-status.ts';
-import { Database } from 'bun:sqlite';
+import { isTransactionStatus, type TransactionStatus } from '../../types/transaction-status.ts';
+import type { Database } from 'bun:sqlite';
 import { randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -61,6 +62,7 @@ export const SQLITE_INDEX_STATEMENTS: readonly string[] = [
   'CREATE INDEX IF NOT EXISTS idx_webhook_events_status_created_at ON webhook_events (status, created_at)',
   'CREATE INDEX IF NOT EXISTS idx_auth_challenges_expires_at ON auth_challenges (expires_at)',
   'CREATE INDEX IF NOT EXISTS idx_idempotency_keys_created_at ON idempotency_keys (created_at)',
+  'CREATE INDEX IF NOT EXISTS idx_settlement_jobs_status_created_at ON settlement_jobs (status, created_at)',
 ];
 
 export const POSTGRES_INDEX_STATEMENTS: readonly string[] = [
@@ -68,6 +70,7 @@ export const POSTGRES_INDEX_STATEMENTS: readonly string[] = [
   'CREATE INDEX IF NOT EXISTS idx_webhook_events_status_created_at ON webhook_events (status, created_at)',
   'CREATE INDEX IF NOT EXISTS idx_auth_challenges_expires_at ON auth_challenges (expires_at)',
   'CREATE INDEX IF NOT EXISTS idx_idempotency_keys_created_at ON idempotency_keys (created_at)',
+  'CREATE INDEX IF NOT EXISTS idx_settlement_jobs_status_created_at ON settlement_jobs (status, created_at)',
 ];
 
 function nowIso(): string {
@@ -110,26 +113,46 @@ function configureSqliteConnection(database: SqliteLike, path: string): void {
   database.exec(`PRAGMA journal_mode = ${SQLITE_JOURNAL_MODE};`);
 }
 
-function parseJsonObject(value: string): Record<string, unknown> {
-  let parsed: unknown;
+function parseJsonObject(value: unknown, parseSerializedText: boolean): Record<string, unknown> {
+  let parsed = value;
 
-  try {
-    parsed = JSON.parse(value);
-  } catch (error) {
-    throw new MalformedPersistedDataError(
-      `Malformed persisted JSON payload: ${error instanceof Error ? error.message : String(error)}`,
-      { value: value.slice(0, 200) },
-    );
+  if (parseSerializedText && typeof value === 'string') {
+    try {
+      parsed = JSON.parse(value);
+    } catch (error) {
+      throw new MalformedPersistedDataError(
+        `Malformed persisted JSON payload: ${error instanceof Error ? error.message : String(error)}`,
+        { value: value.slice(0, 200) },
+      );
+    }
   }
 
-  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+  if (
+    !parsed ||
+    typeof parsed !== 'object' ||
+    Array.isArray(parsed) ||
+    (Object.getPrototypeOf(parsed) !== Object.prototype && Object.getPrototypeOf(parsed) !== null)
+  ) {
     throw new MalformedPersistedDataError(
       'Persisted JSON payload must decode to a plain object; arrays and primitive values are not allowed.',
-      { value: value.slice(0, 200) },
+      { valueType: Array.isArray(parsed) ? 'array' : typeof parsed },
     );
   }
 
   return parsed as Record<string, unknown>;
+}
+
+type PersistedTaskStatus = 'pending' | 'processed' | 'failed';
+
+function parsePersistedTaskStatus(
+  value: unknown,
+  recordType: 'webhook event' | 'watcher task',
+): PersistedTaskStatus {
+  if (value === 'pending' || value === 'processed' || value === 'failed') {
+    return value;
+  }
+
+  throw new MalformedPersistedDataError(`Invalid persisted ${recordType} status.`);
 }
 
 export class SqlDatabaseAdapter implements DatabaseAdapter {
@@ -160,7 +183,7 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
       try {
         if (this.provider === 'sqlite') {
           const path = toSqlitePath(this.url);
-          const database = new Database(path);
+          const database = await loadSqliteDatabase(path);
 
           try {
             configureSqliteConnection(database, path);
@@ -311,6 +334,15 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
           processed_at TEXT,
           created_at TEXT NOT NULL
         );
+
+        CREATE TABLE IF NOT EXISTS settlement_jobs (
+          id TEXT PRIMARY KEY,
+          operation_id TEXT NOT NULL UNIQUE,
+          payload_ref TEXT NOT NULL,
+          status TEXT NOT NULL CHECK (status IN ('pending', 'processing', 'completed', 'failed')),
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
       `);
       const idempotencyColumns = this.sqlite
         .prepare('PRAGMA table_info(idempotency_keys)')
@@ -386,6 +418,16 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
           error_message TEXT,
           processed_at TIMESTAMPTZ,
           created_at TIMESTAMPTZ NOT NULL
+        );
+      `);
+      await this.postgres.query(`
+        CREATE TABLE IF NOT EXISTS settlement_jobs (
+          id TEXT PRIMARY KEY,
+          operation_id TEXT NOT NULL UNIQUE,
+          payload_ref TEXT NOT NULL,
+          status TEXT NOT NULL CHECK (status IN ('pending', 'processing', 'completed', 'failed')),
+          created_at TIMESTAMPTZ NOT NULL,
+          updated_at TIMESTAMPTZ NOT NULL
         );
       `);
       for (const statement of POSTGRES_INDEX_STATEMENTS) {
@@ -876,11 +918,27 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
         }
 
         if (record.status === 'failed') {
-          this.sqlite
+          // Compare-and-set: only claim execution if the row is still 'failed'.
+          // A concurrent retry may have already flipped the status to 'pending',
+          // in which case changes === 0 and this caller loses the race.
+          const cas = this.sqlite
             .prepare(
-              'UPDATE webhook_events SET provider = ?, payload = ?, status = ?, error_message = NULL, processed_at = NULL WHERE id = ?',
+              "UPDATE webhook_events SET provider = ?, payload = ?, status = 'pending', error_message = NULL, processed_at = NULL WHERE id = ? AND status = 'failed'",
             )
-            .run(provider, JSON.stringify(input.payload), 'pending', record.id);
+            .run(provider, JSON.stringify(input.payload), record.id);
+
+          if (cas.changes === 0) {
+            // Lost the race – return the current stored record without executing callbacks.
+            const current = this.sqlite
+              .prepare('SELECT * FROM webhook_events WHERE id = ? LIMIT 1')
+              .get(record.id) as Record<string, unknown> | null;
+
+            if (!current) {
+              throw new ConfigError('Failed to retry failed webhook event');
+            }
+
+            return { record: this.mapWebhookRow(current), inserted: false };
+          }
 
           const refreshed = this.sqlite
             .prepare('SELECT * FROM webhook_events WHERE id = ? LIMIT 1')
@@ -927,10 +985,27 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
       }
 
       if (record.status === 'failed') {
-        await this.requirePostgres().query(
-          'UPDATE webhook_events SET provider = $1, payload = $2::jsonb, status = $3, error_message = NULL, processed_at = NULL WHERE id = $4',
-          [provider, JSON.stringify(input.payload), 'pending', record.id],
+        // Compare-and-set: only claim execution if the row is still 'failed'.
+        // RETURNING id lets us detect whether the UPDATE matched any row.
+        const cas = await this.requirePostgres().query<{ id: string }>(
+          "UPDATE webhook_events SET provider = $1, payload = $2::jsonb, status = 'pending', error_message = NULL, processed_at = NULL WHERE id = $3 AND status = 'failed' RETURNING id",
+          [provider, JSON.stringify(input.payload), record.id],
         );
+
+        if (cas.rows.length === 0) {
+          // Lost the race – return the current stored record without executing callbacks.
+          const currentPg = await this.requirePostgres().query<Record<string, unknown>>(
+            'SELECT * FROM webhook_events WHERE id = $1 LIMIT 1',
+            [record.id],
+          );
+
+          const currentRow = currentPg.rows[0];
+          if (!currentRow) {
+            throw new ConfigError('Failed to retry failed webhook event');
+          }
+
+          return { record: this.mapWebhookRow(currentRow), inserted: false };
+        }
 
         const refreshedPg = await this.requirePostgres().query<Record<string, unknown>>(
           'SELECT * FROM webhook_events WHERE id = $1 LIMIT 1',
@@ -1069,6 +1144,103 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
     return Number(response.rows[0]?.count ?? 0);
   }
 
+  public async insertOrGetSettlementJob(input: {
+    id: string;
+    operationId: string;
+    payloadRef: string;
+  }): Promise<{ record: SettlementJobRecord; inserted: boolean }> {
+    const createdAt = nowIso();
+    if (this.sqlite) {
+      const result = this.sqlite
+        .prepare(
+          "INSERT INTO settlement_jobs (id, operation_id, payload_ref, status, created_at, updated_at) VALUES (?, ?, ?, 'pending', ?, ?) ON CONFLICT(operation_id) DO NOTHING",
+        )
+        .run(input.id, input.operationId, input.payloadRef, createdAt, createdAt);
+      const row = this.sqlite
+        .prepare('SELECT * FROM settlement_jobs WHERE operation_id = ? LIMIT 1')
+        .get(input.operationId) as Record<string, unknown> | null;
+      if (!row) throw new ConfigError('Failed to insert or retrieve settlement job');
+      const record = this.mapSettlementJobRow(row);
+      if (record.payloadRef !== input.payloadRef) {
+        throw new ConfigError(
+          'Settlement operation identity already exists with a different payload reference',
+        );
+      }
+      return { record, inserted: result.changes > 0 };
+    }
+
+    const result = await this.requirePostgres().query(
+      "INSERT INTO settlement_jobs (id, operation_id, payload_ref, status, created_at, updated_at) VALUES ($1, $2, $3, 'pending', $4, $4) ON CONFLICT(operation_id) DO NOTHING RETURNING id",
+      [input.id, input.operationId, input.payloadRef, createdAt],
+    );
+    const response = await this.requirePostgres().query<Record<string, unknown>>(
+      'SELECT * FROM settlement_jobs WHERE operation_id = $1 LIMIT 1',
+      [input.operationId],
+    );
+    const row = response.rows[0];
+    if (!row) throw new ConfigError('Failed to insert or retrieve settlement job');
+    const record = this.mapSettlementJobRow(row);
+    if (record.payloadRef !== input.payloadRef) {
+      throw new ConfigError(
+        'Settlement operation identity already exists with a different payload reference',
+      );
+    }
+    return { record, inserted: result.rows.length > 0 };
+  }
+
+  public async getSettlementJobByOperationId(
+    operationId: string,
+  ): Promise<SettlementJobRecord | null> {
+    if (this.sqlite) {
+      const row = this.sqlite
+        .prepare('SELECT * FROM settlement_jobs WHERE operation_id = ? LIMIT 1')
+        .get(operationId) as Record<string, unknown> | null;
+      return row ? this.mapSettlementJobRow(row) : null;
+    }
+    const response = await this.requirePostgres().query<Record<string, unknown>>(
+      'SELECT * FROM settlement_jobs WHERE operation_id = $1 LIMIT 1',
+      [operationId],
+    );
+    return response.rows[0] ? this.mapSettlementJobRow(response.rows[0]) : null;
+  }
+
+  public async listPendingSettlementJobs(limit: number): Promise<SettlementJobRecord[]> {
+    if (!Number.isSafeInteger(limit) || limit <= 0) {
+      throw new RangeError('Settlement job limit must be a positive safe integer');
+    }
+    if (this.sqlite) {
+      const rows = this.sqlite
+        .prepare(
+          "SELECT * FROM settlement_jobs WHERE status = 'pending' ORDER BY created_at ASC, operation_id ASC LIMIT ?",
+        )
+        .all(limit) as Record<string, unknown>[];
+      return rows.map((row) => this.mapSettlementJobRow(row));
+    }
+    const response = await this.requirePostgres().query<Record<string, unknown>>(
+      "SELECT * FROM settlement_jobs WHERE status = 'pending' ORDER BY created_at ASC, operation_id ASC LIMIT $1",
+      [limit],
+    );
+    return response.rows.map((row) => this.mapSettlementJobRow(row));
+  }
+
+  public async updateSettlementJobStatus(input: {
+    operationId: string;
+    status: SettlementJobRecord['status'];
+  }): Promise<boolean> {
+    const updatedAt = nowIso();
+    if (this.sqlite) {
+      const result = this.sqlite
+        .prepare('UPDATE settlement_jobs SET status = ?, updated_at = ? WHERE operation_id = ?')
+        .run(input.status, updatedAt, input.operationId);
+      return result.changes > 0;
+    }
+    const response = await this.requirePostgres().query<{ operation_id: string }>(
+      'UPDATE settlement_jobs SET status = $1, updated_at = $2 WHERE operation_id = $3 RETURNING operation_id',
+      [input.status, updatedAt, input.operationId],
+    );
+    return response.rows.length > 0;
+  }
+
   public async cleanupOldRecords(cutoffIso: string): Promise<void> {
     // Retention uses a strict cutoff: values exactly equal to the cutoff are retained,
     // while only entries strictly older than the cutoff are removed.
@@ -1136,14 +1308,8 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
   }
 
   private mapWebhookRow(row: Record<string, unknown>): WebhookEventRecord {
-    const payloadValue = row.payload;
-    const payload =
-      typeof payloadValue === 'string'
-        ? parseJsonObject(payloadValue)
-        : ((payloadValue as Record<string, unknown>) ?? {});
-
-    const statusRaw = String(row.status);
-    const status = statusRaw === 'processed' || statusRaw === 'failed' ? statusRaw : 'pending';
+    const payload = parseJsonObject(row.payload, this.provider === 'sqlite');
+    const status = parsePersistedTaskStatus(row.status, 'webhook event');
 
     return {
       id: String(row.id),
@@ -1158,14 +1324,8 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
   }
 
   private mapWatcherRow(row: Record<string, unknown>): WatcherTaskRecord {
-    const payloadValue = row.payload;
-    const payload =
-      typeof payloadValue === 'string'
-        ? parseJsonObject(payloadValue)
-        : ((payloadValue as Record<string, unknown>) ?? {});
-
-    const statusRaw = String(row.status);
-    const status = statusRaw === 'processed' || statusRaw === 'failed' ? statusRaw : 'pending';
+    const payload = parseJsonObject(row.payload, this.provider === 'sqlite');
+    const status = parsePersistedTaskStatus(row.status, 'watcher task');
 
     return {
       id: String(row.id),
@@ -1178,12 +1338,44 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
     };
   }
 
+  private mapSettlementJobRow(row: Record<string, unknown>): SettlementJobRecord {
+    const status = String(row.status);
+    if (!['pending', 'processing', 'completed', 'failed'].includes(status)) {
+      throw new ConfigError(`Unsupported settlement job status: ${status}`);
+    }
+    return {
+      id: String(row.id),
+      operationId: String(row.operation_id),
+      payloadRef: String(row.payload_ref),
+      status: status as SettlementJobRecord['status'],
+      createdAt:
+        row.created_at instanceof Date ? row.created_at.toISOString() : String(row.created_at),
+      updatedAt:
+        row.updated_at instanceof Date ? row.updated_at.toISOString() : String(row.updated_at),
+    };
+  }
+
   private requirePostgres(): PostgresClient {
     if (!this.postgres) {
       throw new ConfigError('PostgreSQL client is not connected');
     }
     return this.postgres;
   }
+}
+
+async function loadSqliteDatabase(path: string): Promise<SqliteLike> {
+  if (typeof Bun === 'undefined') {
+    throw new ConfigError(
+      'SQLite provider requires the Bun runtime and bun:sqlite. Select postgres when running under Node.js.',
+    );
+  }
+
+  const moduleName = 'bun:sqlite';
+  const sqliteModuleUnknown: unknown = await import(moduleName);
+  const sqliteModule = sqliteModuleUnknown as {
+    Database: new (path: string) => SqliteLike;
+  };
+  return new sqliteModule.Database(path);
 }
 
 export function createSqlDatabaseAdapter(

@@ -1,0 +1,18 @@
+{
+  "default_branch": "main",
+  "branches": [
+    "fix/issue-704-load-account-signers-through-an-injectable-sep",
+    "main",
+    "origin"
+  ],
+  "parent": {
+    "fix/issue-704-load-account-signers-through-an-injectable-sep": "main",
+    "main": null,
+    "origin": "main"
+  },
+  "order": [
+    "main",
+    "fix/issue-704-load-account-signers-through-an-injectable-sep",
+    "origin"
+  ]
+}

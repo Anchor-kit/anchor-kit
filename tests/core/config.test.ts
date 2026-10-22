@@ -260,6 +260,85 @@ describe('AnchorConfig', () => {
       const fields = config.getKycRequiredFields('USDC');
       expect(fields).toEqual([]);
     });
+
+    it('resolves asset fields and explicitly enabled flags in stable, deduplicated order', () => {
+      const config = new AnchorConfig({
+        ...validBaseConfig,
+        kycRequired: { USDC: ['invoice_id', 'first_name', 'invoice_id'] },
+        kyc: {
+          requireDocuments: false,
+          requireName: true,
+          requireAddress: false,
+          requireEmail: true,
+          requirePhoneNumber: true,
+          requireBirthDate: false,
+        },
+      });
+
+      const result = config.resolveKycRequirements('USDC');
+      expect(result).toEqual({
+        requiredFields: ['invoice_id', 'first_name', 'last_name', 'email_address', 'phone_number'],
+        errors: [],
+      });
+      expect(config.resolveKycRequirements('USDC')).toEqual(result);
+      expect(config.getKycRequiredFields('USDC')).toEqual(result.requiredFields);
+    });
+
+    it('returns no requirements when a policy is absent or its KYC level is none', () => {
+      const absentPolicy = new AnchorConfig(validBaseConfig);
+      expect(absentPolicy.resolveKycRequirements('USDC')).toEqual({
+        requiredFields: [],
+        errors: [],
+      });
+
+      const noKyc = new AnchorConfig({
+        ...validBaseConfig,
+        kycRequired: { USDC: ['first_name'] },
+        kyc: { level: 'none', requireEmail: true },
+      });
+      expect(noKyc.resolveKycRequirements('USDC')).toEqual({
+        requiredFields: [],
+        errors: [],
+      });
+    });
+
+    it('applies documented field defaults when a KYC policy is configured', () => {
+      const config = new AnchorConfig({
+        ...validBaseConfig,
+        kyc: {},
+      });
+
+      expect(config.resolveKycRequirements('USDC')).toEqual({
+        requiredFields: ['documents', 'first_name', 'last_name', 'email_address'],
+        errors: [],
+      });
+    });
+
+    it('returns validation errors for malformed asset policy entries', () => {
+      const config = new AnchorConfig({
+        ...validBaseConfig,
+        kycRequired: { USDC: ['first_name', ''] },
+      });
+
+      expect(config.resolveKycRequirements('USDC')).toEqual({
+        requiredFields: ['first_name'],
+        errors: ['kycRequired.USDC[1] must be a non-empty string'],
+      });
+      expect(() => config.validate()).toThrow(ConfigError);
+      expect(() => config.validate()).toThrow(/kycRequired\.USDC\[1\]/);
+    });
+
+    it('returns validation errors for invalid KYC flag values', () => {
+      const config = new AnchorConfig({
+        ...validBaseConfig,
+        kyc: { requireEmail: 'true' } as unknown as NonNullable<AnchorKitConfig['kyc']>,
+      });
+
+      expect(config.resolveKycRequirements('USDC').errors).toEqual([
+        'kyc.requireEmail must be a boolean',
+      ]);
+      expect(() => config.validate()).toThrow(/kyc\.requireEmail must be a boolean/);
+    });
   });
 
   describe('isNetworkPassphrase()', () => {
