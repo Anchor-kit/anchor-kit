@@ -171,6 +171,18 @@ function makeFakeDb(rejectOnIdempotency = false): {
     async countProcessedWatcherTasks() {
       return 0;
     },
+    async insertOrGetSettlementJob() {
+      throw new Error('Not implemented in this stub');
+    },
+    async getSettlementJobByOperationId() {
+      return null;
+    },
+    async listPendingSettlementJobs() {
+      return [];
+    },
+    async updateSettlementJobStatus() {
+      return false;
+    },
     async cleanupOldRecords() {},
   };
 

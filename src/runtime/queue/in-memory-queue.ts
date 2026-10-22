@@ -1,4 +1,4 @@
-import { ConfigError } from '@/core/errors.ts';
+import { ConfigError } from '../../core/errors.ts';
 import type { QueueAdapter, QueueDrainStatus, QueueJob } from '@/runtime/interfaces.ts';
 
 interface InMemoryQueueOptions {
