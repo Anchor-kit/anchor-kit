@@ -43,3 +43,27 @@ jobs:
 
       - name: Build
         run: bun run build
+
+      - name: Pack tarball
+        run: bun pm pack --destination ./packed
+
+      - name: Install and run Bun consumer fixture
+        run: |
+          set -euo pipefail
+          TARBALL="$(ls ./packed/*.tgz | head -n 1)"
+          FIXTURE_DIR="$(mktemp -d)"
+          cp -R fixtures/consumer-bun/. "$FIXTURE_DIR/"
+          cd "$FIXTURE_DIR"
+          bun add "$GITHUB_WORKSPACE/$TARBALL"
+          bun run check
+
+      - name: Install and run Node consumer fixture
+        run: |
+          set -euo pipefail
+          TARBALL="$(ls ./packed/*.tgz | head -n 1)"
+          FIXTURE_DIR="$(mktemp -d)"
+          cp -R fixtures/consumer-node/. "$FIXTURE_DIR/"
+          cd "$FIXTURE_DIR"
+          npm install "$GITHUB_WORKSPACE/$TARBALL"
+          npm run check
+          npx tsc --noEmit

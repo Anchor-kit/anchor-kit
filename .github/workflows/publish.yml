@@ -63,6 +63,12 @@ jobs:
       - name: Verify npm package contents
         run: bun run check:pack
 
+      - name: Run installed-package consumer checks
+        run: bun run check:consumers
+
+      - name: Update npm for trusted publishing support
+        run: npm install -g npm@latest
+
       - name: Update npm for trusted publishing support
         run: npm install -g npm@latest
 
@@ -70,3 +76,6 @@ jobs:
         run: npm publish --provenance --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Run installed-package consumer checks
+        run: bun run check:consumers

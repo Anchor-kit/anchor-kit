@@ -1,0 +1,24 @@
+{
+  "default_branch": "main",
+  "branches": [
+    "fix/issue-694-run-installed-package-consumer-checks-in",
+    "fix/issue-695-pin-the-supported-bun-version-in-build-and",
+    "fix/issue-717-record-transaction-transition-history-and",
+    "main",
+    "origin"
+  ],
+  "parent": {
+    "fix/issue-694-run-installed-package-consumer-checks-in": "main",
+    "fix/issue-695-pin-the-supported-bun-version-in-build-and": "main",
+    "fix/issue-717-record-transaction-transition-history-and": "main",
+    "main": null,
+    "origin": "main"
+  },
+  "order": [
+    "main",
+    "fix/issue-694-run-installed-package-consumer-checks-in",
+    "fix/issue-695-pin-the-supported-bun-version-in-build-and",
+    "fix/issue-717-record-transaction-transition-history-and",
+    "origin"
+  ]
+}

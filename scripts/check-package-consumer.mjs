@@ -1,6 +1,6 @@
 import { spawnSync } from 'node:child_process';
 import { cpSync, mkdtempSync, readdirSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+const { tmpdir } = await import('node:os');
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
