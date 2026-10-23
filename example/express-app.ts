@@ -87,6 +87,7 @@ export async function createExampleApp(): Promise<ExampleApp> {
   const anchor = createAnchor({
     network: { network: 'testnet' },
     server: {
+      homeDomain: process.env.ANCHOR_HOME_DOMAIN ?? 'localhost',
       interactiveDomain: process.env.INTERACTIVE_DOMAIN ?? 'http://localhost:3000',
     },
     security: {

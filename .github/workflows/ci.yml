@@ -9,6 +9,22 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    env:
+      DATABASE_URL: postgres://anchor:anchor@localhost:5432/anchor_kit_smoke
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: anchor
+          POSTGRES_PASSWORD: anchor
+          POSTGRES_DB: anchor_kit_smoke
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U anchor -d anchor_kit_smoke"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
 
     steps:
       - uses: actions/checkout@v4
@@ -25,6 +41,14 @@ jobs:
 
       - name: Install dependencies
         run: bun install --frozen-lockfile
+
+      - name: Verify PostgreSQL test service
+        run: |
+          test -n "$DATABASE_URL"
+          bun -e 'const { Client } = await import("pg"); const client = new Client({ connectionString: process.env.DATABASE_URL }); await client.connect(); await client.query("SELECT 1"); await client.end();'
+
+      - name: PostgreSQL adapter assertions
+        run: bun test tests/runtime/postgres-adapter.integration.test.ts
 
       - name: Lint
         run: bun run lint
@@ -43,3 +67,8 @@ jobs:
 
       - name: Build
         run: bun run build
+
+      - name: Node PostgreSQL package smoke test
+        run: bun run smoke:node-postgres
+        env:
+          DATABASE_URL: postgres://anchor:anchor@127.0.0.1:5432/anchor_kit_smoke

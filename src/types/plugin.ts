@@ -2,7 +2,9 @@ import { RouteDefinition, SchemaDefinition } from './foundation';
 import type { AnchorKitConfigSnapshot, Asset } from '@/types/config.ts';
 import type { TransactionStatus } from './transaction-status.ts';
 import type { DatabaseAdapter } from '@/runtime/interfaces.ts';
-import type { Transaction } from '@stellar/stellar-sdk';
+import type { Transaction as StellarTransaction } from '@stellar/stellar-sdk';
+import type { AnchorInstance } from '@/core/factory.ts';
+import type { InteractiveTransactionRecord } from '@/runtime/interfaces.ts';
 
 export interface AnchorPluginContext<
   TConfig = unknown,
@@ -41,9 +43,9 @@ export interface AnchorPluginHooks {
   /** Throw to reject with HTTP 400 `deposit_rejected` before persistence. */
   onDepositRequest?: (ctx: DepositRequestHookContext) => Promise<void>;
   onWithdrawalRequest?: (ctx: Context) => Promise<void>;
-  onSep10Challenge?: (tx: Transaction) => Promise<Transaction>;
+  onSep10Challenge?: (tx: StellarTransaction) => Promise<StellarTransaction>;
   onTransactionStatusChange?: (
-    tx: unknown,
+    tx: InteractiveTransactionRecord,
     oldStatus: TransactionStatus,
     newStatus: TransactionStatus,
   ) => Promise<void>;
@@ -72,5 +74,10 @@ export interface AnchorPlugin {
   /**
    * Plugin initialization lifecycle
    */
-  init?: (instance: unknown) => Promise<void> | void;
+  init?: (instance: AnchorInstance) => Promise<void> | void;
+
+  /**
+   * Release resources allocated during initialization
+   */
+  cleanup?: () => Promise<void> | void;
 }

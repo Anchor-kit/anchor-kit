@@ -1,74 +1,50 @@
-# Architecture Overview
+# Architecture overview
 
-Anchor-Kit is designed to be the "Rails" for Stellar Anchors—opinionated but flexible, emphasizing convention over configuration.
+Anchor-Kit currently ships a TypeScript SDK foundation and a small
+Express-compatible runtime. It is not yet a hosted fiat-to-Stellar settlement
+engine. This document describes the code that runs today separately from the
+intended end-to-end payment path.
 
-## Core Design Principles
+## Implemented modules
 
-1.  **Type Safety First**: Leveraging TypeScript to prevent runtime errors, especially for financial transactions.
-2.  **Plugin-Based**: Core logic (server, auth, db connection) is separate from protocol implementations (SEPs) and payment rail integrations.
-3.  **Strict State Machines**: Financial transactions follow rigid, unidirectional state transitions to prevent race conditions and double-spending.
-4.  **Developer Experience (DX)**: Inspired by tools like Better-Auth, providing a fluent, clear API.
+- `src/core/`: `createAnchor()`, `AnchorInstance`, immutable configuration and
+  runtime validation, lifecycle management, plugin registration, and errors.
+- `src/types/`: public configuration, transaction, plugin, and runtime
+  contracts.
+- `src/utils/`: validation, decimal arithmetic, cryptographic helpers,
+  idempotency, and Stellar helpers.
+- `src/runtime/database/`: SQL database adapter and migrations.
+- `src/runtime/http/`: Express-compatible route middleware, request validation,
+  CORS handling, and in-memory rate limiting.
+- `src/runtime/webhooks/`: signature validation, event deduplication and
+  persistence, callback dispatch, and processed/failed event status.
+- `src/runtime/queue/`: bounded-concurrency in-memory queue.
+- `src/runtime/watchers/`: transaction timeout polling, watcher task recording,
+  queue dispatch, and record cleanup.
 
-## Current Implementation (Foundation)
+The host owns the HTTP server. It creates and initializes the instance, starts
+background jobs when needed, and mounts the middleware:
 
-### `src/core`
-
-- `createAnchor()` and `AnchorInstance` lifecycle (`use`, `init`, plugin registry).
-- `AnchorConfig` for defaults, immutability, and validation.
-- Domain error hierarchy.
-
-### `src/types`
-
-- Unified configuration interfaces.
-- Transaction lifecycle and SEP-24 response typing.
-- Foundation and plugin interfaces.
-
-### `src/utils`
-
-- Validation, decimal arithmetic, idempotency handling, crypto/JWT helpers, and Stellar helpers.
-
-### `src/plugins`
-
-Modular implementations of SEPs and integrations.
-
-- `sep24/`: Hosted Deposit/Withdrawal flow.
-- `sep6/`: API-based Transfer flow (Future).
-- `sep31/`: Cross-border payments (Future).
-
-### `src/services`
-
-Shared internal services.
-
-- `StellarService`: Wrappers around Horizon API.
-- `QueueService`: Job queues for processing blockchain transactions asynchronously.
-
-## Folder Structure
-
-```
-anchor-kit/
-├── src/
-│   ├── core/           # Factory, config, errors, planned protocol stubs
-│   ├── services/       # Planned service layer (currently stubs)
-│   ├── plugins/        # SEP implementations and Rail adapters
-│   ├── utils/          # Runtime utilities
-│   ├── types/          # Public type definitions
-│   └── index.ts        # Public API export
-├── examples/           # implementing example servers
-├── tests/              # Vitest test suite
-└── dist/               # Compiled output
+```ts
+const anchor = createAnchor(config);
+await anchor.init();
+await anchor.startBackgroundJobs();
+app.use('/anchor', anchor.getExpressRouter());
 ```
 
-## Data Flow (SEP-24 Example)
+## Current request path
 
-1.  **Wallet** initiates auth (SEP-10).
-2.  **Anchor-Kit** verifies signature and issues JWT.
-3.  **Wallet** requests deposit (SEP-24).
-4.  **Anchor-Kit** creates transaction record (status: `incomplete`) and returns interactive URL.
-5.  **User** completes KYC/Payment on the interactive page.
-6.  **Anchor-Kit** receives Webhook from Payment Rail (e.g., Flutterwave).
-7.  **Anchor-Kit** validates webhook, updates status to `pending_user_transfer_start`.
-8.  **Job Queue** picks up job, sends Stellar Asset to user.
-9.  **Anchor-Kit** updates status to `completed`.
+1. The host mounts the Express-compatible middleware in its own server.
+2. A SEP-10 challenge is validated and exchanged for a bearer token.
+3. An authorized interactive deposit request creates a deposit record and returns
+   its interactive URL.
+4. Webhook processing verifies and stores provider events before invoking the
+   host callback.
+5. The queue and watcher handle expiry checks and record cleanup.
+
+Settlement is not implemented end to end. The current runtime does not submit a Stellar payment
+or advance a deposit through a rail settlement flow. A webhook
+callback or queued job alone does not prove that settlement occurred.
 
 ## SEP-10 Challenge Consumption & Recovery Policy
 

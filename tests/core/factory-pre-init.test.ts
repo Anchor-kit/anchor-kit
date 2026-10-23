@@ -11,7 +11,10 @@ async function unexpectedDatabaseCall(): Promise<never> {
 describe('AnchorInstance pre-init router access', () => {
   const config = {
     network: { network: 'testnet' as const },
-    server: { interactiveDomain: 'https://anchor.example.com' },
+    server: {
+      homeDomain: 'anchor.example.com',
+      interactiveDomain: 'https://anchor.example.com',
+    },
     security: {
       sep10SigningKey: Keypair.random().secret(),
       interactiveJwtSecret: 'jwt-test-secret',
@@ -63,6 +66,8 @@ describe('AnchorInstance pre-init router access', () => {
       createDepositWithIdempotency: unexpectedDatabaseCall,
       deletePendingIdempotencyRecord: unexpectedDatabaseCall,
       insertOrGetWebhookEvent: unexpectedDatabaseCall,
+      claimWebhookAttempt: unexpectedDatabaseCall,
+      completeWebhookAttempt: unexpectedDatabaseCall,
       updateWebhookEventStatus: unexpectedDatabaseCall,
       insertOrGetSettlementJob: unexpectedDatabaseCall,
       getSettlementJobByOperationId: unexpectedDatabaseCall,

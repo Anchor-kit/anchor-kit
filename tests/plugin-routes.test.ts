@@ -54,7 +54,7 @@ async function invoke(anchor: ReturnType<typeof createAnchor>, url: string, body
 function makeAnchor(requestTimeout = 30000) {
   return createAnchor({
     network: { network: 'testnet' },
-    server: { requestTimeout },
+    server: { homeDomain: 'anchor.example.com', requestTimeout },
     security: {
       sep10SigningKey: Keypair.random().secret(),
       interactiveJwtSecret: 'test-jwt-secret',

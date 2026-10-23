@@ -78,6 +78,13 @@ export interface NetworkConfig {
  */
 export interface ServerConfig {
   /**
+   * SEP-10 anchor home domain (hostname only, without scheme or path).
+   * The value must leave room for the " auth" operation suffix in Stellar's 64-byte limit.
+   * @required
+   */
+  homeDomain: string;
+
+  /**
    * Server host address
    * @optional - defaults to '0.0.0.0'
    */
@@ -109,6 +116,13 @@ export interface ServerConfig {
   transferServerSep24?: string;
 
   /**
+   * Domain serving the SEP-10 web authentication endpoint.
+   * Defaults to the host in interactiveDomain, then homeDomain.
+   * @optional
+   */
+  webAuthDomain?: string;
+
+  /**
    * Allowed origins for CORS
    * @optional
    */
@@ -131,6 +145,13 @@ export interface SecurityConfig {
    * @required
    */
   sep10SigningKey: string;
+
+  /**
+   * SEP-10 home domain used in the authentication Manage Data key.
+   * Defaults to the host in server.interactiveDomain, then "localhost".
+   * @optional
+   */
+  homeDomain?: string;
 
   /**
    * JWT secret for interactive flow tokens
@@ -431,7 +452,9 @@ export interface FrameworkConfig {
     url: string;
 
     /**
-     * Database schema name
+     * PostgreSQL schema name (1-63 ASCII letters, digits, or underscores;
+     * must start with a letter or underscore). Defaults to "public".
+     * SQLite accepts only "main".
      * @optional
      */
     schema?: string;
@@ -673,6 +696,12 @@ export interface AnchorKitConfig {
     callbackTimeoutMs?: number;
 
     /**
+     * Maximum time allowed for a cooperative webhook callback.
+     * @optional - defaults to 30000
+     */
+    timeoutMs?: number;
+
+    /**
      * Called after webhook event verification and persistence.
      */
     onEvent?: (
@@ -686,6 +715,7 @@ export interface AnchorKitConfig {
         receivedAt: string;
         signature?: string;
         rawBody: string | Buffer | Uint8Array;
+        signal?: AbortSignal;
       },
     ) => Promise<void> | void;
   };

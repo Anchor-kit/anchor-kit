@@ -134,6 +134,17 @@ function validateFrameworkNumbers(framework: AnchorKitConfig['framework']): bool
     throw new Error('framework.queue.concurrency must be a finite integer >= 1');
   }
 
+  if (
+    framework.queue?.maxPendingJobs !== undefined &&
+    !isPositiveSafeInteger(framework.queue.maxPendingJobs)
+  ) {
+    throw new Error('framework.queue.maxPendingJobs must be a positive safe integer');
+  }
+
+  if (framework.queue?.onError !== undefined && typeof framework.queue.onError !== 'function') {
+    throw new Error('framework.queue.onError must be a function');
+  }
+
   const watchersEnabled = framework.watchers?.enabled;
   if (watchersEnabled !== undefined && typeof watchersEnabled !== 'boolean') {
     throw new Error('framework.watchers.enabled must be a boolean');
@@ -633,7 +644,35 @@ function validateAnchorKitConfig(config: AnchorKitConfig): boolean {
   }
   validateKycConfig(config.kyc);
 
-  for (const key of ['host', 'corsOrigins', 'webAuthEndpoint', 'transferServerSep24'] as const) {
+  for (const key of [
+    'host',
+    'corsOrigins',
+    'webAuthEndpoint',
+    'transferServerSep24',
+    'webAuthDomain',
+  ] as const) {
+    const value = server[key];
+    if (value !== undefined && value !== null && !ServerConfigSchema[key].validate(value)) {
+      throw new Error(`server.${key}: invalid value`);
+    }
+  }
+
+  for (const [protocol, value] of Object.entries(metadata?.protocols ?? {})) {
+    if (value !== undefined && typeof value !== 'boolean') {
+      throw new Error(`metadata.protocols.${protocol} must be a boolean`);
+    }
+  }
+
+  if (server.homeDomain === undefined || server.homeDomain === null || server.homeDomain === '') {
+    throw new Error('Missing required field: server.homeDomain');
+  }
+  if (!ServerConfigSchema.homeDomain.validate(server.homeDomain)) {
+    throw new Error(
+      'Invalid server.homeDomain: use a hostname only and ensure the SEP-10 auth operation name is at most 64 bytes',
+    );
+  }
+
+  for (const key of ['host', 'corsOrigins'] as const) {
     const value = server[key];
     if (value !== undefined && value !== null && !ServerConfigSchema[key].validate(value)) {
       throw new Error(`server.${key}: invalid value`);
@@ -692,6 +731,26 @@ export interface SchemaField {
   validate: (value: unknown) => boolean;
 }
 
+function isValidHomeDomain(value: unknown): value is string {
+  if (typeof value !== 'string' || value.trim() !== value || value.length === 0) {
+    return false;
+  }
+
+  const labels = value.split('.');
+  if (
+    labels.some(
+      (label) =>
+        label.length === 0 ||
+        label.length > 63 ||
+        !/^[a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?$/.test(label),
+    )
+  ) {
+    return false;
+  }
+
+  return new TextEncoder().encode(`${value} auth`).length <= 64;
+}
+
 /**
  * ServerConfigSchema
  * Runtime schema for validating partial ServerConfig objects.
@@ -701,6 +760,12 @@ export interface SchemaField {
  * ServerConfigSchema.port.validate(3000); // true
  */
 export const ServerConfigSchema: Record<keyof Required<ServerConfig>, SchemaField> = {
+  homeDomain: {
+    type: 'string',
+    required: true,
+    description: 'SEP-10 anchor home domain hostname, without scheme or path.',
+    validate: isValidHomeDomain,
+  },
   host: {
     type: 'string',
     required: false,
@@ -739,6 +804,12 @@ export const ServerConfigSchema: Record<keyof Required<ServerConfig>, SchemaFiel
     required: false,
     description: 'HTTPS SEP-10 endpoint published in stellar.toml.',
     validate: (value) => isHttpsUrl(value),
+  },
+  webAuthDomain: {
+    type: 'string',
+    required: false,
+    description: 'Domain serving the SEP-10 web authentication endpoint.',
+    validate: isValidClientDomain,
   },
   transferServerSep24: {
     type: 'string',

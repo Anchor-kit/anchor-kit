@@ -176,5 +176,104 @@ describe('AK-040 – failed-event retry compare-and-set ownership', () => {
       expect(ids.size).toBe(1);
       expect(results[0].record.status).toBe('processed');
     });
+
+    it('claims webhook attempts with stable operation identity and prevents stale completion', async () => {
+      const eventId = `evt-attempt-${randomUUID()}`;
+      const inserted = await db.insertOrGetWebhookEvent({
+        id: randomUUID(),
+        eventId,
+        provider: 'test-provider',
+        payload: { type: 'payment.initiated' },
+      });
+      const operationKey = inserted.record.operationKey;
+
+      const claim = await db.claimWebhookAttempt({
+        id: inserted.record.id,
+        leaseOwner: 'owner-1',
+        leaseDurationMs: 30_000,
+      });
+      expect(claim?.attemptCount).toBe(1);
+      expect(claim?.operationKey).toBe(operationKey);
+      expect(claim?.leaseOwner).toBe('owner-1');
+      expect(claim?.attemptId).toBeTruthy();
+
+      const concurrentClaim = await db.claimWebhookAttempt({
+        id: inserted.record.id,
+        leaseOwner: 'owner-2',
+        leaseDurationMs: 30_000,
+      });
+      expect(concurrentClaim).toBeNull();
+
+      const staleCompletion = await db.completeWebhookAttempt({
+        id: inserted.record.id,
+        attemptId: claim!.attemptId!,
+        leaseOwner: 'owner-2',
+        status: 'processed',
+      });
+      expect(staleCompletion).toBe(false);
+
+      const completed = await db.completeWebhookAttempt({
+        id: inserted.record.id,
+        attemptId: claim!.attemptId!,
+        leaseOwner: 'owner-1',
+        status: 'unresolved',
+        errorMessage: 'callback timed out',
+      });
+      expect(completed).toBe(true);
+
+      const duplicate = await db.insertOrGetWebhookEvent({
+        id: randomUUID(),
+        eventId,
+        provider: 'test-provider',
+        payload: { type: 'duplicate' },
+      });
+      expect(duplicate.record.status).toBe('unresolved');
+      expect(duplicate.record.operationKey).toBe(operationKey);
+    });
+
+    it('preserves operation key while retrying failed event with a fresh attempt id', async () => {
+      const eventId = `evt-retry-attempt-${randomUUID()}`;
+      const inserted = await db.insertOrGetWebhookEvent({
+        id: randomUUID(),
+        eventId,
+        provider: 'test-provider',
+        payload: { type: 'payment.initiated' },
+      });
+      const firstClaim = await db.claimWebhookAttempt({
+        id: inserted.record.id,
+        leaseOwner: 'owner-1',
+        leaseDurationMs: 30_000,
+      });
+      expect(firstClaim).not.toBeNull();
+
+      expect(
+        await db.completeWebhookAttempt({
+          id: inserted.record.id,
+          attemptId: firstClaim!.attemptId!,
+          leaseOwner: 'owner-1',
+          status: 'failed',
+          errorMessage: 'temporary failure',
+        }),
+      ).toBe(true);
+
+      const retry = await db.insertOrGetWebhookEvent({
+        id: randomUUID(),
+        eventId,
+        provider: 'test-provider',
+        payload: { type: 'payment.retry' },
+      });
+      expect(retry.inserted).toBe(true);
+      expect(retry.record.operationKey).toBe(inserted.record.operationKey);
+      expect(retry.record.attemptCount).toBe(1);
+
+      const secondClaim = await db.claimWebhookAttempt({
+        id: inserted.record.id,
+        leaseOwner: 'owner-2',
+        leaseDurationMs: 30_000,
+      });
+      expect(secondClaim?.attemptCount).toBe(2);
+      expect(secondClaim?.attemptId).not.toBe(firstClaim?.attemptId);
+      expect(secondClaim?.operationKey).toBe(inserted.record.operationKey);
+    });
   });
 });

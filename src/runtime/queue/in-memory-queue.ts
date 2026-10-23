@@ -107,10 +107,17 @@ export class InMemoryQueueAdapter implements QueueAdapter {
         try {
           await worker(job);
         } catch (error) {
-          try {
-            await this.onError?.(job, error);
-          } catch {
-            // Reporting failures must not prevent other queued jobs from running.
+          if (!this.onError) {
+            console.error(`[AnchorKit] Background queue job "${job.type}" failed`, error);
+          } else {
+            try {
+              await this.onError(job, error);
+            } catch (handlerError) {
+              console.error(
+                `[AnchorKit] Queue error handler failed for job "${job.type}"`,
+                handlerError,
+              );
+            }
           }
         } finally {
           this.activeWorkers -= 1;

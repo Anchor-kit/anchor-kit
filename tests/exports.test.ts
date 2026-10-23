@@ -32,11 +32,16 @@ describe('package root exports', () => {
       errorMessage: null,
       processedAt: null,
       createdAt: '2026-09-30T00:00:00.000Z',
+      operationKey: 'example-provider:event-1',
+      attemptCount: 0,
+      attemptId: null,
+      leaseOwner: null,
+      leaseExpiresAt: null,
     };
 
     const schema: AnchorKitConfig = {
       network: { network: 'testnet' },
-      server: {},
+      server: { homeDomain: 'anchor.example.com' },
       security: {
         sep10SigningKey: 'key',
         interactiveJwtSecret: 'secret',

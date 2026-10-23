@@ -24,7 +24,10 @@ describe('AnchorInstance shutdown', () => {
 
     const anchor = createAnchor({
       network: { network: 'testnet' },
-      server: { interactiveDomain: 'https://anchor.example.com' },
+      server: {
+        homeDomain: 'anchor.example.com',
+        interactiveDomain: 'https://anchor.example.com',
+      },
       security: {
         sep10SigningKey: Keypair.random().secret(),
         interactiveJwtSecret: 'jwt-test-secret',

@@ -111,6 +111,9 @@ export class TransactionWatcher implements Watcher {
     } finally {
       this.stopPromise = null;
     }
+
+    this.isTickInProgress = false;
+    this.tickPromise = null;
   }
 
   private async tick(): Promise<void> {

@@ -351,7 +351,7 @@ describe('TransactionWatcher Unit Tests', () => {
       (cutoffIso: string) => Promise<InteractiveTransactionRecord[]>
     >(
       () =>
-        new Promise((_, reject) => {
+        new Promise<InteractiveTransactionRecord[]>((_, reject) => {
           rejectTick.mockImplementation(() => reject(new Error('db failure')));
         }),
     );

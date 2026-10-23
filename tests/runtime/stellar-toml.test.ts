@@ -11,6 +11,7 @@ function createMiddleware() {
   const config = new AnchorConfig({
     network: { network: 'testnet' },
     server: {
+      homeDomain: 'anchor.example.com',
       webAuthEndpoint: 'https://anchor.example.com/auth',
       transferServerSep24: 'https://anchor.example.com/sep24',
     },

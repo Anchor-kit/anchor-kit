@@ -34,7 +34,7 @@ const serverKeypair = Keypair.random();
 
 const config = new AnchorConfig({
   network: { network: 'testnet' },
-  server: { interactiveDomain: 'https://anchor.test' },
+  server: { homeDomain: 'anchor.test', interactiveDomain: 'https://anchor.test' },
   security: {
     sep10SigningKey: serverKeypair.secret(),
     interactiveJwtSecret: JWT_SECRET,
@@ -173,6 +173,12 @@ function makeFakeDb(rejectOnIdempotency = false): {
     async deletePendingIdempotencyRecord() {},
     async insertOrGetWebhookEvent() {
       throw new Error('Not implemented in this stub');
+    },
+    async claimWebhookAttempt() {
+      return null;
+    },
+    async completeWebhookAttempt() {
+      return false;
     },
     async updateWebhookEventStatus() {},
     async insertWatcherTask() {},

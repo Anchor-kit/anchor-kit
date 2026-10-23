@@ -462,6 +462,7 @@ describe('AnchorKitConfig Type Tests', () => {
           network: 'testnet',
         },
         server: {
+          homeDomain: 'anchor.example.com',
           host: 'localhost',
           port: 3000,
         },
@@ -492,7 +493,7 @@ describe('AnchorKitConfig Type Tests', () => {
     it('should require server config', () => {
       const config: AnchorKitConfig = {
         network: { network: 'testnet' },
-        server: { port: 3000 },
+        server: { homeDomain: 'anchor.example.com', port: 3000 },
         security: {
           sep10SigningKey: 'key',
           interactiveJwtSecret: 'secret',
@@ -520,7 +521,7 @@ describe('AnchorKitConfig Type Tests', () => {
     it('should require security config with three secret fields', () => {
       const config: AnchorKitConfig = {
         network: { network: 'testnet' },
-        server: {},
+        server: { homeDomain: 'anchor.example.com' },
         security: {
           sep10SigningKey: 'key',
           interactiveJwtSecret: 'jwt-secret',
@@ -550,7 +551,7 @@ describe('AnchorKitConfig Type Tests', () => {
     it('should require assets config with at least one asset', () => {
       const config: AnchorKitConfig = {
         network: { network: 'testnet' },
-        server: {},
+        server: { homeDomain: 'anchor.example.com' },
         security: {
           sep10SigningKey: 'key',
           interactiveJwtSecret: 'secret',
@@ -582,7 +583,7 @@ describe('AnchorKitConfig Type Tests', () => {
     it('should require framework config with database', () => {
       const config: AnchorKitConfig = {
         network: { network: 'public' },
-        server: {},
+        server: { homeDomain: 'anchor.example.com' },
         security: {
           sep10SigningKey: 'key',
           interactiveJwtSecret: 'secret',
@@ -673,6 +674,7 @@ describe('AnchorKitConfig Type Tests', () => {
   describe('Server config validation', () => {
     it('should support partial server config', () => {
       const serverConfig: ServerConfig = {
+        homeDomain: 'anchor.example.com',
         debug: true,
         port: 3000,
       };
@@ -684,6 +686,7 @@ describe('AnchorKitConfig Type Tests', () => {
 
     it('should support server timeouts and CORS', () => {
       const serverConfig: ServerConfig = {
+        homeDomain: 'anchor.example.com',
         host: '0.0.0.0',
         port: 8080,
         corsOrigins: ['https://example.com', 'https://app.example.com'],
@@ -804,7 +807,7 @@ describe('AnchorKitConfig Type Tests', () => {
         network: {
           network: 'testnet',
         },
-        server: {},
+        server: { homeDomain: 'anchor.example.com' },
         security: {
           sep10SigningKey: 'test-key',
           interactiveJwtSecret: 'test-secret',
@@ -837,6 +840,7 @@ describe('AnchorKitConfig Type Tests', () => {
           networkPassphrase: 'Public Global Stellar Network ; September 2015',
         },
         server: {
+          homeDomain: 'anchor.example.com',
           host: '0.0.0.0',
           port: 3000,
           debug: false,
@@ -914,7 +918,7 @@ describe('AnchorKitConfig Type Tests', () => {
     it('should allow plugins in framework config', () => {
       const config: AnchorKitConfig = {
         network: { network: 'testnet' },
-        server: {},
+        server: { homeDomain: 'anchor.example.com' },
         security: {
           sep10SigningKey: 'key',
           interactiveJwtSecret: 'secret',

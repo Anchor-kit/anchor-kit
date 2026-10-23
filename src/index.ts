@@ -24,9 +24,11 @@ export {
 export type { Memo, PaymentParams } from './utils';
 export type {
   AuthChallengeRecord,
+  AccountSigner,
   DatabaseAdapter,
   IdempotencyRecord,
   InteractiveTransactionRecord,
+  KycVerificationProvider,
   PaymentRailAdapter,
   QueueJob,
   QueueDrainStatus,
@@ -36,5 +38,7 @@ export type {
   WebhookEventRecord,
   WebhookProcessor,
   WatcherTaskRecord,
+  TransactionTransitionResult,
 } from './runtime/interfaces.ts';
+export { MockKycVerificationProvider } from './runtime/kyc/mock-provider.ts';
 export type { ExpressLikeMiddleware } from './runtime/http/express-router.ts';

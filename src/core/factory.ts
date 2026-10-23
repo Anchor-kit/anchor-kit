@@ -14,10 +14,11 @@ import type {
   Watcher,
   WebhookProcessor,
 } from '@/runtime/interfaces.ts';
-import { InMemoryQueueAdapter } from '../runtime/queue/in-memory-queue.ts';
-import { TransactionWatcher } from '../runtime/watchers/transaction-watcher.ts';
-import { DefaultWebhookProcessor } from '../runtime/webhooks/default-webhook-processor.ts';
-import type { AnchorKitConfig } from '../types/config.ts';
+import { InMemoryQueueAdapter } from '@/runtime/queue/in-memory-queue.ts';
+import { TransactionWatcher } from '@/runtime/watchers/transaction-watcher.ts';
+import { DefaultWebhookProcessor } from '@/runtime/webhooks/default-webhook-processor.ts';
+import type { SchemaMigration } from '@/types/foundation.ts';
+import type { AnchorKitConfig } from '@/types/config.ts';
 import type { AnchorPlugin, AnchorPluginHooks } from '@/types/plugin.ts';
 
 export interface CreateAnchorOptions {
@@ -35,6 +36,7 @@ export interface CreateAnchorOptions {
 export class AnchorInstance {
   public readonly config: AnchorConfig;
   private plugins: Map<string, AnchorPlugin> = new Map();
+  private initializedPlugins: AnchorPlugin[] = [];
 
   private database: DatabaseAdapter | null = null;
   private readonly injectedDatabaseAdapter?: DatabaseAdapter;
@@ -104,7 +106,11 @@ export class AnchorInstance {
         }
 
         const queueConcurrency = frameworkConfig.queue?.concurrency ?? 1;
-        this.queue = new InMemoryQueueAdapter({ concurrency: queueConcurrency });
+        this.queue = new InMemoryQueueAdapter({
+          concurrency: queueConcurrency,
+          maxPendingJobs: frameworkConfig.queue?.maxPendingJobs,
+          onError: frameworkConfig.queue?.onError,
+        });
 
         this.webhookProcessor = new DefaultWebhookProcessor({
           config: this.config.getConfig(),
@@ -146,6 +152,7 @@ export class AnchorInstance {
         this.initialized = true;
 
         for (const plugin of this.plugins.values()) {
+          this.initializedPlugins.push(plugin);
           if (plugin.init) {
             await plugin.init(this);
           }
@@ -171,13 +178,47 @@ export class AnchorInstance {
     if (this.backgroundJobsPromise) return this.backgroundJobsPromise;
 
     this.backgroundJobsPromise = (async () => {
-      await this.requireQueue().start(async (job) => this.processQueueJob(job));
+      const queue = this.requireQueue();
+      const startedWatchers: Watcher[] = [];
+      let queueStarted = false;
 
-      for (const watcher of this.watchers) {
-        await watcher.start();
+      try {
+        await queue.start(async (job) => this.processQueueJob(job));
+        queueStarted = true;
+
+        for (const watcher of this.watchers) {
+          await watcher.start();
+          startedWatchers.push(watcher);
+        }
+
+        this.backgroundJobsRunning = true;
+      } catch (startupError) {
+        const rollbackErrors: unknown[] = [];
+        for (const watcher of startedWatchers.reverse()) {
+          try {
+            await watcher.stop();
+          } catch (error) {
+            rollbackErrors.push(error);
+          }
+        }
+
+        if (queueStarted) {
+          try {
+            await queue.stop();
+          } catch (error) {
+            rollbackErrors.push(error);
+          }
+        }
+
+        if (rollbackErrors.length > 0) {
+          console.error(
+            'Background service startup rollback failed',
+            new AggregateError(rollbackErrors, 'One or more background services failed to stop'),
+          );
+        }
+
+        throw startupError;
       }
-
-      this.backgroundJobsRunning = true;
     })().finally(() => {
       this.backgroundJobsPromise = null;
     });
@@ -224,12 +265,25 @@ export class AnchorInstance {
     if (this.shutdownPromise) return this.shutdownPromise;
 
     this.shutdownPromise = (async () => {
+      const shutdownErrors: unknown[] = [];
       try {
         await this.initPromise?.catch(() => undefined);
         if (!this.initialized) return;
 
-        await this.stopBackgroundJobs();
-        await this.requireDatabase().disconnect();
+        try {
+          await this.stopBackgroundJobs();
+        } catch (error) {
+          shutdownErrors.push(error);
+        }
+
+        shutdownErrors.push(...(await this.cleanupInitializedPlugins()));
+
+        try {
+          await this.requireDatabase().disconnect();
+        } catch (error) {
+          shutdownErrors.push(error);
+        }
+
         this.initialized = false;
         this.backgroundJobsRunning = false;
         this.watchers = [];
@@ -237,6 +291,10 @@ export class AnchorInstance {
         this.webhookProcessor = null;
         this.queue = null;
         this.database = null;
+
+        if (shutdownErrors.length > 0) {
+          throw new AggregateError(shutdownErrors, 'Anchor shutdown failed');
+        }
       } finally {
         this.shutdownPromise = null;
       }
@@ -246,10 +304,21 @@ export class AnchorInstance {
   }
 
   protected createDatabaseAdapter(): DatabaseAdapter {
-    return (
-      this.injectedDatabaseAdapter ??
-      createSqlDatabaseAdapter(this.config.get('framework').database)
-    );
+    if (this.injectedDatabaseAdapter) {
+      return this.injectedDatabaseAdapter;
+    }
+
+    const migrations: SchemaMigration[] = [];
+    for (const plugin of this.plugins.values()) {
+      for (const migration of plugin.schema?.migrations ?? []) {
+        migrations.push({
+          ...migration,
+          name: `plugin:${encodeURIComponent(plugin.id)}:${encodeURIComponent(migration.name)}`,
+        });
+      }
+    }
+
+    return createSqlDatabaseAdapter(this.config.get('framework').database, migrations);
   }
 
   /**
@@ -281,12 +350,23 @@ export class AnchorInstance {
   }
 
   private async rollbackInitialization(): Promise<void> {
+    const rollbackErrors: unknown[] = [];
     if (this.backgroundJobsRunning || this.initialized) {
-      await this.stopBackgroundJobs();
+      try {
+        await this.stopBackgroundJobs();
+      } catch (error) {
+        rollbackErrors.push(error);
+      }
     }
 
+    rollbackErrors.push(...(await this.cleanupInitializedPlugins()));
+
     if (this.database) {
-      await this.database.disconnect().catch(() => undefined);
+      try {
+        await this.database.disconnect();
+      } catch (error) {
+        rollbackErrors.push(error);
+      }
     }
 
     this.initialized = false;
@@ -296,6 +376,29 @@ export class AnchorInstance {
     this.webhookProcessor = null;
     this.watchers = [];
     this.expressRouter = null;
+
+    if (rollbackErrors.length > 0) {
+      console.error(
+        'Anchor initialization rollback failed',
+        new AggregateError(rollbackErrors, 'One or more resources failed to clean up'),
+      );
+    }
+  }
+
+  private async cleanupInitializedPlugins(): Promise<unknown[]> {
+    const plugins = this.initializedPlugins.splice(0).reverse();
+    const errors: unknown[] = [];
+
+    for (const plugin of plugins) {
+      if (!plugin.cleanup) continue;
+      try {
+        await plugin.cleanup();
+      } catch (error) {
+        errors.push(error);
+      }
+    }
+
+    return errors;
   }
 
   private ensureInitialized(): void {

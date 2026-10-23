@@ -18,7 +18,7 @@ describe('AnchorInstance lifecycle', () => {
     const anchor = new DelayedConnectAnchor(
       {
         network: { network: 'testnet' },
-        server: { port: 3000 },
+        server: { homeDomain: 'anchor.example.com', port: 3000 },
         security: {
           sep10SigningKey: signingKey,
           interactiveJwtSecret: 'jwt-secret',

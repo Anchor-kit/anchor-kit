@@ -26,6 +26,7 @@ All variables are optional. When unset the listed default applies.
 | ------------------------------ | ---------------------------------------------------------- | ------------------------------------------------------------------------------------------- |
 | `PORT`                         | `3000`                                                     | Port the example server listens on. Must be a positive number.                              |
 | `DATABASE_URL`                 | `file:/tmp/anchor-kit-example-<uuid>.sqlite`               | Database location. `file:...` selects SQLite; otherwise PostgreSQL.                         |
+| `ANCHOR_HOME_DOMAIN`           | `localhost`                                                | SEP-10 anchor home domain hostname, without scheme or path.                                 |
 | `INTERACTIVE_DOMAIN`           | `http://localhost:3000`                                    | Interactive flow domain used by SEP-24.                                                     |
 | `SEP10_SIGNING_KEY`            | fresh random keypair                                       | SEP-10 challenge signing secret. Regenerated on every start unset.                          |
 | `INTERACTIVE_JWT_SECRET`       | `example-jwt-secret`                                       | Secret for SEP-24 interactive JWT tokens.                                                   |

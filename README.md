@@ -59,7 +59,10 @@ app.use(
 
 const anchor = createAnchor({
   network: { network: 'testnet' },
-  server: { interactiveDomain: 'https://anchor.example.com' },
+  server: {
+    homeDomain: 'anchor.example.com',
+    interactiveDomain: 'https://anchor.example.com',
+  },
   security: {
     sep10SigningKey: process.env.SEP10_SIGNING_KEY!,
     interactiveJwtSecret: process.env.INTERACTIVE_JWT_SECRET!,
@@ -97,6 +100,7 @@ const anchor = createAnchor({
   },
   webhooks: {
     onEvent: async (event, ctx) => {
+      if (ctx.signal.aborted) return;
       console.log('webhook event', event.eventId, ctx.receivedAt);
     },
   },
@@ -193,6 +197,10 @@ import { makeSqliteDbUrlForTests } from 'anchor-kit';
 
 const databaseUrl = makeSqliteDbUrlForTests();
 ```
+
+Run `bun test tests/runtime/atomic-idempotency-concurrency.test.ts` to check PostgreSQL concurrency. It skips five PostgreSQL cases when both `TEST_POSTGRES_URL` and `DATABASE_URL` are unset. CI and `REQUIRE_POSTGRES_TESTS` require a working PostgreSQL connection.
+
+Run `bun test tests/core/plugin-lifecycle.test.ts` to check reverse-order cleanup during shutdown and initialization rollback. The tests also check that cleanup failures do not prevent database disconnect.
 
 ### Custom database adapters
 

@@ -1,117 +1,134 @@
-# Releasing anchor-kit
+# Release preflight
 
-This document explains how `anchor-kit` is versioned and published to npm, and how the
-`publish.yml` workflow enforces that only intentional, verified releases reach the registry.
+Use this guide before creating a GitHub Release for the public npm package
+`anchor-kit`. It verifies that npm will trust the intended repository and workflow;
+it does not publish a package, create a test version, or require anyone to display a
+token.
 
-## Overview
+## 1. Verify the repository and workflow identity
 
-Publishing is **release-driven**: pushing to a branch or tag does not publish anything by
-itself, and there is no manual "run this workflow" button. A package version is only published
-when a maintainer creates and publishes a GitHub Release in
+From a checkout of the release commit, verify that publishing follows a published
+GitHub Release. Branch and tag pushes do not publish a package version. A version is
+published when a maintainer creates and publishes a release in
 [`Anchor-kit/anchor-kit`](https://github.com/Anchor-kit/anchor-kit), and the release's tag matches the
 version already committed in `package.json`.
 
-## 1. Bump the version
-
-Before cutting a release, bump `version` in `package.json` (and `package-lock.json`) on `main`
-via a normal pull request, e.g. `0.0.4-beta` -> `0.1.0`. Follow [semver](https://semver.org/):
-
-- `patch` for backwards-compatible fixes
-- `minor` for backwards-compatible features
-- `major` for breaking changes
-
-Merge that version bump to `main` before creating the release below — the workflow will refuse
-to publish if the release tag and `package.json` version don't match.
-
-## 2. Create the GitHub release
-
-1. Go to the repository's **Releases** page and click **Draft a new release**.
-2. Create a tag in the form `vX.Y.Z` (for example `v0.1.0`) matching the version from step 1,
-   targeting `main`.
-3. Fill in release notes and click **Publish release**.
-
-Publishing the release is what triggers the workflow — the `publish.yml` workflow only runs on
-the `release` event's `published` type:
-
-```yaml
-on:
-  release:
-    types: [published]
+```sh
+git remote get-url origin
+git rev-parse --show-toplevel
 ```
 
-There is no `push`, `pull_request`, or `workflow_dispatch` trigger, so pushing tags/branches or
-running the workflow manually will not publish anything, and forks cannot trigger a publish
-against the real package.
+The canonical repository is `Anchor-kit/anchor-kit` and the workflow file is
+`.github/workflows/publish.yml`. In the workflow, confirm all of the following:
 
-## 3. What the workflow does
+- The job guard allows `github.repository == 'Anchor-kit/anchor-kit'`. A guard
+  still naming the previous owner `0xNgoo/anchor-kit` is a release blocker.
+- The trigger is a published GitHub Release, not a branch/tag push or an
+  unreviewed manual dispatch.
+- The publish job declares `environment: npm-publish` and has
+  `permissions: id-token: write`.
+- The workflow installs a current npm CLI that supports trusted publishing
+  (npm 11.5.1 or later), then runs the repository's checks and verifies the
+  release tag against `package.json` before publishing.
 
-On a published release, the `publish` job:
+Do not change a stale repository guard as part of owner verification; correct it
+through a reviewed workflow change before release.
 
-1. Only runs if `github.repository == 'Anchor-kit/anchor-kit'`. GitHub supplies this value as
-   the event repository's `owner/name`; the exact equality admits releases in this repository
-   and skips forks and other repositories.
-2. Checks out the exact commit tagged by the release.
-3. Installs dependencies with `bun install --frozen-lockfile`.
-4. Runs `lint`, `typecheck`, and `test`.
-5. Verifies the release tag (`vX.Y.Z`) matches the `version` field in `package.json`. If they
-   don't match, the job fails before anything is published.
-6. Builds the package (`bun run build`).
-7. Publishes with `npm publish --provenance --access public`.
+The publish job checks out the tagged commit, installs dependencies with
+`bun install --frozen-lockfile`, runs lint, typecheck, tests, and build, verifies
+the tag (`vX.Y.Z`) against `package.json`, then publishes with
+`npm publish --provenance --access public`.
 
-Build/test failures or a version mismatch stop the workflow before the publish step runs, so a
-bad release never reaches npm.
+## 2. Verify the package and publisher identity on npm
 
-## 4. Protected environment
+Open the `anchor-kit` package page on npmjs.com using an account authorized to
+manage its settings. Confirm that this is the intended, unscoped package and that
+the intended maintainers/organization have package administration and publish
+access. A similarly named package or a different npm owner is not sufficient.
 
-The `publish` job runs under the `npm-publish` GitHub Environment. Configure this environment in
-**Settings > Environments** with:
+Under **Package settings > Trusted Publisher**, verify or configure a **GitHub
+Actions** publisher with these exact identity values:
 
-- **Required reviewers**: only maintainers/approved release managers can approve a pending
-  deployment, so publishing a release still requires human sign-off.
-- **Deployment branch/tag rules** restricting the environment to `main` (and release tags), so
-  the environment's secrets/OIDC trust can't be reached from a PR branch.
+| npm trusted-publisher field        | Expected value |
+| ---------------------------------- | -------------- |
+| Repository owner                   | `Anchor-kit`   |
+| Repository name                    | `anchor-kit`   |
+| Workflow filename                  | `publish.yml`  |
+| GitHub environment, when requested | `npm-publish`  |
 
-Because the environment (and its secrets or OIDC trust configuration) is only reachable from the
-protected job, a pull request that edits `publish.yml` cannot use that edited workflow to obtain
-publish access — PR runs use the `pull_request` event, which this workflow doesn't trigger on at
-all, and even a maliciously modified copy of the workflow file only runs with the permissions of
-the ref it's checked out on, never the protected environment's secrets, until it has been merged
-and reviewed like any other change to `main`.
+The workflow filename is the basename, not `.github/workflows/publish.yml`.
+The publisher identity must match the repository, workflow filename, and
+environment that actually run the publish job. Do not infer that setup from a
+green CI check: owner verification requires access to npm package settings.
 
-## 5. Authentication: trusted publishing (OIDC) vs. npm token
+## 3. Verify GitHub environment protections
 
-The workflow prefers **npm trusted publishing** using GitHub OIDC:
+In `Anchor-kit/anchor-kit`, open **Settings > Environments > npm-publish** and
+confirm that the environment exists and is the one referenced by the publish
+job. Review required reviewers and deployment branch/tag restrictions against
+the release policy. Only authorized release maintainers should be able to
+approve a deployment or change this configuration.
 
-- `permissions: id-token: write` at the workflow level lets the job request a short-lived OIDC
-  token from GitHub.
-- `npm publish --provenance --access public` uses that OIDC identity (once the package is
-  configured as a "trusted publisher" for this repository/workflow on npmjs.com) to authenticate
-  and attach build provenance, without any long-lived npm token stored in GitHub.
-- The workflow updates npm to the latest version before publishing, since OIDC trusted publishing
-  requires npm >= 11.5.1.
+The npm trusted-publisher environment value and the workflow's `environment`
+value must match exactly. Do not add a token to the environment merely to make
+the check pass.
 
-**Fallback**: if trusted publishing isn't configured for the package yet, the workflow falls back
-to a classic token: set an **automation** npm token as the `NPM_TOKEN` secret in the `npm-publish`
-environment (Settings > Environments > npm-publish > Environment secrets). The `NODE_AUTH_TOKEN`
-env var is only set from that secret for the `npm publish` step, and GitHub Actions automatically
-redacts the secret value from all logs — the token itself is never printed. Once trusted
-publishing is enabled on npmjs.com, the `NPM_TOKEN` secret can be removed entirely.
+## 4. Confirm the authentication mode without exposing credentials
 
-## 6. Failure handling
+Preferred mode is npm trusted publishing (OIDC): the npm publisher is configured
+as above, the publishing job has `id-token: write`, and the installed npm version
+supports trusted publishing. This mode exchanges GitHub's job identity for
+short-lived npm authorization; it does not need a long-lived npm token.
 
-- **Lint/typecheck/test/build failure**: the job stops at that step; nothing is published. Fix
-  the issue on `main`, then create a new release (a new tag/version) — publishing is not retried
+The current workflow also references the `NPM_TOKEN` environment secret as a
+classic-token fallback. The owner must determine which mode is intended and
+verify that the workflow's publish-step environment agrees with it. If the
+repository intentionally retains the fallback, verify that the secret exists
+and is an appropriately restricted npm automation token. Never print, paste,
+decode, or add a token to logs or documentation. If OIDC is the only intended
+mode, remove the fallback through a reviewed workflow change and remove any
+unused token secret.
+
+These checks are read-only. Do not run `npm publish`, create a disposable
+version, or test publishing by weakening the workflow or environment.
+
+## 5. Run the focused repository check
+
+From the repository root, run:
+
+```sh
+node scripts/check-doc-acceptance.mjs
+```
+
+Expected result: exit code `0` and `Documentation acceptance checks passed.`
+This check asserts the documented repository/workflow/environment/publisher
+preflight and the roadmap and architecture acceptance gates. It does not
+authenticate with npm or contact the registry.
+
+Owner-only npm and GitHub settings checks in sections 2 and 3 are manual
+verification; do not treat the focused local check as evidence that those
+settings have already been configured.
+
+## References
+
+- [npm trusted publishers](https://docs.npmjs.com/trusted-publishers)
+- [GitHub deployment environments](https://docs.github.com/en/actions/how-tos/deploy/configure-and-manage-deployments/manage-environments)
+- [GitHub OIDC security hardening](https://docs.github.com/en/actions/deployment/security-hardening-your-deployments/about-security-hardening-with-openid-connect)
+
+## Publish failure outcomes
+
+- Lint, typecheck, test, or build failure stops the job before publication. Fix
+  the issue on `main`, then create a new release with a new tag/version. Publishing is not retried
   automatically against a failed release.
-- **Version mismatch**: the "Verify release tag matches package version" step fails with a clear
+- A version mismatch makes the "Verify release tag matches package version" step fail with a
   message showing both the tag and `package.json` version. Delete/edit the release, correct
   `package.json` on `main`, and cut a new release with a matching tag.
-- **Publish failure** (e.g. npm registry error, missing trusted publisher config, expired
-  `NPM_TOKEN`): the job fails at the `npm publish` step and no partial state is left on npm since
-  the version was never accepted by the registry. Fix the underlying auth/registry issue and
+- A publish failure, such as a registry error, missing trusted-publisher config, or expired
+  `NPM_TOKEN`, stops at `npm publish`. The registry has not accepted the version. Fix the auth or
+  registry issue and
   publish a new release once resolved.
-- **Untrusted context**: if the workflow is ever triggered from a fork or a repository other than
-  `Anchor-kit/anchor-kit`, the `publish` job's `if: github.repository == 'Anchor-kit/anchor-kit'` guard
-  causes it to be skipped rather than run.
+- The publish job skips events from forks and other repositories because its guard requires
+  `github.repository == 'Anchor-kit/anchor-kit'`.
 
 ### Focused repository-guard check
 

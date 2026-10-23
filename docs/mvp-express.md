@@ -41,6 +41,8 @@ Anchor-Kit auto-creates MVP tables during `anchor.init()`:
 - `idempotency_keys`
 - `webhook_events`
 - `watcher_tasks`
+- `customers`
+- `customer_accounts`
 
 PostgreSQL is the preferred production path.
 

@@ -15,6 +15,7 @@ describe('ServerConfigSchema', () => {
     expect(ServerConfigSchema).toHaveProperty('port');
     expect(ServerConfigSchema).toHaveProperty('debug');
     expect(ServerConfigSchema).toHaveProperty('interactiveDomain');
+    expect(ServerConfigSchema).toHaveProperty('webAuthDomain');
     expect(ServerConfigSchema).toHaveProperty('corsOrigins');
     expect(ServerConfigSchema).toHaveProperty('requestTimeout');
   });
@@ -80,6 +81,18 @@ describe('ServerConfigSchema', () => {
     });
   });
 
+  describe('webAuthDomain field', () => {
+    it('validates DNS-style domains', () => {
+      expect(ServerConfigSchema.webAuthDomain.validate('auth.anchor.example.com')).toBe(true);
+      expect(ServerConfigSchema.webAuthDomain.validate('localhost')).toBe(true);
+    });
+    it('rejects URLs and invalid domain labels', () => {
+      expect(ServerConfigSchema.webAuthDomain.validate('https://anchor.example.com')).toBe(false);
+      expect(ServerConfigSchema.webAuthDomain.validate('-invalid.example')).toBe(false);
+      expect(ServerConfigSchema.webAuthDomain.validate('')).toBe(false);
+    });
+  });
+
   describe('corsOrigins field', () => {
     it('validates arrays of non-empty origin strings', () => {
       expect(ServerConfigSchema.corsOrigins.validate(['https://app.example.com'])).toBe(true);
@@ -116,6 +129,7 @@ describe('ServerConfigSchema', () => {
 describe('validateServerConfig', () => {
   it('returns empty array for valid config', () => {
     const errors = validateServerConfig({
+      homeDomain: 'anchor.example.com',
       host: 'localhost',
       port: 3000,
       debug: false,
@@ -126,8 +140,8 @@ describe('validateServerConfig', () => {
     expect(errors).toEqual([]);
   });
 
-  it('returns empty array for empty config (all fields optional)', () => {
-    expect(validateServerConfig({})).toEqual([]);
+  it('requires a home domain when server config is empty', () => {
+    expect(validateServerConfig({})).toEqual(['homeDomain: is required']);
   });
 
   it('returns error for invalid port', () => {

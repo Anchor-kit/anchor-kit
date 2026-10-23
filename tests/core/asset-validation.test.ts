@@ -5,7 +5,7 @@ import { describe, expect, it } from 'vitest';
 describe('Asset Validation (#254)', () => {
   const baseConfig: AnchorKitConfig = {
     network: { network: 'testnet' },
-    server: { port: 3000 },
+    server: { homeDomain: 'anchor.example.com', port: 3000 },
     security: {
       sep10SigningKey: 'secret-key-10',
       interactiveJwtSecret: 'jwt-secret',
