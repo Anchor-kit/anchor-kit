@@ -162,6 +162,12 @@ function makeFakeDb(rejectOnIdempotency = false): {
     async insertOrGetWebhookEvent() {
       throw new Error('Not implemented in this stub');
     },
+    async claimWebhookAttempt() {
+      return null;
+    },
+    async completeWebhookAttempt() {
+      return false;
+    },
     async updateWebhookEventStatus() {},
     async insertWatcherTask() {},
     async listPendingWatcherTasks() {
@@ -170,6 +176,18 @@ function makeFakeDb(rejectOnIdempotency = false): {
     async updateWatcherTaskStatus() {},
     async countProcessedWatcherTasks() {
       return 0;
+    },
+    async insertOrGetSettlementJob() {
+      throw new Error('Not implemented in this stub');
+    },
+    async getSettlementJobByOperationId() {
+      return null;
+    },
+    async listPendingSettlementJobs() {
+      return [];
+    },
+    async updateSettlementJobStatus() {
+      return false;
     },
     async cleanupOldRecords() {},
   };

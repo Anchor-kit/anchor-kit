@@ -13,10 +13,33 @@ describe('DefaultWebhookProcessor Unit Tests', () => {
           eventId: 'external-id',
           provider: 'generic',
           payload: {},
+          status: 'pending',
+          errorMessage: null,
+          processedAt: null,
           createdAt: new Date().toISOString(),
+          operationKey: 'generic:external-id',
+          attemptCount: 0,
+          attemptId: null,
+          leaseOwner: null,
+          leaseExpiresAt: null,
         },
       }),
-      updateWebhookEventStatus: vi.fn().mockResolvedValue(undefined),
+      claimWebhookAttempt: vi.fn().mockImplementation(async ({ id, leaseOwner }) => ({
+        id,
+        eventId: 'external-id',
+        provider: 'generic',
+        payload: {},
+        status: 'pending',
+        errorMessage: null,
+        processedAt: null,
+        createdAt: new Date().toISOString(),
+        operationKey: 'generic:external-id',
+        attemptCount: 1,
+        attemptId: 'attempt-1',
+        leaseOwner,
+        leaseExpiresAt: new Date(Date.now() + 60_000).toISOString(),
+      })),
+      completeWebhookAttempt: vi.fn().mockResolvedValue(true),
     } as unknown as DatabaseAdapter;
 
     const mockConfig = {
@@ -43,8 +66,10 @@ describe('DefaultWebhookProcessor Unit Tests', () => {
     await expect(processor.process(input)).rejects.toThrow('Webhook processing failed');
 
     // Should have updated status to failed with error message
-    expect(mockDatabase.updateWebhookEventStatus).toHaveBeenCalledWith({
+    expect(mockDatabase.completeWebhookAttempt).toHaveBeenCalledWith({
       id: 'internal-id',
+      attemptId: 'attempt-1',
+      leaseOwner: expect.any(String),
       status: 'failed',
       errorMessage: 'Webhook callback failed',
     });
@@ -59,10 +84,33 @@ describe('DefaultWebhookProcessor Unit Tests', () => {
           eventId: 'external-id-2',
           provider: 'generic',
           payload: {},
+          status: 'pending',
+          errorMessage: null,
+          processedAt: null,
           createdAt: new Date().toISOString(),
+          operationKey: 'generic:external-id-2',
+          attemptCount: 0,
+          attemptId: null,
+          leaseOwner: null,
+          leaseExpiresAt: null,
         },
       }),
-      updateWebhookEventStatus: vi.fn().mockResolvedValue(undefined),
+      claimWebhookAttempt: vi.fn().mockImplementation(async ({ id, leaseOwner }) => ({
+        id,
+        eventId: 'external-id-2',
+        provider: 'generic',
+        payload: {},
+        status: 'pending',
+        errorMessage: null,
+        processedAt: null,
+        createdAt: new Date().toISOString(),
+        operationKey: 'generic:external-id-2',
+        attemptCount: 1,
+        attemptId: 'attempt-1',
+        leaseOwner,
+        leaseExpiresAt: new Date(Date.now() + 60_000).toISOString(),
+      })),
+      completeWebhookAttempt: vi.fn().mockResolvedValue(true),
     } as unknown as DatabaseAdapter;
 
     const mockConfig = {
@@ -90,9 +138,12 @@ describe('DefaultWebhookProcessor Unit Tests', () => {
     expect(result.duplicate).toBe(false);
 
     // Should have updated status to processed
-    expect(mockDatabase.updateWebhookEventStatus).toHaveBeenCalledWith({
+    expect(mockDatabase.completeWebhookAttempt).toHaveBeenCalledWith({
       id: 'internal-id-2',
+      attemptId: 'attempt-1',
+      leaseOwner: expect.any(String),
       status: 'processed',
+      errorMessage: undefined,
     });
   });
 
@@ -106,6 +157,11 @@ describe('DefaultWebhookProcessor Unit Tests', () => {
       errorMessage: 'temporary failure',
       processedAt: new Date().toISOString(),
       createdAt: new Date().toISOString(),
+      operationKey: 'generic:external-id-3',
+      attemptCount: 0,
+      attemptId: null,
+      leaseOwner: null,
+      leaseExpiresAt: null,
     };
 
     const insertOrGetWebhookEvent = vi
@@ -118,10 +174,25 @@ describe('DefaultWebhookProcessor Unit Tests', () => {
           errorMessage: null,
           processedAt: null,
           payload: { type: 'retry' },
+          attemptId: null,
+          leaseOwner: null,
+          leaseExpiresAt: null,
         },
       });
     const mockDatabase = {
       insertOrGetWebhookEvent,
+      async claimWebhookAttempt({ id, leaseOwner }: { id: string; leaseOwner: string }) {
+        return {
+          ...failingRecord,
+          id,
+          status: 'pending' as const,
+          attemptId: 'attempt-1',
+          attemptCount: 1,
+          leaseOwner,
+          leaseExpiresAt: new Date(Date.now() + 60_000).toISOString(),
+        };
+      },
+      completeWebhookAttempt: vi.fn().mockResolvedValue(true),
       updateWebhookEventStatus: vi.fn().mockResolvedValue(undefined),
     } as unknown as DatabaseAdapter;
 
@@ -144,9 +215,12 @@ describe('DefaultWebhookProcessor Unit Tests', () => {
     expect(retryResult.duplicate).toBe(false);
     expect(retryResult.eventId).toBe('external-id-3');
     expect(onEvent).toHaveBeenCalledTimes(1);
-    expect(mockDatabase.updateWebhookEventStatus).toHaveBeenLastCalledWith({
+    expect(mockDatabase.completeWebhookAttempt).toHaveBeenLastCalledWith({
       id: 'internal-id-3',
+      attemptId: 'attempt-1',
+      leaseOwner: expect.any(String),
       status: 'processed',
+      errorMessage: undefined,
     });
 
     insertOrGetWebhookEvent.mockResolvedValueOnce({

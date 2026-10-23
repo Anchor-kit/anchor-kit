@@ -9,9 +9,17 @@ import {
 import type { DatabaseAdapter } from '@/runtime/interfaces.ts';
 import { InMemoryRateLimiter } from '@/runtime/http/rate-limiter.ts';
 import { DefaultWebhookProcessor } from '@/runtime/webhooks/default-webhook-processor.ts';
-import { Account, Keypair, Networks, Operation, TransactionBuilder } from '@stellar/stellar-sdk';
+import {
+  Account,
+  Keypair,
+  Networks,
+  Operation,
+  Transaction,
+  TransactionBuilder,
+} from '@stellar/stellar-sdk';
 import { EventEmitter } from 'node:events';
 import type { IncomingMessage, ServerResponse } from 'node:http';
+import jwt from 'jsonwebtoken';
 import { describe, expect, it } from 'vitest';
 
 class ControllableFakeDatabaseAdapter implements DatabaseAdapter {
@@ -115,6 +123,12 @@ class ControllableFakeDatabaseAdapter implements DatabaseAdapter {
   async insertOrGetWebhookEvent(): Promise<never> {
     throw new Error('Not implemented');
   }
+  async claimWebhookAttempt(): Promise<null> {
+    return null;
+  }
+  async completeWebhookAttempt(): Promise<boolean> {
+    return false;
+  }
   async updateWebhookEventStatus(): Promise<void> {}
   async insertWatcherTask(): Promise<void> {}
   async listPendingWatcherTasks(): Promise<never[]> {
@@ -124,17 +138,43 @@ class ControllableFakeDatabaseAdapter implements DatabaseAdapter {
   async countProcessedWatcherTasks(): Promise<number> {
     return 0;
   }
+  async insertOrGetSettlementJob(): Promise<never> {
+    throw new Error('Not implemented');
+  }
+  async getSettlementJobByOperationId() {
+    return null;
+  }
+  async listPendingSettlementJobs(): Promise<never[]> {
+    return [];
+  }
+  async updateSettlementJobStatus(): Promise<boolean> {
+    return false;
+  }
   async cleanupOldRecords(): Promise<void> {}
 }
 
-function makeTestContext(dbAdapter: DatabaseAdapter, serverKeypair: Keypair): ExpressRouterContext {
+function makeTestContext(
+  dbAdapter: DatabaseAdapter,
+  serverKeypair: Keypair,
+  clientAttribution?: { domain: string; signingKey: string },
+): ExpressRouterContext {
   const config = new AnchorConfig({
     network: { network: 'testnet' },
-    server: { interactiveDomain: 'https://anchor.test' },
+    server: {
+      interactiveDomain: 'https://anchor.test',
+      ...(clientAttribution ? { corsOrigins: [`https://${clientAttribution.domain}`] } : {}),
+    },
     security: {
       sep10SigningKey: serverKeypair.secret(),
       interactiveJwtSecret: 'test-jwt-secret-key-1234567890',
       distributionAccountSecret: Keypair.random().secret(),
+      ...(clientAttribution
+        ? {
+            enableClientAttribution: true,
+            clientDomain: clientAttribution.domain,
+            clientDomainSigningKey: clientAttribution.signingKey,
+          }
+        : {}),
     },
     assets: {
       assets: [{ code: 'USDC', issuer: Keypair.random().publicKey() }],
@@ -170,27 +210,39 @@ async function buildSignedChallengeXdr(
   serverKeypair: Keypair,
   userKeypair: Keypair,
   context: ExpressRouterContext,
+  clientDomainSigner?: Keypair,
 ): Promise<{ challengeXdr: string; nonce: string }> {
   const account = userKeypair.publicKey();
   const nonce = 'test-nonce-' + Math.random().toString(36).slice(2);
   const now = Math.floor(Date.now() / 1000);
 
-  const tx = new TransactionBuilder(new Account(serverKeypair.publicKey(), '0'), {
+  const transactionBuilder = new TransactionBuilder(new Account(serverKeypair.publicKey(), '0'), {
     fee: '100',
     networkPassphrase: Networks.TESTNET,
-  })
-    .addOperation(
+  }).addOperation(
+    Operation.manageData({
+      name: 'anchor_auth',
+      value: nonce,
+      source: account,
+    }),
+  );
+
+  const securityConfig = context.config.get('security');
+  if (securityConfig.enableClientAttribution) {
+    transactionBuilder.addOperation(
       Operation.manageData({
-        name: 'anchor_auth',
-        value: nonce,
-        source: account,
+        name: 'client_domain',
+        value: securityConfig.clientDomain!,
+        source: securityConfig.clientDomainSigningKey!,
       }),
-    )
-    .setTimebounds(now, now + 300)
-    .build();
+    );
+  }
+
+  const tx = transactionBuilder.setTimebounds(now, now + 300).build();
 
   tx.sign(serverKeypair);
   tx.sign(userKeypair);
+  if (clientDomainSigner) tx.sign(clientDomainSigner);
 
   const expiresAt = new Date((now + 300) * 1000).toISOString();
   await context.database.insertAuthChallenge({
@@ -259,6 +311,64 @@ function makeMockRequestResponse(method: string, path: string, body: Record<stri
 }
 
 describe('Auth Challenge Consumption Atomicity & Recovery (#451)', () => {
+  it('generates unique 64-byte base64 nonces and consumes the stored nonce once', async () => {
+    const serverKeypair = Keypair.random();
+    const userKeypair = Keypair.random();
+    const database = new ControllableFakeDatabaseAdapter();
+    const context = makeTestContext(database, serverKeypair);
+
+    async function requestChallenge() {
+      const request = makeMockRequestResponse(
+        'GET',
+        `/auth/challenge?account=${userKeypair.publicKey()}`,
+        {},
+      );
+      await handleExpressRouterRequest(context, request.req, request.res);
+      expect(request.getResult().status).toBe(200);
+
+      const challengeXdr = String(request.getResult().body.challenge);
+      const transaction = new Transaction(challengeXdr, Networks.TESTNET);
+      const nonceOperation = transaction.operations.find(
+        (operation) => operation.type === 'manageData' && operation.name === 'anchor_auth',
+      );
+      expect(nonceOperation?.type).toBe('manageData');
+      if (nonceOperation?.type !== 'manageData') {
+        throw new Error('SEP-10 challenge is missing its nonce operation');
+      }
+
+      const nonceBytes = Buffer.isBuffer(nonceOperation.value)
+        ? nonceOperation.value
+        : Buffer.from(String(nonceOperation.value), 'utf8');
+      const nonce = nonceBytes.toString('utf8');
+      expect(nonceBytes).toHaveLength(64);
+      expect(Buffer.from(nonce, 'base64')).toHaveLength(48);
+      expect(Buffer.from(nonce, 'base64').toString('base64')).toBe(nonce);
+      expect(database.challenges.get(nonce)?.challenge).toBe(nonce);
+      return { transaction, nonce };
+    }
+
+    const firstChallenge = await requestChallenge();
+    const secondChallenge = await requestChallenge();
+    expect(secondChallenge.nonce).not.toBe(firstChallenge.nonce);
+
+    firstChallenge.transaction.sign(userKeypair);
+    const tokenRequest = makeMockRequestResponse('POST', '/auth/token', {
+      account: userKeypair.publicKey(),
+      challenge: firstChallenge.transaction.toXDR(),
+    });
+    await handleExpressRouterRequest(context, tokenRequest.req, tokenRequest.res);
+    expect(tokenRequest.getResult().status).toBe(200);
+    expect(database.challenges.get(firstChallenge.nonce)?.consumedAt).toEqual(expect.any(String));
+
+    const replayRequest = makeMockRequestResponse('POST', '/auth/token', {
+      account: userKeypair.publicKey(),
+      challenge: firstChallenge.transaction.toXDR(),
+    });
+    await handleExpressRouterRequest(context, replayRequest.req, replayRequest.res);
+    expect(replayRequest.getResult().status).toBe(401);
+    expect(replayRequest.getResult().body.message).toBe('Challenge already used');
+  });
+
   it('expires at maxTime and accepts requests only before the fixed boundary', () => {
     const maxTime = Date.parse('2026-01-01T00:05:00.000Z');
     const expiresAt = new Date(maxTime).toISOString();
@@ -339,6 +449,77 @@ describe('Auth Challenge Consumption Atomicity & Recovery (#451)', () => {
     expect(result2.status).toBe(200);
     expect(result2.body.token).toBeDefined();
     expect(result2.body.token_type).toBe('Bearer');
+  });
+
+  it('requires a valid configured client-domain signature and includes the claim', async () => {
+    const serverKeypair = Keypair.random();
+    const userKeypair = Keypair.random();
+    const clientDomainSigner = Keypair.random();
+    const context = makeTestContext(new ControllableFakeDatabaseAdapter(), serverKeypair, {
+      domain: 'wallet.example',
+      signingKey: clientDomainSigner.publicKey(),
+    });
+    const signedChallenge = await buildSignedChallengeXdr(
+      serverKeypair,
+      userKeypair,
+      context,
+      clientDomainSigner,
+    );
+    const validRequest = makeMockRequestResponse('POST', '/auth/token', {
+      account: userKeypair.publicKey(),
+      challenge: signedChallenge.challengeXdr,
+    });
+
+    await handleExpressRouterRequest(context, validRequest.req, validRequest.res);
+    const validResult = validRequest.getResult();
+    expect(validResult.status).toBe(200);
+    expect(validResult.body.token).toBeDefined();
+
+    const decoded = jwt.decode(validResult.body.token as string) as Record<string, unknown>;
+    expect(decoded.client_domain).toBe('wallet.example');
+
+    const missingSignatureContext = makeTestContext(
+      new ControllableFakeDatabaseAdapter(),
+      serverKeypair,
+      { domain: 'wallet.example', signingKey: clientDomainSigner.publicKey() },
+    );
+    const unsignedChallenge = await buildSignedChallengeXdr(
+      serverKeypair,
+      userKeypair,
+      missingSignatureContext,
+    );
+    const invalidRequest = makeMockRequestResponse('POST', '/auth/token', {
+      account: userKeypair.publicKey(),
+      challenge: unsignedChallenge.challengeXdr,
+    });
+    await handleExpressRouterRequest(
+      missingSignatureContext,
+      invalidRequest.req,
+      invalidRequest.res,
+    );
+    expect(invalidRequest.getResult()).toMatchObject({
+      status: 401,
+      body: { error: 'invalid_challenge' },
+    });
+    expect(invalidRequest.getResult().body.token).toBeUndefined();
+
+    const wrongSignerChallenge = await buildSignedChallengeXdr(
+      serverKeypair,
+      userKeypair,
+      missingSignatureContext,
+      Keypair.random(),
+    );
+    const wrongSignerRequest = makeMockRequestResponse('POST', '/auth/token', {
+      account: userKeypair.publicKey(),
+      challenge: wrongSignerChallenge.challengeXdr,
+    });
+    await handleExpressRouterRequest(
+      missingSignatureContext,
+      wrongSignerRequest.req,
+      wrongSignerRequest.res,
+    );
+    expect(wrongSignerRequest.getResult().status).toBe(401);
+    expect(wrongSignerRequest.getResult().body.token).toBeUndefined();
   });
 
   it('guarantees atomic consumption in SqlDatabaseAdapter under concurrent calls', async () => {

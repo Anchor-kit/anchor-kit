@@ -106,7 +106,11 @@ describe('versioned database migrations', () => {
       });
       expect(
         database.prepare('SELECT name FROM anchor_kit_migrations ORDER BY name').all(),
-      ).toEqual([{ name: 'core:001-initial-schema' }, { name: 'core:002-idempotency-status' }]);
+      ).toEqual([
+        { name: 'core:001-initial-schema' },
+        { name: 'core:002-idempotency-status' },
+        { name: 'core:003-current-runtime-tables' },
+      ]);
     } finally {
       await adapter.disconnect();
       removeSqliteFile(path);

@@ -15,17 +15,22 @@ This file tracks where the codebase currently aligns or diverges from the canoni
 ## Implemented Now (Runtime)
 
 - SQL persistence through the `DatabaseAdapter` interface, with SQLite support for local development and tests and PostgreSQL support through the configured SQL client.
-- HTTP foundation routes for health/info, authentication challenge/token, interactive-deposit requests, transaction lookup, and webhook intake, including request limits and rate limiting. These SDK-specific handlers do not by themselves establish complete SEP wire-protocol conformance.
-- Webhook processing with optional signature verification, event deduplication, persistence, callback dispatch, and failure status updates.
+- Express HTTP routes cover health/info, standard and legacy SEP-10 authentication, interactive-deposit requests, transaction lookup, and webhook intake. Request limits, rate limiting, and request-deadline abort signals apply to runtime routes and deposit hooks. These handlers do not establish complete SEP wire-protocol conformance.
+- Webhook processing supports optional signature verification, provider-scoped event deduplication, persistence, callback dispatch, failure status updates, and an unresolved status for timed-out callbacks.
+- Configured SEP-10 client-domain signatures are verified before token issuance, and the client domain is included in the token claim.
 - In-memory queue adapter for bounded background work and graceful shutdown.
+- SQL-backed settlement job records with stable operation identity and reconnect-safe pending state.
 - Transaction watcher lifecycle for polling pending transactions, persisting watcher tasks, and dispatching work through the queue.
-- Plugin route registration and active deposit-request, SEP-10 challenge, and transaction-status hooks. The withdrawal-request hook is typed but is not currently invoked.
+- Plugin route registration and active deposit-request, SEP-10 challenge, and transaction-status hooks. The withdrawal-request hook is typed but is not invoked.
+- Typed KYC verification contract and deterministic in-memory mock provider for local development and tests. Customer persistence is available; asset-policy enforcement is not connected.
+- SEP-10 signer-weight verification primitive; account signer lookup and endpoint integration remain separate work.
+- Provider-neutral payment rail adapter contract for initiation, event verification, status lookup, and recovery. No provider implementation is bundled.
 
 ## Protocol Conformance (Not Yet Implemented)
 
-- Complete protocol engines and conformance: SEP-6, SEP-12, SEP-24 deposit/withdrawal flows, SEP-31, and SEP-38. Existing HTTP routes and protocol-related types are partial foundation support, not complete protocol implementations.
-- Adapter implementations: rail adapters, signer adapters, KYC provider adapters, and rate adapters.
-- Provider integrations and protocol transaction state machines.
+- Complete protocol engines and conformance for SEP-6, SEP-12, SEP-24 deposit/withdrawal flows, SEP-31, and SEP-38. Existing HTTP routes, SEP-10 primitives, and protocol-related types provide partial foundation support, not complete protocol implementations.
+- Provider adapters for rails, remote signing, KYC, and rates. A local Stellar Keypair signer is implemented.
+- Protocol transaction state machines and provider integrations.
 
 ## Intentionally Deferred
 
