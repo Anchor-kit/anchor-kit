@@ -33,7 +33,7 @@ try {
       import express from 'express';
       import { createAnchor } from 'anchor-kit';
 
-      const signingKey = 'SCZJBZ6S7HWMQVT7DM74JVHVDKCEE5P6I6T3E5M7LJM6LJM6LJM6LJM6';
+      const signingKey = 'SAAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQC5MY';
       const anchor = createAnchor({
         network: { network: 'testnet' },
         server: { interactiveDomain: 'https://anchor.example.com' },
