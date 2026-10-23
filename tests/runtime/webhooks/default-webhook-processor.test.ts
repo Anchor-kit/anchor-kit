@@ -219,12 +219,14 @@ describe('DefaultWebhookProcessor', () => {
       database: mockDatabase as DatabaseAdapter,
     });
 
-    await expect(retryProcessor.process({
-      eventId: 'evt_retry',
-      provider: 'test-provider',
-      payload: { type: 'test' },
-      rawBody: '{}',
-    })).rejects.toThrow('Webhook processing failed');
+    await expect(
+      retryProcessor.process({
+        eventId: 'evt_retry',
+        provider: 'test-provider',
+        payload: { type: 'test' },
+        rawBody: '{}',
+      }),
+    ).rejects.toThrow('Webhook processing failed');
     await retryProcessor.process({
       eventId: 'evt_retry',
       provider: 'test-provider',
