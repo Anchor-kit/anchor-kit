@@ -45,6 +45,30 @@ export interface AccountSigner {
   weight: number;
 }
 
+/** Signers and thresholds for a Stellar account, as reported by an account lookup source. */
+export interface AccountSignerConfiguration {
+  account: string;
+  signers: AccountSigner[];
+  thresholds: {
+    low: number;
+    medium: number;
+    high: number;
+  };
+}
+
+export type AccountLookupResult =
+  | { outcome: 'found'; account: AccountSignerConfiguration }
+  | { outcome: 'not_found'; account: string };
+
+/**
+ * Injectable boundary for loading account signers and thresholds.
+ * Implementations must throw on upstream failure (network, provider outage);
+ * an unknown account must be reported as `not_found`, never as an exception.
+ */
+export interface AccountLookup {
+  lookupAccount(account: string): Promise<AccountLookupResult>;
+}
+
 export interface AuthChallengeRecord {
   id: string;
   account: string;

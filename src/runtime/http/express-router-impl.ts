@@ -23,6 +23,25 @@ import { extractClientIdentifier } from './client-identifier.ts';
 const SEP10_AUTH_OPERATION_SUFFIX = ' auth';
 
 /**
+ * Result of looking up an account's configured signers via an injectable
+ * SEP-10 account lookup. Distinguishes not-found from upstream failures.
+ */
+export type Sep10AccountLookupResult =
+  | {
+      status: 'found';
+      account: {
+        signers: Array<{ key: string; weight: number }>;
+        thresholds: { low: number; medium: number; high: number };
+      };
+    }
+  | { status: 'not_found' }
+  | { status: 'unavailable'; reason?: string };
+
+export interface Sep10AccountLookup {
+  lookup(accountId: string): Promise<Sep10AccountLookupResult>;
+}
+
+/**
  * Stable issuer for bearer access tokens minted by the anchor API.
  * Tokens issued by a different service must not be accepted here, even when
  * they are signed with the same shared secret.
