@@ -23,6 +23,12 @@ export type {
   TransactionKind,
   Amount,
   RailTransactionData,
+  RailAmount,
+  PaymentRailStatus,
+  PaymentRailOperation,
+  PaymentRailInitiationRequest,
+  NormalizedPaymentRailEvent,
+  RailCapabilityResult,
   StellarTransactionData,
   InteractiveData,
   TransactionError,
@@ -35,6 +41,7 @@ export type { KycStatus } from './foundation';
 export type { PostalAddress } from './foundation';
 export type { IdentityDocument } from './foundation';
 export type { KycData, KycData as CustomerKycData } from './foundation';
+export type { KycVerificationDecision } from './foundation';
 export type {
   AnchorPlugin,
   AnchorPluginContext,

@@ -23,10 +23,14 @@
   "scripts": {
     "dev": "bun run --watch src/index.ts",
     "build": "rm -rf dist && bun build src/index.ts --outdir dist --target node --format esm --packages external && bunx tsc -p tsconfig.types.json && node scripts/fix-dts-imports.mjs",
+    "check:aliases": "node scripts/check-alias-imports.mjs",
+    "check:consumer": "node fixtures/consumer/verify.mjs && bun run check:package-consumer",
+    "check:package-consumer": "bun run build && node scripts/check-package-consumer.mjs",
     "test": "bun test",
     "test:watch": "bun test --watch",
     "test:coverage": "bun test --coverage",
     "check:pack": "node scripts/check-pack-contents.mjs",
+    "check:package-smoke": "node scripts/check-package-smoke.mjs",
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
     "format": "prettier --write \"**/*.{ts,tsx,json,md}\"",
@@ -37,6 +41,7 @@
   },
   "dependencies": {
     "@stellar/stellar-sdk": "^14.6.0",
+    "@types/big.js": "^6.2.2",
     "bcryptjs": "^3.0.3",
     "big.js": "^7.0.1",
     "express": "^5.2.1",
@@ -47,9 +52,9 @@
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
+    "rolldown": "1.1.3",
     "@types/bcryptjs": "^3.0.0",
     "@types/better-sqlite3": "^7.6.13",
-    "@types/big.js": "^6.2.2",
     "@types/bun": "latest",
     "@types/express": "^5.0.6",
     "@types/jsonwebtoken": "^9.0.10",

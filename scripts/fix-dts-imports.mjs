@@ -1,7 +1,20 @@
-import { readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { existsSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { dirname, join, relative, resolve, sep } from 'node:path';
 
-const root = 'dist';
+const root = resolve('dist');
+
+function relativeDeclarationImport(fromFile, aliasPath) {
+  const targetPath = resolve(root, 'src', aliasPath.replace(/\.ts$/, ''));
+  return makeRelativeSpecifier(fromFile, targetPath);
+}
+
+function makeRelativeSpecifier(fromFile, targetPath) {
+  let specifier = relative(dirname(fromFile), targetPath).split(sep).join('/');
+  if (!specifier.startsWith('.')) {
+    specifier = `./${specifier}`;
+  }
+  return `${specifier}.js`;
+}
 
 function walk(dir) {
   const entries = readdirSync(dir);
@@ -18,11 +31,27 @@ function walk(dir) {
     }
 
     const original = readFileSync(full, 'utf8');
-    const replaced = original
-      .replace(/from\s+'@\/([^']+)\.ts'/g, "from 'anchor-kit/dist/src/$1'")
-      .replace(/from\s+"@\/([^"]+)\.ts"/g, 'from "anchor-kit/dist/src/$1"')
-      .replace(/from\s+'@\/([^']+)'/g, "from 'anchor-kit/dist/src/$1'")
-      .replace(/from\s+"@\/([^"]+)"/g, 'from "anchor-kit/dist/src/$1"');
+    const aliasesReplaced = original.replace(
+      /((?:from\s+|import\()\s*['"])@\/([^'"]+)(['"])/g,
+      (_match, prefix, aliasPath, suffix) =>
+        `${prefix}${relativeDeclarationImport(full, aliasPath)}${suffix}`,
+    );
+    const replaced = aliasesReplaced.replace(
+      /((?:from\s+|import\()\s*['"])(\.{1,2}\/[^'"]+)(['"])/g,
+      (_match, prefix, specifier, suffix) => {
+        if (/\.(?:[cm]?js|json)$/.test(specifier)) {
+          return `${prefix}${specifier}${suffix}`;
+        }
+
+        const normalizedSpecifier = specifier.replace(/\.ts$/, '');
+        const targetPath = resolve(dirname(full), normalizedSpecifier);
+        if (existsSync(join(targetPath, 'index.d.ts'))) {
+          return `${prefix}${normalizedSpecifier}/index.js${suffix}`;
+        }
+
+        return `${prefix}${normalizedSpecifier}.js${suffix}`;
+      },
+    );
 
     if (replaced !== original) {
       writeFileSync(full, replaced);

@@ -41,6 +41,18 @@ describe('StellarUtils', () => {
       expect(memo.value).toBe(txId);
     });
 
+    it('should deterministically encode arbitrary transaction IDs as SHA-256 hex', () => {
+      const transactionId = '550e8400-e29b-41d4-a716-446655440000';
+      const firstMemo = StellarUtils.generateMemo(transactionId);
+      const secondMemo = StellarUtils.generateMemo(transactionId);
+
+      expect(firstMemo).toEqual(secondMemo);
+      expect(firstMemo.value).toMatch(/^[0-9a-f]{64}$/);
+      expect(firstMemo.value).toBe(
+        'a3a9e1ed9732cab28868127be00f1ce9' + '21acaefdd5c3b23a6e9e0072bd9c1a34',
+      );
+    });
+
     it('should generate a text memo (truncated to 28 bytes)', () => {
       const txId = 'this_is_a_very_long_transaction_id_that_exceeds_28_bytes';
       const memo = StellarUtils.generateMemo(txId, 'text');
@@ -65,6 +77,22 @@ describe('StellarUtils', () => {
   });
 
   describe('buildPaymentXdr() and parseXdrTransaction()', () => {
+    it('should build and round-trip a generated UUID hash memo', async () => {
+      const transactionId = '550e8400-e29b-41d4-a716-446655440000';
+      const memo = StellarUtils.generateMemo(transactionId);
+      const xdr = await StellarUtils.buildPaymentXdr({
+        source: validAccountId,
+        destination: validAccountId,
+        amount: '1',
+        assetCode: 'XLM',
+        memo,
+        network: 'testnet',
+      });
+
+      const parsed = StellarUtils.parseXdrTransaction(xdr);
+      expect(parsed.memo).toEqual(memo);
+    });
+
     it('should build and then parse back a payment transaction', async () => {
       const params = {
         source: validAccountId,

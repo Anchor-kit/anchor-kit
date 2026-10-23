@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   publish:
-    if: github.repository == '0xNgoo/anchor-kit'
+    if: github.repository == 'Anchor-kit/anchor-kit'
     runs-on: ubuntu-latest
     environment: npm-publish
     steps:

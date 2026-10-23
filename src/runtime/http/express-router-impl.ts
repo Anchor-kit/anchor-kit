@@ -1,10 +1,10 @@
 import type { AnchorConfig } from '@/core/config.ts';
 import { ConfigError, PayloadTooLargeError, ValidationError } from '@/core/errors.ts';
 import { InMemoryRateLimiter, type RateLimitRule } from '@/runtime/http/rate-limiter.ts';
-import type { DatabaseAdapter, WebhookProcessor } from '@/runtime/interfaces.ts';
+import type { AccountSigner, DatabaseAdapter, WebhookProcessor } from '@/runtime/interfaces.ts';
 import type { PluginRouteContext, RouteDefinition } from '@/types/foundation.ts';
 import type { AnchorPluginHooks, DepositRequestBody } from '@/types/plugin.ts';
-import { IdempotencyUtils } from '@/utils/idempotency.ts';
+import { IdempotencyUtils } from '../../utils/idempotency.ts';
 import Big from 'big.js';
 import {
   Account,
@@ -15,7 +15,7 @@ import {
   TransactionBuilder,
 } from '@stellar/stellar-sdk';
 import jwt from 'jsonwebtoken';
-import { createHash, randomUUID } from 'node:crypto';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { version } from '../../../package.json';
 import { extractClientIdentifier } from './client-identifier.ts';
@@ -57,7 +57,23 @@ interface AuthenticatedRequestData {
 }
 
 type RawBodyValue = string | Buffer | Uint8Array;
-type IncomingRequestWithRawBody = IncomingMessage & { rawBody?: RawBodyValue; body?: unknown };
+type IncomingRequestWithRawBody = IncomingMessage & {
+  rawBody?: RawBodyValue;
+  body?: unknown;
+  deadlineSignal?: AbortSignal;
+};
+
+const timedOutResponses = new WeakSet<ServerResponse>();
+
+function deadlineSignal(req: IncomingMessage): AbortSignal {
+  const signal = (req as IncomingRequestWithRawBody).deadlineSignal;
+  if (!signal) throw new ConfigError('Request deadline signal is unavailable');
+  return signal;
+}
+
+function throwIfRequestAborted(req: IncomingMessage): void {
+  if (deadlineSignal(req).aborted) throw new Error('Request deadline exceeded');
+}
 
 function firstNonEmptyString(value: unknown): string | undefined {
   const values = Array.isArray(value) ? value : [value];
@@ -75,6 +91,7 @@ function sendJson(
   body: Record<string, unknown>,
   method = 'GET',
 ): void {
+  if (timedOutResponses.has(res) || res.writableEnded) return;
   const payload = JSON.stringify(body);
   if (!res.headersSent) {
     res.statusCode = status;
@@ -86,6 +103,28 @@ function sendJson(
   } else {
     res.end(payload);
   }
+}
+
+function sendStellarToml(context: ExpressRouterContext, res: ServerResponse, method: string): void {
+  const server = context.config.get('server');
+  const lines = [
+    `SIGNING_KEY = ${JSON.stringify(context.sep10ServerKeypair.publicKey())}`,
+    `NETWORK_PASSPHRASE = ${JSON.stringify(context.networkPassphrase)}`,
+  ];
+
+  if (server.webAuthEndpoint) {
+    lines.push(`WEB_AUTH_ENDPOINT = ${JSON.stringify(server.webAuthEndpoint)}`);
+  }
+  if (server.transferServerSep24) {
+    lines.push(`TRANSFER_SERVER_SEP0024 = ${JSON.stringify(server.transferServerSep24)}`);
+  }
+
+  const body = `${lines.join('\n')}\n`;
+  res.statusCode = 200;
+  res.setHeader('content-type', 'text/plain; charset=utf-8');
+  res.setHeader('access-control-allow-origin', '*');
+  res.setHeader('content-length', String(Buffer.byteLength(body, 'utf8')));
+  res.end(method === 'HEAD' ? undefined : body);
 }
 
 function setCorsHeaders(
@@ -127,6 +166,7 @@ function sendMethodNotAllowed(res: ServerResponse, allowedMethods: string[]): vo
 }
 
 function sendJsonUnauthorized(res: ServerResponse, body: Record<string, unknown>): void {
+  if (timedOutResponses.has(res) || res.writableEnded) return;
   if (!res.headersSent) {
     res.statusCode = 401;
     res.setHeader('content-type', 'application/json');
@@ -146,6 +186,7 @@ function sendJsonTimeout(res: ServerResponse): void {
       message: 'Request timeout',
     }),
   );
+  timedOutResponses.add(res);
 }
 
 async function withTimeout<T>(
@@ -339,6 +380,7 @@ function endpointPath(req: IncomingMessage): string {
 const BUILT_IN_PATHS = new Set([
   '/health',
   '/info',
+  '/auth',
   '/auth/challenge',
   '/auth/token',
   '/transactions/deposit/interactive',
@@ -389,6 +431,7 @@ function buildPluginRouteContext(
   req: IncomingMessage,
   res: ServerResponse,
   body: Record<string, unknown>,
+  signal: AbortSignal,
 ): PluginRouteContext {
   const query: Record<string, string | Array<string>> = {};
   for (const [key, value] of parseUrl(req).searchParams) {
@@ -400,6 +443,7 @@ function buildPluginRouteContext(
   return {
     request: req,
     response: res,
+    signal,
     params: {},
     query,
     body,
@@ -413,18 +457,19 @@ async function handlePluginRoute(
   registeredRoute: { pluginId: string; route: RouteDefinition },
   req: IncomingMessage,
   res: ServerResponse,
+  signal: AbortSignal,
 ): Promise<void> {
   let body: Record<string, unknown> = {};
   if (registeredRoute.route.method !== 'GET') {
     const parsedBody = await parsePostJsonBody(req, res, context.maxBodyBytes);
-    if (!parsedBody) return;
+    if (!parsedBody || signal.aborted) return;
     body = parsedBody.body;
   }
 
   const result = await registeredRoute.route.handler(
-    buildPluginRouteContext(context, req, res, body),
+    buildPluginRouteContext(context, req, res, body, signal),
   );
-  if (res.writableEnded || res.headersSent) return;
+  if (signal.aborted || res.writableEnded || res.headersSent) return;
   if (result === undefined) {
     res.statusCode = 204;
     res.end();
@@ -453,6 +498,68 @@ function hasValidSignature(transaction: Transaction, publicKey: string): boolean
   }
 
   return false;
+}
+
+/** Verify unique authorized account signers meet a SEP-10 signing threshold. */
+export function hasSufficientSignerWeight(
+  transaction: Transaction,
+  signers: readonly AccountSigner[],
+  threshold: number,
+): boolean {
+  if (!Number.isSafeInteger(threshold) || threshold <= 0 || threshold > 255) return false;
+
+  const signerWeights = new Map<string, number>();
+  for (const signer of signers) {
+    if (
+      !Number.isSafeInteger(signer.weight) ||
+      signer.weight <= 0 ||
+      signer.weight > 255 ||
+      signerWeights.has(signer.publicKey)
+    ) {
+      return false;
+    }
+    signerWeights.set(signer.publicKey, signer.weight);
+  }
+
+  const hash = transaction.hash();
+  const countedSigners = new Set<string>();
+  let totalWeight = 0;
+  for (const signature of transaction.signatures) {
+    for (const [publicKey, weight] of signerWeights) {
+      if (countedSigners.has(publicKey)) continue;
+      try {
+        if (Keypair.fromPublicKey(publicKey).verify(hash, signature.signature())) {
+          countedSigners.add(publicKey);
+          totalWeight += weight;
+          if (totalWeight >= threshold) return true;
+          break;
+        }
+      } catch {
+        // Ignore malformed signer keys and invalid signature entries.
+      }
+    }
+  }
+
+  return false;
+}
+
+function hasValidClientDomainSignature(
+  transaction: Transaction,
+  clientDomain: string,
+  signingKey: string,
+): boolean {
+  const operations = transaction.operations.filter(
+    (operation): operation is Operation.ManageData =>
+      operation.type === 'manageData' && operation.name === 'client_domain',
+  );
+  if (operations.length !== 1) return false;
+
+  const operation = operations[0];
+  return (
+    operation?.source === signingKey &&
+    operation.value?.toString('utf8') === clientDomain &&
+    hasValidSignature(transaction, signingKey)
+  );
 }
 
 function extractNonceFromChallenge(transaction: Transaction): string | null {
@@ -630,6 +737,7 @@ async function handleInfo(context: ExpressRouterContext, res: ServerResponse): P
 }
 
 function allowedMethodsForPath(path: string): readonly string[] | undefined {
+  if (path === '/auth') return ['GET', 'POST'];
   if (path === '/health' || path === '/info' || path === '/auth/challenge') return ['GET'];
   if (
     path === '/auth/token' ||
@@ -753,7 +861,7 @@ async function handleAuthChallenge(
     return;
   }
 
-  const nonce = randomUUID();
+  const nonce = randomBytes(48).toString('base64');
   const now = Math.floor(Date.now() / 1000);
   const expirationSeconds = context.config.get('security').challengeExpirationSeconds ?? 300;
   const expiresAtUnix = now + expirationSeconds;
@@ -812,6 +920,7 @@ async function handleAuthChallenge(
   const challengeXdr = hookedChallengeTx.toXDR();
   const expiresAt = new Date(expiresAtUnix * 1000).toISOString();
 
+  throwIfRequestAborted(req);
   await context.database.insertAuthChallenge({
     id: randomUUID(),
     account,
@@ -858,10 +967,15 @@ async function handleAuthToken(
     return;
   }
 
-  const account = typeof parsedBody.body.account === 'string' ? parsedBody.body.account.trim() : '';
-  const signedChallenge =
-    typeof parsedBody.body.challenge === 'string' ? parsedBody.body.challenge : '';
-  if (!account || !signedChallenge) {
+  let account = typeof parsedBody.body.account === 'string' ? parsedBody.body.account.trim() : '';
+  const signedChallenge = standardRequest
+    ? typeof parsedBody.body.transaction === 'string'
+      ? parsedBody.body.transaction
+      : ''
+    : typeof parsedBody.body.challenge === 'string'
+      ? parsedBody.body.challenge
+      : '';
+  if ((!standardRequest && !account) || !signedChallenge) {
     sendJson(res, 400, {
       error: 'invalid_request',
       message: standardRequest
@@ -934,6 +1048,24 @@ async function handleAuthToken(
     return;
   }
 
+  const securityConfig = context.config.get('security');
+  if (
+    securityConfig.enableClientAttribution &&
+    (!securityConfig.clientDomain ||
+      !securityConfig.clientDomainSigningKey ||
+      !hasValidClientDomainSignature(
+        transaction,
+        securityConfig.clientDomain,
+        securityConfig.clientDomainSigningKey,
+      ))
+  ) {
+    sendJson(res, 401, {
+      error: 'invalid_challenge',
+      message: 'Challenge is missing a valid client domain signature',
+    });
+    return;
+  }
+
   const stored = await context.database.getAuthChallengeByChallenge(nonce);
   if (!stored || stored.account !== account) {
     sendJson(res, 401, { error: 'invalid_challenge', message: 'Challenge not found' });
@@ -952,6 +1084,7 @@ async function handleAuthToken(
 
   let consumed: boolean;
   try {
+    throwIfRequestAborted(req);
     consumed = await context.database.markAuthChallengeConsumed(stored.id);
   } catch {
     sendJson(res, 500, {
@@ -975,6 +1108,9 @@ async function handleAuthToken(
       aud: ACCESS_TOKEN_AUDIENCE,
       scope: 'anchor_api',
       typ: 'access_token',
+      ...(securityConfig.enableClientAttribution
+        ? { client_domain: securityConfig.clientDomain }
+        : {}),
     },
     context.config.get('security').interactiveJwtSecret,
     { expiresIn: tokenLifetime },
@@ -1098,11 +1234,14 @@ async function handleDepositInteractive(
     body: parsedBody.body as DepositRequestBody,
     account: auth.account,
     asset: selectedAsset,
+    signal: deadlineSignal(req),
   };
 
   try {
     for (const hook of context.depositRequestHooks ?? []) {
+      throwIfRequestAborted(req);
       await hook(depositHookContext);
+      throwIfRequestAborted(req);
     }
   } catch {
     sendJson(res, 400, {
@@ -1131,6 +1270,7 @@ async function handleDepositInteractive(
 
   if (typeof idempotencyKey === 'string' && idempotencyKey.length > 0) {
     const idempotencyId = randomUUID();
+    throwIfRequestAborted(req);
     const reservation = await context.database.reserveIdempotencyRecord({
       id: idempotencyId,
       scope,
@@ -1196,6 +1336,7 @@ async function handleDepositInteractive(
     };
 
     try {
+      throwIfRequestAborted(req);
       await context.database.createDepositWithIdempotency({
         transaction: {
           id: transactionId,
@@ -1226,6 +1367,7 @@ async function handleDepositInteractive(
   }
 
   const transactionId = randomUUID();
+  throwIfRequestAborted(req);
   const created = await context.database.insertInteractiveTransaction({
     id: transactionId,
     account: auth.account,
@@ -1416,6 +1558,7 @@ const TRANSACTION_PATH_RE = /^\/transactions\/([^/]*)$/;
 const KNOWN_ROUTES: Record<string, string[]> = {
   '/health': ['GET'],
   '/info': ['GET'],
+  '/auth': ['GET', 'POST'],
   '/auth/challenge': ['GET'],
   '/auth/token': ['POST'],
   '/transactions/deposit/interactive': ['POST'],
@@ -1437,6 +1580,8 @@ export async function handleExpressRouterRequest(
   const path = endpointPath(req);
   const method = (req.method ?? 'GET').toUpperCase();
   const origin = firstNonEmptyString(req.headers.origin);
+  const deadlineController = new AbortController();
+  (req as IncomingRequestWithRawBody).deadlineSignal = deadlineController.signal;
 
   // Set CORS headers for all responses
   setCorsHeaders(res, origin, context.corsOrigins);
@@ -1455,12 +1600,27 @@ export async function handleExpressRouterRequest(
     return;
   }
 
+  if ((method === 'GET' || method === 'HEAD') && path === '/.well-known/stellar.toml') {
+    sendStellarToml(context, res, method);
+    return;
+  }
+
   // Wrap all other requests with timeout
   let timedOut = false;
   await withTimeout(
     (async () => {
       if (method === 'GET' && path === '/info') {
         await handleInfo(context, res);
+        return;
+      }
+
+      if (method === 'GET' && path === '/auth') {
+        await handleAuthChallenge(context, req, res, true);
+        return;
+      }
+
+      if (method === 'POST' && path === '/auth') {
+        await handleAuthToken(context, req, res, true);
         return;
       }
 
@@ -1522,7 +1682,7 @@ export async function handleExpressRouterRequest(
       if (pluginRoutes.length > 0) {
         const pluginRoute = pluginRoutes.find(({ route }) => route.method === method);
         if (pluginRoute) {
-          await handlePluginRoute(context, pluginRoute, req, res);
+          await handlePluginRoute(context, pluginRoute, req, res, deadlineController.signal);
         } else {
           sendMethodNotAllowed(res, pluginRoutes.map(({ route }) => route.method).sort());
         }
@@ -1541,6 +1701,7 @@ export async function handleExpressRouterRequest(
     () => {
       timedOut = true;
       sendJsonTimeout(res);
+      deadlineController.abort(new Error('Request deadline exceeded'));
     },
   ).catch((error: unknown) => {
     if (!timedOut) {

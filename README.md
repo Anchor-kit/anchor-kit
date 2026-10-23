@@ -97,6 +97,7 @@ const anchor = createAnchor({
   },
   webhooks: {
     onEvent: async (event, ctx) => {
+      if (ctx.signal.aborted) return;
       console.log('webhook event', event.eventId, ctx.receivedAt);
     },
   },
@@ -193,6 +194,27 @@ import { makeSqliteDbUrlForTests } from 'anchor-kit';
 
 const databaseUrl = makeSqliteDbUrlForTests();
 ```
+
+### Custom database adapters
+
+Pass a caller-created `DatabaseAdapter` as the second argument to `createAnchor`.
+Anchor-Kit calls `connect()` and `migrate()` during each `init()` cycle and
+`disconnect()` during shutdown. The caller creates and configures the adapter
+and retains ownership of the instance; do not share an active adapter between
+Anchor instances.
+
+```ts
+import { createAnchor } from 'anchor-kit';
+import type { AnchorKitConfig, DatabaseAdapter } from 'anchor-kit';
+
+declare const config: Partial<AnchorKitConfig>;
+declare const databaseAdapter: DatabaseAdapter;
+const anchor = createAnchor(config, { databaseAdapter });
+```
+
+The hostname of `server.interactiveDomain` is used for SEP-10 challenge domain
+operations. Configure that domain to match the public authentication endpoint;
+when it is omitted, the challenge uses `localhost`.
 
 ## Endpoints
 

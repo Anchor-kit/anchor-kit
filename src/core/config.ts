@@ -1,6 +1,12 @@
-import { ConfigError } from '@/core/errors.ts';
-import type { AnchorKitConfig, Asset, AnchorKitConfigSnapshot } from '@/types/config.ts';
-import { AnchorKitConfigSchema, DatabaseUrlSchema } from '@/utils/validation.ts';
+import { ConfigError } from './errors.ts';
+import type {
+  AnchorKitConfig,
+  Asset,
+  AnchorKitConfigSnapshot,
+  KycPolicyResolution,
+  KycRequiredField,
+} from '@/types/config.ts';
+import { AnchorKitConfigSchema, DatabaseUrlSchema } from '../utils/validation.ts';
 import { Networks } from '@stellar/stellar-sdk';
 import { mergeAnchorConfigWithDefaults } from './config-defaults.ts';
 
@@ -60,15 +66,124 @@ export class AnchorConfig {
   }
 
   /**
-   * Return required KYC fields by asset code.
-   * Returns an empty list when no policy exists or the asset is unmapped.
+   * Return resolved KYC fields for an asset, including global KYC flags.
    *
    * @param code - The exact asset code to look up.
    * @returns An array of required KYC field names.
    */
   public getKycRequiredFields(code: string): string[] {
-    const fields = this.config.kycRequired?.[code];
-    return Array.isArray(fields) ? fields : [];
+    return this.resolveKycRequirements(code).requiredFields;
+  }
+
+  /**
+   * Resolve asset-specific KYC fields together with explicitly enabled global KYC flags.
+   *
+   * With no KYC config, absent asset fields resolve to no requirements. When KYC config
+   * exists, its documented flag defaults apply. Asset fields and flags are combined in
+   * stable order with duplicates removed. A `none` level overrides fields for the asset;
+   * malformed policy values are returned in `errors`.
+   *
+   * @param code - The exact asset code to resolve.
+   */
+  public resolveKycRequirements(code: string): KycPolicyResolution {
+    const errors: string[] = [];
+    const fields: KycRequiredField[] = [];
+    const seen = new Set<string>();
+    const policies: unknown = this.config.kycRequired;
+
+    if (
+      policies !== undefined &&
+      (!policies || typeof policies !== 'object' || Array.isArray(policies))
+    ) {
+      return {
+        requiredFields: [],
+        errors: ['kycRequired must be an object mapping asset codes to field arrays'],
+      };
+    }
+
+    const configuredFields: unknown = this.config.kycRequired?.[code];
+
+    if (configuredFields !== undefined && !Array.isArray(configuredFields)) {
+      errors.push(`kycRequired.${code} must be an array of non-empty strings`);
+    } else if (Array.isArray(configuredFields)) {
+      configuredFields.forEach((field: unknown, index: number) => {
+        if (typeof field !== 'string' || field.trim().length === 0) {
+          errors.push(`kycRequired.${code}[${index}] must be a non-empty string`);
+          return;
+        }
+
+        const normalizedField = field.trim();
+        if (!seen.has(normalizedField)) {
+          seen.add(normalizedField);
+          fields.push(normalizedField);
+        }
+      });
+    }
+
+    const configuredKyc: unknown = this.config.kyc;
+    if (
+      configuredKyc !== undefined &&
+      (!configuredKyc || typeof configuredKyc !== 'object' || Array.isArray(configuredKyc))
+    ) {
+      errors.push('kyc must be an object');
+      return { requiredFields: fields, errors };
+    }
+
+    const kyc = this.config.kyc;
+    if (!kyc) {
+      return { requiredFields: fields, errors };
+    }
+
+    if (
+      kyc.level !== undefined &&
+      (typeof kyc.level !== 'string' || !['none', 'basic', 'strict'].includes(kyc.level))
+    ) {
+      errors.push('kyc.level must be one of: none, basic, strict');
+    }
+
+    if (kyc.level === 'none') {
+      return { requiredFields: [], errors };
+    }
+
+    const flagFields: Array<
+      [
+        keyof Pick<
+          NonNullable<AnchorKitConfig['kyc']>,
+          | 'requireDocuments'
+          | 'requireName'
+          | 'requireAddress'
+          | 'requireEmail'
+          | 'requirePhoneNumber'
+          | 'requireBirthDate'
+        >,
+        boolean,
+        KycRequiredField[],
+      ]
+    > = [
+      ['requireDocuments', true, ['documents']],
+      ['requireName', true, ['first_name', 'last_name']],
+      ['requireAddress', false, ['address']],
+      ['requireEmail', true, ['email_address']],
+      ['requirePhoneNumber', false, ['phone_number']],
+      ['requireBirthDate', false, ['birth_date']],
+    ];
+
+    for (const [flag, defaultRequired, requiredFields] of flagFields) {
+      const configuredFlag: unknown = kyc[flag];
+      if (configuredFlag !== undefined && typeof configuredFlag !== 'boolean') {
+        errors.push(`kyc.${flag} must be a boolean`);
+        continue;
+      }
+      if ((configuredFlag ?? defaultRequired) !== true) continue;
+      for (const field of requiredFields) {
+        if (!seen.has(field)) {
+          seen.add(field);
+          fields.push(field);
+        }
+      }
+    }
+
+    return { requiredFields: fields, errors };
   }
 
   /**
@@ -106,6 +221,19 @@ export class AnchorConfig {
   public validate(): void {
     try {
       AnchorKitConfigSchema.validate(this.config);
+      const kycRequired: unknown = this.config.kycRequired;
+      if (
+        kycRequired !== undefined &&
+        (!kycRequired || typeof kycRequired !== 'object' || Array.isArray(kycRequired))
+      ) {
+        throw new Error('kycRequired must be an object mapping asset codes to field arrays');
+      }
+      for (const code of Object.keys(this.config.kycRequired ?? {})) {
+        const { errors } = this.resolveKycRequirements(code);
+        if (errors.length > 0) {
+          throw new Error(errors.join('; '));
+        }
+      }
     } catch (error) {
       throw new ConfigError((error as Error).message);
     }

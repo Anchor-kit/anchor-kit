@@ -9,6 +9,7 @@ import {
   StrKey,
   Transaction,
 } from '@stellar/stellar-sdk';
+import { createHash } from 'node:crypto';
 import { ValidationUtils } from './validation';
 
 /**
@@ -56,10 +57,11 @@ export const StellarUtils = {
    */
   generateMemo(transactionId: string, type: 'hash' | 'text' = 'hash'): Memo {
     if (type === 'hash') {
-      // For hash memo, we expect a 32-byte value. If transactionId is a UUID,
-      // it's 16 bytes. We keep it as is, the SDK handles string/buffer.
+      const value = /^[0-9a-fA-F]{64}$/.test(transactionId)
+        ? transactionId.toLowerCase()
+        : createHash('sha256').update(transactionId, 'utf8').digest('hex');
       return {
-        value: transactionId,
+        value,
         type: 'hash',
       };
     }
@@ -99,9 +101,14 @@ export const StellarUtils = {
 
       let memo: Memo | undefined;
       if (tx.memo && tx.memo.type !== 'none') {
+        const memoType = tx.memo.type as 'text' | 'id' | 'hash' | 'return';
+        const memoValue = tx.memo.value;
         memo = {
-          value: tx.memo.value ? tx.memo.value.toString() : '',
-          type: tx.memo.type as 'text' | 'id' | 'hash' | 'return',
+          value:
+            (memoType === 'hash' || memoType === 'return') && Buffer.isBuffer(memoValue)
+              ? memoValue.toString('hex')
+              : (memoValue?.toString() ?? ''),
+          type: memoType,
         };
       }
 

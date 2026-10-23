@@ -1,4 +1,4 @@
-import { ConfigError } from '@/core/errors.ts';
+import { ConfigError } from '../../core/errors.ts';
 import type { QueueAdapter, QueueDrainStatus, QueueJob } from '@/runtime/interfaces.ts';
 
 interface InMemoryQueueOptions {
@@ -32,10 +32,6 @@ export class InMemoryQueueAdapter implements QueueAdapter {
     this.concurrency = options.concurrency;
     this.maxPendingJobs = options.maxPendingJobs;
     this.onError = options.onError;
-  }
-
-  public get status(): QueueDrainStatus {
-    return { pending: this.jobs.length, active: this.activeWorkers };
   }
 
   public get status(): QueueDrainStatus {

@@ -1,11 +1,11 @@
-import { AnchorConfig } from '@/core/config.ts';
-import { ConfigError } from '@/core/errors.ts';
+import { AnchorConfig } from './config.ts';
+import { ConfigError } from './errors.ts';
 import {
   createSqlDatabaseAdapter,
   makeSqliteDbUrlForTests,
-} from '@/runtime/database/sql-database-adapter.ts';
-import { AnchorExpressRouter, type ExpressLikeMiddleware } from '@/runtime/http/express-router.ts';
-import { validatePluginRoutes } from '@/runtime/http/express-router-impl.ts';
+} from '../runtime/database/sql-database-adapter.ts';
+import { AnchorExpressRouter, type ExpressLikeMiddleware } from '../runtime/http/express-router.ts';
+import { validatePluginRoutes } from '../runtime/http/express-router-impl.ts';
 import type {
   DatabaseAdapter,
   InteractiveTransactionRecord,
@@ -14,11 +14,19 @@ import type {
   Watcher,
   WebhookProcessor,
 } from '@/runtime/interfaces.ts';
-import { InMemoryQueueAdapter } from '@/runtime/queue/in-memory-queue.ts';
-import { TransactionWatcher } from '@/runtime/watchers/transaction-watcher.ts';
-import { DefaultWebhookProcessor } from '@/runtime/webhooks/default-webhook-processor.ts';
-import { AnchorKitConfig } from '@/types/config.ts';
+import { InMemoryQueueAdapter } from '../runtime/queue/in-memory-queue.ts';
+import { TransactionWatcher } from '../runtime/watchers/transaction-watcher.ts';
+import { DefaultWebhookProcessor } from '../runtime/webhooks/default-webhook-processor.ts';
+import type { AnchorKitConfig } from '../types/config.ts';
 import type { AnchorPlugin, AnchorPluginHooks } from '@/types/plugin.ts';
+
+export interface CreateAnchorOptions {
+  /**
+   * Caller-created adapter. AnchorKit manages connect/migrate during init and
+   * disconnect during shutdown; do not share it with another active instance.
+   */
+  databaseAdapter?: DatabaseAdapter;
+}
 
 /**
  * AnchorInstance
@@ -29,6 +37,7 @@ export class AnchorInstance {
   private plugins: Map<string, AnchorPlugin> = new Map();
 
   private database: DatabaseAdapter | null = null;
+  private readonly injectedDatabaseAdapter?: DatabaseAdapter;
   private queue: QueueAdapter | null = null;
   private webhookProcessor: WebhookProcessor | null = null;
   private watchers: Watcher[] = [];
@@ -41,9 +50,10 @@ export class AnchorInstance {
   private backgroundJobsPromise: Promise<void> | null = null;
   private backgroundJobsStopPromise: Promise<void> | null = null;
 
-  constructor(config: Partial<AnchorKitConfig>) {
+  constructor(config: Partial<AnchorKitConfig>, options: CreateAnchorOptions = {}) {
     this.config = new AnchorConfig(config);
     this.config.validate();
+    this.injectedDatabaseAdapter = options.databaseAdapter;
   }
 
   /**
@@ -270,7 +280,10 @@ export class AnchorInstance {
   }
 
   protected createDatabaseAdapter(): DatabaseAdapter {
-    return createSqlDatabaseAdapter(this.config.get('framework').database);
+    return (
+      this.injectedDatabaseAdapter ??
+      createSqlDatabaseAdapter(this.config.get('framework').database)
+    );
   }
 
   /**
@@ -436,11 +449,17 @@ export class AnchorInstance {
 }
 
 /**
- * createAnchor
- * Factory function to initialize a new Anchor-Kit instance.
+ * Create a new Anchor-Kit instance.
+ *
+ * A supplied database adapter is created and configured by the caller. The
+ * instance manages its lifecycle: connect and migrate once per init cycle,
+ * then disconnect once when that cycle shuts down.
  */
-export function createAnchor(config: Partial<AnchorKitConfig>): AnchorInstance {
-  return new AnchorInstance(config);
+export function createAnchor(
+  config: Partial<AnchorKitConfig>,
+  options: CreateAnchorOptions = {},
+): AnchorInstance {
+  return new AnchorInstance(config, options);
 }
 
 export { makeSqliteDbUrlForTests };

@@ -45,6 +45,7 @@ class MockWatcher {
   public stopCalls = 0;
   public stopGate: Promise<void> | null = null;
   public stopError: Error | null = null;
+  public startError: Error | null = null;
   public stopEntered = deferred();
   public async start(): Promise<void> {
     this.startCalls += 1;
