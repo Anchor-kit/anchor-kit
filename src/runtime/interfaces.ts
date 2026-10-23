@@ -72,7 +72,7 @@ export interface WebhookEventRecord {
   eventId: string;
   provider: string;
   payload: Record<string, unknown>;
-  status: 'pending' | 'processed' | 'failed';
+  status: 'pending' | 'processed' | 'failed' | 'unresolved';
   errorMessage: string | null;
   processedAt: string | null;
   createdAt: string;
@@ -180,7 +180,7 @@ export interface DatabaseAdapter {
   }): Promise<{ record: WebhookEventRecord; inserted: boolean }>;
   updateWebhookEventStatus(input: {
     id: string;
-    status: 'processed' | 'failed';
+    status: 'processed' | 'failed' | 'unresolved';
     errorMessage?: string;
   }): Promise<void>;
 

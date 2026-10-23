@@ -1,4 +1,8 @@
-import type { DatabaseAdapter, WebhookProcessor } from '@/runtime/interfaces.ts';
+import type {
+  DatabaseAdapter,
+  WebhookEventRecord,
+  WebhookProcessor,
+} from '@/runtime/interfaces.ts';
 import type { AnchorKitConfigSnapshot } from '@/types/config.ts';
 import { createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
 
@@ -45,7 +49,7 @@ export class DefaultWebhookProcessor implements WebhookProcessor {
     duplicate: boolean;
     eventId: string;
     provider: string;
-    status?: 'pending' | 'processed' | 'failed';
+    status?: WebhookEventRecord['status'];
   }> {
     this.verifySignatureIfEnabled(input);
 
@@ -103,13 +107,11 @@ export class DefaultWebhookProcessor implements WebhookProcessor {
         status: 'processed',
       });
     } catch (error) {
-      const message =
-        error instanceof Error && error.message === CALLBACK_TIMEOUT_MESSAGE
-          ? CALLBACK_TIMEOUT_MESSAGE
-          : CALLBACK_FAILURE_MESSAGE;
+      const timedOut = error instanceof Error && error.message === CALLBACK_TIMEOUT_MESSAGE;
+      const message = timedOut ? CALLBACK_TIMEOUT_MESSAGE : CALLBACK_FAILURE_MESSAGE;
       await this.database.updateWebhookEventStatus({
         id: insertion.record.id,
-        status: 'failed',
+        status: timedOut ? 'unresolved' : 'failed',
         errorMessage: message,
       });
       throw new Error('Webhook processing failed', { cause: error });
