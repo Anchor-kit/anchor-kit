@@ -24,6 +24,7 @@ export {
 export type { Memo, PaymentParams } from './utils';
 export type {
   AuthChallengeRecord,
+  AccountSigner,
   DatabaseAdapter,
   IdempotencyRecord,
   InteractiveTransactionRecord,

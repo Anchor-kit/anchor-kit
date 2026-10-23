@@ -70,6 +70,15 @@ function attachPostgresClient(adapter: SqlDatabaseAdapter, client: unknown): Sql
   return adapter;
 }
 
+/**
+ * Twenty-two queries define migration sequence after webhook-attempt columns
+ * and provider-scoped deduplication were both added:
+ *   7 CREATE TABLE + 1 ALTER idempotency_keys + 1 DO block for webhook dedupe
+ *   + 1 migration lookup + 5 ALTER webhook_events + 1 migration insert
+ *   + 6 CREATE INDEX.
+ */
+const POSTGRES_SEQUENCE_LENGTH = 22;
+
 describe('Concurrent database migrations (#600)', () => {
   it('runs a single migration sequence for concurrent callers', async () => {
     const adapter = new SqlDatabaseAdapter({
@@ -81,9 +90,7 @@ describe('Concurrent database migrations (#600)', () => {
 
     await Promise.all(Array.from({ length: 10 }, () => adapter.migrate()));
 
-    // Twelve statements define one migration sequence; concurrent callers
-    // must share it rather than each replaying the whole sequence.
-    expect(client.queries).toHaveLength(12);
+    expect(client.queries).toHaveLength(POSTGRES_SEQUENCE_LENGTH);
     expect(client.maxInFlight).toBe(1);
   });
 
@@ -98,7 +105,7 @@ describe('Concurrent database migrations (#600)', () => {
     const results = await Promise.all(Array.from({ length: 5 }, () => adapter.migrate()));
 
     expect(results).toEqual([undefined, undefined, undefined, undefined, undefined]);
-    expect(client.queries).toHaveLength(12);
+    expect(client.queries).toHaveLength(POSTGRES_SEQUENCE_LENGTH);
   });
 
   it('serializes SQLite migration calls into a single sequence', async () => {
@@ -119,7 +126,9 @@ describe('Concurrent database migrations (#600)', () => {
 
       await Promise.all(Array.from({ length: 5 }, () => adapter.migrate()));
 
-      expect(execCount).toBe(6);
+      // 1 CREATE TABLE batch + 5 webhook-attempt ALTERs + 6 CREATE INDEX
+      // statements. The provider-dedupe upgrade is a no-op on fresh databases.
+      expect(execCount).toBe(12);
 
       // The schema is usable after the shared migration.
       await adapter.insertAuthChallenge({
@@ -174,7 +183,7 @@ describe('Concurrent database migrations (#600)', () => {
     expect(client.queries).toHaveLength(1);
 
     await expect(adapter.migrate()).resolves.toBeUndefined();
-    expect(client.queries).toHaveLength(13);
+    expect(client.queries).toHaveLength(POSTGRES_SEQUENCE_LENGTH + 1);
   });
 
   it('lets a fresh caller retry once the in-flight migration has settled', async () => {
@@ -192,6 +201,6 @@ describe('Concurrent database migrations (#600)', () => {
     // A later, non-overlapping call runs its own sequence because the guard is
     // cleared after the shared sequence settles.
     await adapter.migrate();
-    expect(client.queries).toHaveLength(24);
+    expect(client.queries).toHaveLength(POSTGRES_SEQUENCE_LENGTH * 2);
   });
 });

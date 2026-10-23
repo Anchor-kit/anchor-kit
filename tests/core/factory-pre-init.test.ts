@@ -59,6 +59,8 @@ describe('AnchorInstance pre-init router access', () => {
       createDepositWithIdempotency: unexpectedDatabaseCall,
       deletePendingIdempotencyRecord: unexpectedDatabaseCall,
       insertOrGetWebhookEvent: unexpectedDatabaseCall,
+      claimWebhookAttempt: unexpectedDatabaseCall,
+      completeWebhookAttempt: unexpectedDatabaseCall,
       updateWebhookEventStatus: unexpectedDatabaseCall,
       insertOrGetSettlementJob: unexpectedDatabaseCall,
       getSettlementJobByOperationId: unexpectedDatabaseCall,

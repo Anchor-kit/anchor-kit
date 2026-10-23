@@ -123,6 +123,12 @@ class ControllableFakeDatabaseAdapter implements DatabaseAdapter {
   async insertOrGetWebhookEvent(): Promise<never> {
     throw new Error('Not implemented');
   }
+  async claimWebhookAttempt(): Promise<null> {
+    return null;
+  }
+  async completeWebhookAttempt(): Promise<boolean> {
+    return false;
+  }
   async updateWebhookEventStatus(): Promise<void> {}
   async insertWatcherTask(): Promise<void> {}
   async listPendingWatcherTasks(): Promise<never[]> {

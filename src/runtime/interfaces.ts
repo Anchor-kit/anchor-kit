@@ -31,6 +31,11 @@ export interface PaymentRailAdapter {
   }): Promise<RailCapabilityResult<PaymentRailOperation>>;
 }
 
+export interface AccountSigner {
+  publicKey: string;
+  weight: number;
+}
+
 export interface AuthChallengeRecord {
   id: string;
   account: string;
@@ -54,7 +59,7 @@ export interface InteractiveTransactionRecord {
 export interface IdempotencyRecord {
   id: string;
   scope: string;
- idempotencyKey: string;
+  idempotencyKey: string;
   requestHash: string;
   status: 'pending' | 'completed';
   statusCode: number;
@@ -67,7 +72,7 @@ export interface WebhookEventRecord {
   eventId: string;
   provider: string;
   payload: Record<string, unknown>;
-  status: 'pending' | 'processed' | 'failed';
+  status: 'pending' | 'processed' | 'failed' | 'unresolved';
   errorMessage: string | null;
   processedAt: string | null;
   createdAt: string;
@@ -108,7 +113,7 @@ export interface WebhookCallbackContext {
   /** Time the underlying webhook event was received. */
   receivedAt: string;
   /** Optional raw request body. */
-  rawBody?: string | Buffer | Uint8Array;
+  rawBody: string | Buffer | Uint8Array;
   /** Optional signature provided with the request. */
   signature?: string;
 }
@@ -203,7 +208,7 @@ export interface DatabaseAdapter {
     provider: string;
     payload: Record<string, unknown>;
     /** Stable operation key for this event. Must be reused by all attempts and retries. */
-    operationKey: string;
+    operationKey?: string;
   }): Promise<{ record: WebhookEventRecord; inserted: boolean }>;
   /**
    * Atomically claims the next attempt for a webhook event. Returns null when the event is already
@@ -223,12 +228,12 @@ export interface DatabaseAdapter {
     id: string;
     attemptId: string;
     leaseOwner: string;
-    status: 'processed' | 'failed';
+    status: 'processed' | 'failed' | 'unresolved';
     errorMessage?: string;
   }): Promise<boolean>;
   updateWebhookEventStatus(input: {
     id: string;
-    status: 'processed' | 'failed';
+    status: 'processed' | 'failed' | 'unresolved';
     errorMessage?: string;
   }): Promise<void>;
 

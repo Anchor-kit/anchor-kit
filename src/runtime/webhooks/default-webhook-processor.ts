@@ -5,7 +5,7 @@ import type {
   WebhookProcessor,
 } from '@/runtime/interfaces.ts';
 import type { AnchorKitConfigSnapshot } from '@/types/config.ts';
-const { createHmac, randomUUID, timingSafeEqual } = require('node:crypto');
+import { createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
 
 interface DefaultWebhookProcessorOptions {
   config: AnchorKitConfigSnapshot;
@@ -62,7 +62,7 @@ export class DefaultWebhookProcessor implements WebhookProcessor {
     duplicate: boolean;
     eventId: string;
     provider: string;
-    status?: 'pending' | 'processed' | 'failed';
+    status?: WebhookEventRecord['status'];
     operationKey?: string;
     attemptId?: string;
     attemptCount?: number;
@@ -100,15 +100,14 @@ export class DefaultWebhookProcessor implements WebhookProcessor {
     });
 
     if (!claimed) {
-      const current = await this.database.getWebhookEventById(insertion.record.id);
       return {
         duplicate: true,
-        eventId: current?.eventId ?? insertion.record.eventId,
-        provider: current?.provider ?? insertion.record.provider,
-        status: current?.status ?? insertion.record.status,
-        operationKey: current?.operationKey ?? insertion.record.operationKey,
-        attemptId: current?.attemptId ?? undefined,
-        attemptCount: current?.attemptCount ?? insertion.record.attemptCount,
+        eventId: insertion.record.eventId,
+        provider: insertion.record.provider,
+        status: insertion.record.status,
+        operationKey: insertion.record.operationKey,
+        attemptId: insertion.record.attemptId ?? undefined,
+        attemptCount: insertion.record.attemptCount,
       };
     }
 
@@ -122,7 +121,8 @@ export class DefaultWebhookProcessor implements WebhookProcessor {
       attemptId,
       attemptCount: claimed.attemptCount,
       leaseOwner,
-      leaseExpiresAt: claimed.leaseExpiresAt ?? new Date(Date.now() + leaseDurationMs).toISOString(),
+      leaseExpiresAt:
+        claimed.leaseExpiresAt ?? new Date(Date.now() + leaseDurationMs).toISOString(),
       receivedAt: claimed.createdAt,
       signature: input.signature,
       rawBody: input.rawBody,
@@ -167,15 +167,13 @@ export class DefaultWebhookProcessor implements WebhookProcessor {
         throw new Error(CALLBACK_LOCK_LOST_MESSAGE);
       }
     } catch (error) {
-      const message =
-        error instanceof Error && error.message === CALLBACK_TIMEOUT_MESSAGE
-          ? CALLBACK_TIMEOUT_MESSAGE
-          : CALLBACK_FAILURE_MESSAGE;
+      const timedOut = error instanceof Error && error.message === CALLBACK_TIMEOUT_MESSAGE;
+      const message = timedOut ? CALLBACK_TIMEOUT_MESSAGE : CALLBACK_FAILURE_MESSAGE;
       await this.database.completeWebhookAttempt({
         id: claimed.id,
         attemptId,
         leaseOwner,
-        status: 'failed',
+        status: timedOut ? 'unresolved' : 'failed',
         errorMessage: message,
       });
       throw new Error('Webhook processing failed', { cause: error });
