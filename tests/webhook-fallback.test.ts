@@ -97,7 +97,6 @@ describe('Webhook Provider Fallback', () => {
   const dbPath = dbUrl.startsWith('file:') ? dbUrl.slice('file:'.length) : dbUrl;
 
   let lastProvider = '';
-  let failWebhookCallback = false;
   let anchor: AnchorInstance;
   let invoke: (options: TestRequestOptions) => Promise<TestResponse>;
 
@@ -123,9 +122,6 @@ describe('Webhook Provider Fallback', () => {
       webhooks: {
         onEvent: async (event) => {
           lastProvider = event.provider;
-          if (failWebhookCallback) {
-            throw new Error('private callback details');
-          }
         },
       },
     });

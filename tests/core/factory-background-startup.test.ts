@@ -4,6 +4,7 @@ import { InMemoryQueueAdapter } from '@/runtime/queue/in-memory-queue.ts';
 import { TransactionWatcher } from '@/runtime/watchers/transaction-watcher.ts';
 import { describe, expect, it } from 'vitest';
 import { createAnchor } from '@/index.ts';
+import type { AnchorKitConfig } from '@/types/config.ts';
 
 function deferred() {
   let resolve!: () => void;
@@ -12,6 +13,33 @@ function deferred() {
   });
 
   return { promise, resolve };
+}
+
+function createQueueTestAnchor(
+  queue: Partial<NonNullable<AnchorKitConfig['framework']['queue']>>,
+): ReturnType<typeof createAnchor> {
+  return createAnchor({
+    network: { network: 'testnet' },
+    server: { interactiveDomain: 'https://anchor.example.com' },
+    security: {
+      sep10SigningKey: Keypair.random().secret(),
+      interactiveJwtSecret: 'jwt-test-secret',
+      distributionAccountSecret: 'distribution-test-secret',
+    },
+    assets: {
+      assets: [
+        {
+          code: 'USDC',
+          issuer: 'GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5',
+        },
+      ],
+    },
+    framework: {
+      database: { provider: 'sqlite', url: 'file::memory:' },
+      queue: { backend: 'memory', ...queue },
+      watchers: { enabled: false },
+    },
+  });
 }
 
 class MockQueueAdapter {
@@ -45,9 +73,15 @@ class MockWatcher {
   public stopCalls = 0;
   public stopGate: Promise<void> | null = null;
   public stopError: Error | null = null;
+  public startError: Error | null = null;
   public stopEntered = deferred();
   public async start(): Promise<void> {
     this.startCalls += 1;
+    if (this.startError) {
+      const error = this.startError;
+      this.startError = null;
+      throw error;
+    }
   }
 
   public async stop(): Promise<void> {
@@ -63,6 +97,46 @@ class MockWatcher {
 }
 
 describe('AnchorInstance concurrent background startup', () => {
+  it('forwards queue capacity and error handling options from the public factory', async () => {
+    const queueErrors: Array<{ job: QueueJob; error: unknown }> = [];
+    let signalWorkerError!: () => void;
+    const workerFailed = new Promise<void>((resolve) => {
+      signalWorkerError = resolve;
+    });
+    const anchor = createQueueTestAnchor({
+      maxPendingJobs: 1,
+      onError: (job, error) => {
+        queueErrors.push({ job, error });
+        signalWorkerError();
+      },
+    });
+
+    await anchor.init();
+    const queue = (anchor as unknown as { queue: InMemoryQueueAdapter }).queue;
+    const failingJob = { type: 'unsupported', payload: {} } as unknown as QueueJob;
+    await queue.enqueue(failingJob);
+    await expect(queue.enqueue(failingJob)).rejects.toThrow(/queue is full/i);
+
+    await anchor.startBackgroundJobs();
+    await workerFailed;
+
+    expect(queueErrors).toHaveLength(1);
+    expect(queueErrors[0]?.job).toBe(failingJob);
+    expect(queueErrors[0]?.error).toMatchObject({ message: 'Unknown queue job type: unsupported' });
+    await anchor.shutdown();
+  });
+
+  it('validates configured queue capacity and error handler types', () => {
+    expect(() => createQueueTestAnchor({ maxPendingJobs: 0 })).toThrow(
+      /framework\.queue\.maxPendingJobs must be a positive safe integer/,
+    );
+    expect(() =>
+      createQueueTestAnchor({
+        onError: 'not a function' as unknown as (job: QueueJob, error: unknown) => void,
+      }),
+    ).toThrow(/framework\.queue\.onError must be a function/);
+  });
+
   it('exposes queue counts without exposing queued job payloads', async () => {
     const anchor = createAnchor({
       network: { network: 'testnet' },

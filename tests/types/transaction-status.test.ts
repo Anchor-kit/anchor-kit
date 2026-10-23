@@ -54,6 +54,17 @@ describe('TransactionStatus', () => {
     }
   });
 
+  it('exposes the allowed initial deposit transitions and rejects terminal regressions', () => {
+    expect(getAllowedNextTransactionStatuses('pending_user_transfer_start')).toEqual([
+      'pending_user_transfer_complete',
+      'pending_external',
+      'error',
+      'expired',
+    ]);
+    expect(getAllowedNextTransactionStatuses('completed')).toEqual([]);
+    expect(getAllowedNextTransactionStatuses('refunded')).toEqual([]);
+  });
+
   it('acts as a type guard for terminal statuses', () => {
     const terminalStatuses = TRANSACTION_STATUSES.filter(isTerminalTransactionStatus);
 

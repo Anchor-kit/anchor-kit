@@ -10,22 +10,21 @@ jobs:
   build:
     runs-on: ubuntu-latest
     env:
-      DATABASE_URL: postgres://anchor_kit:anchor_kit@localhost:5432/anchor_kit_test
-
+      DATABASE_URL: postgres://anchor:anchor@localhost:5432/anchor_kit_smoke
     services:
       postgres:
         image: postgres:16
         env:
-          POSTGRES_USER: anchor_kit
-          POSTGRES_PASSWORD: anchor_kit
-          POSTGRES_DB: anchor_kit_test
+          POSTGRES_USER: anchor
+          POSTGRES_PASSWORD: anchor
+          POSTGRES_DB: anchor_kit_smoke
         ports:
           - 5432:5432
         options: >-
-          --health-cmd "pg_isready -U anchor_kit -d anchor_kit_test"
-          --health-interval 5s
+          --health-cmd "pg_isready -U anchor -d anchor_kit_smoke"
+          --health-interval 10s
           --health-timeout 5s
-          --health-retries 10
+          --health-retries 5
 
     steps:
       - uses: actions/checkout@v4
@@ -68,3 +67,8 @@ jobs:
 
       - name: Build
         run: bun run build
+
+      - name: Node PostgreSQL package smoke test
+        run: bun run smoke:node-postgres
+        env:
+          DATABASE_URL: postgres://anchor:anchor@127.0.0.1:5432/anchor_kit_smoke

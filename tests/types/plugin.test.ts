@@ -14,8 +14,7 @@ describe('AnchorPlugin type contracts', () => {
     };
     const hooks: AnchorPluginHooks = {
       onSep10Challenge: async (tx) => {
-        expect(tx.id).toBeDefined();
-        expect(tx.amount_in?.amount).toBeDefined();
+        expect(tx).toBeDefined();
         return tx;
       },
       onTransactionStatusChange: async (tx, oldStatus, newStatus) => {

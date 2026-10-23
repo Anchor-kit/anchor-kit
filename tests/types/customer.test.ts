@@ -1,6 +1,37 @@
-import type { Customer, KycData } from '@/types/index.ts';
+import { canReadCustomer, toCustomerSummary, type Customer } from '@/types/customer.ts';
+import type { KycData } from '@/types/index.ts';
 
 describe('Customer', () => {
+  it('limits customer summaries to identifiers and KYC status', () => {
+    const customer: Customer = {
+      id: 'customer-1',
+      account_id: 'GACCOUNT',
+      created_at: 1,
+      email_address: 'private@example.com',
+      kyc_data: {
+        status: 'approved',
+        id_number: 'secret-document-number',
+        documents: [{ id: 'private-document-id', type: 'passport' }],
+      },
+    };
+    const summary = toCustomerSummary(customer);
+
+    expect(summary).toEqual({
+      id: 'customer-1',
+      account_id: 'GACCOUNT',
+      created_at: 1,
+      kyc_status: 'approved',
+    });
+    expect(JSON.stringify(summary)).not.toContain('secret-document-number');
+    expect(JSON.stringify(summary)).not.toContain('private@example.com');
+  });
+
+  it('allows reads only to the associated account', () => {
+    const customer: Customer = { id: 'customer-1', account_id: 'GACCOUNT', created_at: 1 };
+    expect(canReadCustomer(customer, 'GACCOUNT')).toBe(true);
+    expect(canReadCustomer(customer, 'GOTHER')).toBe(false);
+  });
+
   // -- required fields only --
 
   it('works with just the required fields', () => {

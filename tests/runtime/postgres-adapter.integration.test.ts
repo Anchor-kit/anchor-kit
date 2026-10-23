@@ -46,7 +46,7 @@ postgresTest('SqlDatabaseAdapter – PostgreSQL integration', () => {
     const eventId = `evt-${randomUUID()}`;
     const results = await Promise.all(
       Array.from({ length: 8 }, (_, index) =>
-        db.insertWebhookEvent({
+        db.insertOrGetWebhookEvent({
           id: randomUUID(),
           eventId,
           provider: 'ci-test',
