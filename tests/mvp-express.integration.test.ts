@@ -26,80 +26,6 @@ interface TestRequestOptions {
   requestStream?: Readable;
 }
 
-function signChallengeVariant(
-  xdr: string,
-  networkPassphrase: string,
-  client: Keypair,
-  server: Keypair,
-  variant:
-    | 'sequence'
-    | 'expired-bounds'
-    | 'duplicate-nonce'
-    | 'unauthorized-operation'
-    | 'malformed-nonce',
-): string {
-  const challenge = new Transaction(xdr, networkPassphrase);
-  const nonceOperation = challenge.operations[0] as unknown as {
-    name: string;
-    value: string | Buffer;
-  };
-  const webAuthOperation = challenge.operations[1] as unknown as {
-    value: string | Buffer;
-  };
-  const nonceValue = Buffer.isBuffer(nonceOperation.value)
-    ? nonceOperation.value.toString('utf8')
-    : nonceOperation.value;
-  const webAuthDomain = Buffer.isBuffer(webAuthOperation.value)
-    ? webAuthOperation.value.toString('utf8')
-    : webAuthOperation.value;
-  const authManageData = Operation.manageData({
-    name: nonceOperation.name,
-    value: variant === 'malformed-nonce' ? 'too-short' : nonceValue,
-    source: client.publicKey(),
-  });
-  const webAuth = Operation.manageData({
-    name: 'web_auth_domain',
-    value: webAuthDomain,
-    source: server.publicKey(),
-  });
-  const transactionBuilder = new TransactionBuilder(
-    new Account(challenge.source, variant === 'sequence' ? '0' : '-1'),
-    { fee: '100', networkPassphrase },
-  ).addOperation(authManageData);
-
-  if (variant === 'duplicate-nonce') {
-    transactionBuilder.addOperation(
-      Operation.manageData({
-        name: nonceOperation.name,
-        value: nonceValue,
-        source: client.publicKey(),
-      }),
-    );
-  }
-
-  if (variant === 'unauthorized-operation') {
-    transactionBuilder.addOperation(
-      Operation.manageData({
-        name: 'unauthorized',
-        value: 'not-allowed',
-        source: server.publicKey(),
-      }),
-    );
-  } else {
-    transactionBuilder.addOperation(webAuth);
-  }
-
-  const minTime = variant === 'expired-bounds' ? 0 : Number(challenge.timeBounds?.minTime ?? 0);
-  const maxTime =
-    variant === 'expired-bounds'
-      ? Math.floor(Date.now() / 1000) - 1
-      : Number(challenge.timeBounds?.maxTime ?? 0);
-  const signed = transactionBuilder.setTimebounds(minTime, maxTime).build();
-  signed.sign(server);
-  signed.sign(client);
-  return signed.toXDR();
-}
-
 function createMountedInvoker(anchor: AnchorInstance) {
   const middleware = anchor.getExpressRouter();
 
@@ -2460,7 +2386,7 @@ describe('MVP Express-mounted integration', () => {
     expect((response.body.event_id as string).length).toBeGreaterThan(0);
   });
 
-  it('8i) duplicate webhook with conflicting provider returns persisted provider', async () => {
+  it('8i) matching event ID from a different provider is processed independently', async () => {
     const initialCallbackCount = webhookCallbackCount;
     const payload = {
       id: `evt_conflicting_provider_${Date.now()}`,
@@ -2490,23 +2416,23 @@ describe('MVP Express-mounted integration', () => {
     expect(firstResponse.body.provider).toBe('provider-a');
     expect(webhookCallbackCount).toBe(initialCallbackCount + 1);
 
-    // Second request with same event ID but different provider 'provider-b'
-    const duplicateResponse = await invoke({
+    // The same event ID from provider-b is a separate event and must run its callback.
+    const secondResponse = await invoke({
       method: 'POST',
       path: '/webhooks/events',
       headers: {
         'content-type': 'application/json',
-        'x-webhook-provider': 'provider-b', // Different provider
+        'x-webhook-provider': 'provider-b',
         'x-anchor-signature': signature,
       },
       body: payload,
     });
 
-    expect(duplicateResponse.status).toBe(200);
-    expect(duplicateResponse.body.duplicate).toBe(true);
-    expect(duplicateResponse.body.event_id).toBe(payload.id);
-    expect(duplicateResponse.body.provider).toBe('provider-a'); // Should return the persisted provider, not the request provider
-    expect(webhookCallbackCount).toBe(initialCallbackCount + 1); // Callback should not be invoked again
+    expect(secondResponse.status).toBe(200);
+    expect(secondResponse.body.duplicate).toBe(false);
+    expect(secondResponse.body.event_id).toBe(payload.id);
+    expect(secondResponse.body.provider).toBe('provider-b');
+    expect(webhookCallbackCount).toBe(initialCallbackCount + 2);
   });
 
   it('8i) oversized Buffer-backed rawBody returns 413 payload_too_large', async () => {

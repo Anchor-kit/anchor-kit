@@ -1,6 +1,6 @@
 import Big from 'big.js';
 import { ValidationUtils } from './validation';
-import { ValidationError } from '@/core/errors.ts';
+import { ValidationError } from '../core/errors.ts';
 
 /**
  * DecimalUtils helper object

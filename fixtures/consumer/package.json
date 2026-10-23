@@ -1,0 +1,10 @@
+{
+  "name": "anchor-kit-consumer-fixture",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Reproducible consumer fixture proving anchor-kit resolves without @/ imports",
+  "type": "module",
+  "scripts": {
+    "verify": "node verify.mjs"
+  }
+}

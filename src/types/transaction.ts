@@ -36,6 +36,46 @@ export interface RailTransactionData {
   metadata?: Record<string, unknown>;
 }
 
+/** Exact fiat amount accepted by a payment rail adapter. */
+export interface RailAmount {
+  amount: string;
+  currency: string;
+}
+
+export type PaymentRailStatus = 'pending' | 'succeeded' | 'failed' | 'unknown';
+
+/** Provider-neutral payment operation with stable application and provider references. */
+export interface PaymentRailOperation {
+  operationId: string;
+  provider: string;
+  reference: string;
+  providerReference?: string;
+  amount: RailAmount;
+  status: PaymentRailStatus;
+}
+
+export interface PaymentRailInitiationRequest {
+  operationId: string;
+  reference: string;
+  accountId: string;
+  amount: RailAmount;
+}
+
+/** Normalized event fields used to match a verified provider event to an operation. */
+export interface NormalizedPaymentRailEvent {
+  eventId: string;
+  provider: string;
+  reference: string;
+  providerReference?: string;
+  amount: RailAmount;
+  status: PaymentRailStatus;
+  occurredAt: string;
+}
+
+export type RailCapabilityResult<T> =
+  | { supported: true; value: T }
+  | { supported: false; reason: string };
+
 /**
  * Stellar-specific transaction data
  * Represents the blockchain side of the transaction

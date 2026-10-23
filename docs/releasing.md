@@ -8,7 +8,7 @@ This document explains how `anchor-kit` is versioned and published to npm, and h
 Publishing is **release-driven**: pushing to a branch or tag does not publish anything by
 itself, and there is no manual "run this workflow" button. A package version is only published
 when a maintainer creates and publishes a GitHub Release in
-[`0xNgoo/anchor-kit`](https://github.com/0xNgoo/anchor-kit), and the release's tag matches the
+[`Anchor-kit/anchor-kit`](https://github.com/Anchor-kit/anchor-kit), and the release's tag matches the
 version already committed in `package.json`.
 
 ## 1. Bump the version
@@ -47,9 +47,9 @@ against the real package.
 
 On a published release, the `publish` job:
 
-1. Only runs if `github.repository == '0xNgoo/anchor-kit'`, so a fork's copy of this workflow
-   (even with different code) can never publish the real package — a forked repository has a
-   different `github.repository` value and the job is skipped.
+1. Only runs if `github.repository == 'Anchor-kit/anchor-kit'`. GitHub supplies this value as
+   the event repository's `owner/name`; the exact equality admits releases in this repository
+   and skips forks and other repositories.
 2. Checks out the exact commit tagged by the release.
 3. Installs dependencies with `bun install --frozen-lockfile`.
 4. Runs `lint`, `typecheck`, and `test`.
@@ -110,5 +110,11 @@ publishing is enabled on npmjs.com, the `NPM_TOKEN` secret can be removed entire
   the version was never accepted by the registry. Fix the underlying auth/registry issue and
   publish a new release once resolved.
 - **Untrusted context**: if the workflow is ever triggered from a fork or a repository other than
-  `0xNgoo/anchor-kit`, the `publish` job's `if: github.repository == '0xNgoo/anchor-kit'` guard
+  `Anchor-kit/anchor-kit`, the `publish` job's `if: github.repository == 'Anchor-kit/anchor-kit'` guard
   causes it to be skipped rather than run.
+
+### Focused repository-guard check
+
+Run `bun test tests/publish-workflow.test.ts`. The check passes when a `published` release in
+`Anchor-kit/anchor-kit` satisfies the exact repository guard and unrelated repository identities
+are rejected.
