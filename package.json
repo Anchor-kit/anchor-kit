@@ -22,7 +22,7 @@
   "type": "module",
   "scripts": {
     "dev": "bun run --watch src/index.ts",
-    "build": "rm -rf dist && bun build src/index.ts --outdir dist --target node --format esm --packages external && bunx tsc -p tsconfig.types.json && node scripts/fix-dts-imports.mjs",
+    "build": "rm -rf dist && bun x rolldown --config rolldown.config.mjs && bunx tsc -p tsconfig.types.json && node scripts/fix-dts-imports.mjs && node scripts/check-alias-imports.mjs",
     "check:aliases": "node scripts/check-alias-imports.mjs",
     "check:consumer": "node fixtures/consumer/verify.mjs && bun run check:package-consumer",
     "check:package-consumer": "bun run build && node scripts/check-package-consumer.mjs",

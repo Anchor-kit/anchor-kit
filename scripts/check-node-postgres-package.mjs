@@ -15,7 +15,11 @@ try {
     ['pack', '--ignore-scripts', '--json', '--pack-destination', tempDirectory],
     { encoding: 'utf8' },
   );
-  const [packedPackage] = JSON.parse(packOutput);
+  const packJsonStart = packOutput.indexOf('[');
+  if (packJsonStart < 0) {
+    throw new Error('npm pack did not return JSON metadata');
+  }
+  const [packedPackage] = JSON.parse(packOutput.slice(packJsonStart));
   if (!packedPackage?.filename) {
     throw new Error('npm pack did not return a tarball filename');
   }
@@ -77,7 +81,7 @@ try {
     `,
   );
 
-  execFileSync('npm', ['install', '--no-audit', '--no-fund', tarballPath], {
+  execFileSync('npm', ['install', '--ignore-scripts', '--no-audit', '--no-fund', tarballPath], {
     cwd: tempDirectory,
     stdio: 'inherit',
   });
