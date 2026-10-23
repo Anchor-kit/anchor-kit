@@ -1,7 +1,7 @@
 import type { AnchorConfig } from '@/core/config.ts';
-import { ConfigError, PayloadTooLargeError, ValidationError } from '../../core/errors.ts';
-import { InMemoryRateLimiter, type RateLimitRule } from './rate-limiter.ts';
-import type { DatabaseAdapter, WebhookProcessor } from '@/runtime/interfaces.ts';
+import { ConfigError, PayloadTooLargeError, ValidationError } from '@/core/errors.ts';
+import { InMemoryRateLimiter, type RateLimitRule } from '@/runtime/http/rate-limiter.ts';
+import type { AccountSigner, DatabaseAdapter, WebhookProcessor } from '@/runtime/interfaces.ts';
 import type { PluginRouteContext, RouteDefinition } from '@/types/foundation.ts';
 import type { AnchorPluginHooks, DepositRequestBody } from '@/types/plugin.ts';
 import { IdempotencyUtils } from '../../utils/idempotency.ts';
@@ -493,6 +493,49 @@ function hasValidSignature(transaction: Transaction, publicKey: string): boolean
       }
     } catch {
       // skip invalid signature entries
+    }
+  }
+
+  return false;
+}
+
+/** Verify unique authorized account signers meet a SEP-10 signing threshold. */
+export function hasSufficientSignerWeight(
+  transaction: Transaction,
+  signers: readonly AccountSigner[],
+  threshold: number,
+): boolean {
+  if (!Number.isSafeInteger(threshold) || threshold <= 0 || threshold > 255) return false;
+
+  const signerWeights = new Map<string, number>();
+  for (const signer of signers) {
+    if (
+      !Number.isSafeInteger(signer.weight) ||
+      signer.weight <= 0 ||
+      signer.weight > 255 ||
+      signerWeights.has(signer.publicKey)
+    ) {
+      return false;
+    }
+    signerWeights.set(signer.publicKey, signer.weight);
+  }
+
+  const hash = transaction.hash();
+  const countedSigners = new Set<string>();
+  let totalWeight = 0;
+  for (const signature of transaction.signatures) {
+    for (const [publicKey, weight] of signerWeights) {
+      if (countedSigners.has(publicKey)) continue;
+      try {
+        if (Keypair.fromPublicKey(publicKey).verify(hash, signature.signature())) {
+          countedSigners.add(publicKey);
+          totalWeight += weight;
+          if (totalWeight >= threshold) return true;
+          break;
+        }
+      } catch {
+        // Ignore malformed signer keys and invalid signature entries.
+      }
     }
   }
 

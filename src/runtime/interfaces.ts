@@ -40,6 +40,11 @@ export interface PaymentRailAdapter {
   }): Promise<RailCapabilityResult<PaymentRailOperation>>;
 }
 
+export interface AccountSigner {
+  publicKey: string;
+  weight: number;
+}
+
 export interface AuthChallengeRecord {
   id: string;
   account: string;
