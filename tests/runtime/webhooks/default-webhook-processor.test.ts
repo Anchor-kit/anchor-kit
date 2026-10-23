@@ -22,9 +22,12 @@ describe('DefaultWebhookProcessor', () => {
       createdAt: '2024-01-01T00:00:00.000Z',
     };
 
+    // AK-046: deduplication is keyed by (provider, event_id). The mock mirrors
+    // that behavior so a different provider using the same event_id is treated
+    // as a distinct, non-duplicate event.
     mockDatabase = {
       insertOrGetWebhookEvent: async (input) => {
-        if (input.eventId === 'evt_duplicate') {
+        if (input.eventId === 'evt_duplicate' && input.provider === 'test-provider') {
           return { record: existingRecord, inserted: false };
         }
         return {
@@ -82,7 +85,7 @@ describe('DefaultWebhookProcessor', () => {
     expect(callbackInvokedCount).toBe(1);
   });
 
-  test('duplicate event returns duplicate: true and does not invoke callback', async () => {
+  test('duplicate event (same provider + eventId) returns duplicate: true and does not invoke callback', async () => {
     const result = await processor.process({
       eventId: 'evt_duplicate',
       provider: 'test-provider',
@@ -96,18 +99,20 @@ describe('DefaultWebhookProcessor', () => {
     expect(callbackInvokedCount).toBe(0);
   });
 
-  test('duplicate event with conflicting provider returns persisted provider', async () => {
+  test('same eventId from a different provider is treated as a new event (AK-046)', async () => {
     const result = await processor.process({
       eventId: 'evt_duplicate',
-      provider: 'different-provider', // Conflicting provider
+      provider: 'different-provider',
       payload: { type: 'test' },
       rawBody: '{}',
     });
 
-    expect(result.duplicate).toBe(true);
+    // Under provider-plus-event identity, the different provider is a distinct
+    // event and MUST be executed rather than silently swallowed as a duplicate.
+    expect(result.duplicate).toBe(false);
     expect(result.eventId).toBe('evt_duplicate');
-    expect(result.provider).toBe('test-provider'); // Should return the persisted provider, not the request provider
-    expect(callbackInvokedCount).toBe(0);
+    expect(result.provider).toBe('different-provider');
+    expect(callbackInvokedCount).toBe(1);
   });
 
   test('records an ambiguous timeout as unresolved and does not retry a duplicate delivery', async () => {
