@@ -2405,7 +2405,7 @@ describe('MVP Express-mounted integration', () => {
     expect((response.body.event_id as string).length).toBeGreaterThan(0);
   });
 
-  it('8i) duplicate webhook with conflicting provider returns persisted provider', async () => {
+  it('8i) matching event ID from a different provider is processed independently', async () => {
     const initialCallbackCount = webhookCallbackCount;
     const payload = {
       id: `evt_conflicting_provider_${Date.now()}`,
@@ -2435,23 +2435,23 @@ describe('MVP Express-mounted integration', () => {
     expect(firstResponse.body.provider).toBe('provider-a');
     expect(webhookCallbackCount).toBe(initialCallbackCount + 1);
 
-    // Second request with same event ID but different provider 'provider-b'
-    const duplicateResponse = await invoke({
+    // The same event ID from provider-b is a separate event and must run its callback.
+    const secondResponse = await invoke({
       method: 'POST',
       path: '/webhooks/events',
       headers: {
         'content-type': 'application/json',
-        'x-webhook-provider': 'provider-b', // Different provider
+        'x-webhook-provider': 'provider-b',
         'x-anchor-signature': signature,
       },
       body: payload,
     });
 
-    expect(duplicateResponse.status).toBe(200);
-    expect(duplicateResponse.body.duplicate).toBe(true);
-    expect(duplicateResponse.body.event_id).toBe(payload.id);
-    expect(duplicateResponse.body.provider).toBe('provider-a'); // Should return the persisted provider, not the request provider
-    expect(webhookCallbackCount).toBe(initialCallbackCount + 1); // Callback should not be invoked again
+    expect(secondResponse.status).toBe(200);
+    expect(secondResponse.body.duplicate).toBe(false);
+    expect(secondResponse.body.event_id).toBe(payload.id);
+    expect(secondResponse.body.provider).toBe('provider-b');
+    expect(webhookCallbackCount).toBe(initialCallbackCount + 2);
   });
 
   it('8i) oversized Buffer-backed rawBody returns 413 payload_too_large', async () => {
@@ -2972,7 +2972,7 @@ describe('MVP Express-mounted integration', () => {
     })
       .addOperation(
         Operation.manageData({
-          name: 'anchor_auth',
+          name: 'anchor.example.com auth',
           value: 'wrong-source-test',
           source: account,
         }),
@@ -3042,7 +3042,7 @@ describe('MVP Express-mounted integration', () => {
     })
       .addOperation(
         Operation.manageData({
-          name: 'anchor_auth',
+          name: 'anchor.example.com auth',
           value: 'wrong-source-test',
           source: account,
         }),

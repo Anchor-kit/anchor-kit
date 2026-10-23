@@ -10,6 +10,15 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 /** Allowed KYC status values as used in unified spec */
 export type KycStatus = 'not_provided' | 'pending' | 'approved' | 'rejected';
 
+/** A recorded result returned by a KYC verification provider. */
+export interface KycVerificationDecision {
+  decisionId: string;
+  operationKey: string;
+  customerId: string;
+  status: Exclude<KycStatus, 'not_provided'>;
+  decidedAt: string;
+}
+
 /** Postal address fields commonly used for KYC */
 export interface PostalAddress {
   street_address?: string;
@@ -90,6 +99,8 @@ export interface RouteDefinition {
 export interface PluginRouteContext {
   request: IncomingMessage;
   response: ServerResponse;
+  /** Aborted when the HTTP request exceeds its configured deadline. */
+  signal: AbortSignal;
   params: Record<string, string>;
   query: Record<string, string | Array<string>>;
   body: Record<string, unknown>;
@@ -97,10 +108,23 @@ export interface PluginRouteContext {
   database: DatabaseAdapter;
 }
 
+export interface SchemaMigrationContext {
+  dialect: 'postgres' | 'sqlite';
+  execute(sql: string): Promise<void>;
+  hasColumn(table: string, column: string): Promise<boolean>;
+}
+
+export interface SchemaMigration {
+  /** Stable migration name. Once applied, a migration must not be renamed or edited. */
+  name: string;
+  up(context: SchemaMigrationContext): Promise<void> | void;
+}
+
 /**
  * SchemaDefinition - Defines database schema extensions for a plugin.
  */
 export interface SchemaDefinition {
-  name: string;
-  tables: unknown[];
+  name?: string;
+  migrations?: SchemaMigration[];
+  tables?: unknown[];
 }

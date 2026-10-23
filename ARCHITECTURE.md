@@ -22,8 +22,8 @@ intended end-to-end payment path.
 - `src/runtime/watchers/`: transaction timeout polling, watcher task recording,
   queue dispatch, and record cleanup.
 
-The consumer creates and initializes the instance, starts background jobs when
-needed, and mounts the middleware into its own server:
+The host owns the HTTP server. It creates and initializes the instance, starts
+background jobs when needed, and mounts the middleware:
 
 ```ts
 const anchor = createAnchor(config);
@@ -32,17 +32,19 @@ await anchor.startBackgroundJobs();
 app.use('/anchor', anchor.getExpressRouter());
 ```
 
-## Data Flow (SEP-24 Example)
+## Current request path
 
-1.  **Wallet** initiates auth (SEP-10).
-2.  **Anchor-Kit** verifies signature and issues JWT.
-3.  **Wallet** requests deposit (SEP-24).
-4.  **Anchor-Kit** creates transaction record (status: `incomplete`) and returns interactive URL.
-5.  **User** completes KYC/Payment on the interactive page.
-6.  **Anchor-Kit** receives Webhook from Payment Rail (e.g., Flutterwave).
-7.  **Anchor-Kit** validates webhook, updates status to `pending_user_transfer_start`.
-8.  **Job Queue** picks up job, sends Stellar Asset to user.
-9.  **Anchor-Kit** updates status to `completed`.
+1. The host mounts the Express-compatible middleware in its own server.
+2. A SEP-10 challenge is validated and exchanged for a bearer token.
+3. An authorized interactive deposit request creates a deposit record and returns
+   its interactive URL.
+4. Webhook processing verifies and stores provider events before invoking the
+   host callback.
+5. The queue and watcher handle expiry checks and record cleanup.
+
+Settlement is not implemented end to end. The current runtime does not submit a Stellar payment
+or advance a deposit through a rail settlement flow. A webhook
+callback or queued job alone does not prove that settlement occurred.
 
 ## SEP-10 Challenge Consumption & Recovery Policy
 

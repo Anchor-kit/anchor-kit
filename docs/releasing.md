@@ -7,7 +7,11 @@ token.
 
 ## 1. Verify the repository and workflow identity
 
-From a checkout of the release commit:
+From a checkout of the release commit, verify that publishing follows a published
+GitHub Release. Branch and tag pushes do not publish a package version. A version is
+published when a maintainer creates and publishes a release in
+[`Anchor-kit/anchor-kit`](https://github.com/Anchor-kit/anchor-kit), and the release's tag matches the
+version already committed in `package.json`.
 
 ```sh
 git remote get-url origin
@@ -29,6 +33,11 @@ The canonical repository is `Anchor-kit/anchor-kit` and the workflow file is
 
 Do not change a stale repository guard as part of owner verification; correct it
 through a reviewed workflow change before release.
+
+The publish job checks out the tagged commit, installs dependencies with
+`bun install --frozen-lockfile`, runs lint, typecheck, tests, and build, verifies
+the tag (`vX.Y.Z`) against `package.json`, then publishes with
+`npm publish --provenance --access public`.
 
 ## 2. Verify the package and publisher identity on npm
 
@@ -105,3 +114,24 @@ settings have already been configured.
 - [npm trusted publishers](https://docs.npmjs.com/trusted-publishers)
 - [GitHub deployment environments](https://docs.github.com/en/actions/how-tos/deploy/configure-and-manage-deployments/manage-environments)
 - [GitHub OIDC security hardening](https://docs.github.com/en/actions/deployment/security-hardening-your-deployments/about-security-hardening-with-openid-connect)
+
+## Publish failure outcomes
+
+- Lint, typecheck, test, or build failure stops the job before publication. Fix
+  the issue on `main`, then create a new release with a new tag/version. Publishing is not retried
+  automatically against a failed release.
+- A version mismatch makes the "Verify release tag matches package version" step fail with a
+  message showing both the tag and `package.json` version. Delete/edit the release, correct
+  `package.json` on `main`, and cut a new release with a matching tag.
+- A publish failure, such as a registry error, missing trusted-publisher config, or expired
+  `NPM_TOKEN`, stops at `npm publish`. The registry has not accepted the version. Fix the auth or
+  registry issue and
+  publish a new release once resolved.
+- The publish job skips events from forks and other repositories because its guard requires
+  `github.repository == 'Anchor-kit/anchor-kit'`.
+
+### Focused repository-guard check
+
+Run `bun test tests/publish-workflow.test.ts`. The check passes when a `published` release in
+`Anchor-kit/anchor-kit` satisfies the exact repository guard and unrelated repository identities
+are rejected.

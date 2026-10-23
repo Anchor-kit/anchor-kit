@@ -4,11 +4,12 @@ import type {
   PaymentParams,
   QueueAdapter,
   QueueJob,
+  WebhookEventRecord,
 } from '../src/index.ts';
 import * as anchorKit from '../src/index.ts';
 
 describe('package root exports', () => {
-  it('exposes config, queue, middleware, and payment types from the root entrypoint', () => {
+  it('exposes config, queue, webhook, middleware, and payment types from the root entrypoint', () => {
     const noopMiddleware: ExpressLikeMiddleware = (_req, _res, next) => {
       next?.();
       return undefined;
@@ -20,6 +21,22 @@ describe('package root exports', () => {
       async enqueue(_job) {},
       async start(_worker) {},
       async stop() {},
+    };
+
+    const webhookEvent: WebhookEventRecord = {
+      id: 'webhook-1',
+      eventId: 'event-1',
+      provider: 'example-provider',
+      payload: { type: 'payment.created' },
+      status: 'pending',
+      errorMessage: null,
+      processedAt: null,
+      createdAt: '2026-09-30T00:00:00.000Z',
+      operationKey: 'example-provider:event-1',
+      attemptCount: 0,
+      attemptId: null,
+      leaseOwner: null,
+      leaseExpiresAt: null,
     };
 
     const schema: AnchorKitConfig = {
@@ -44,6 +61,7 @@ describe('package root exports', () => {
     expect(typeof noopMiddleware).toBe('function');
     expect(job.type).toBe('cleanup_records');
     expect(adapter).toBeDefined();
+    expect(webhookEvent.status).toBe('pending');
     expect(schema.network.network).toBe('testnet');
     expect(paymentParams.destination).toBe('G123');
     expect(typeof anchorKit.utils).toBe('object');

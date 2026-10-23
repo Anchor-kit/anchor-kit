@@ -16,6 +16,28 @@ export type StellarNetwork = 'public' | 'testnet' | 'futurenet';
 export type KycLevel = 'none' | 'basic' | 'strict';
 
 /**
+ * KYC requirement field names. Additional non-empty provider-specific fields are supported.
+ */
+export type KycRequiredField =
+  | 'first_name'
+  | 'last_name'
+  | 'email_address'
+  | 'email'
+  | 'address'
+  | 'phone_number'
+  | 'birth_date'
+  | 'documents'
+  | (string & {});
+
+/**
+ * Resolved KYC policy for one asset.
+ */
+export interface KycPolicyResolution {
+  requiredFields: KycRequiredField[];
+  errors: string[];
+}
+
+/**
  * Postal address for operational metadata
  */
 export interface OperationalAddress {
@@ -87,6 +109,19 @@ export interface ServerConfig {
    */
   interactiveDomain?: string;
 
+  /** HTTPS SEP-10 authentication endpoint published in stellar.toml. */
+  webAuthEndpoint?: string;
+
+  /** HTTPS SEP-24 transfer server published in stellar.toml. */
+  transferServerSep24?: string;
+
+  /**
+   * Domain serving the SEP-10 web authentication endpoint.
+   * Defaults to the host in interactiveDomain, then homeDomain.
+   * @optional
+   */
+  webAuthDomain?: string;
+
   /**
    * Allowed origins for CORS
    * @optional
@@ -112,6 +147,13 @@ export interface SecurityConfig {
   sep10SigningKey: string;
 
   /**
+   * SEP-10 home domain used in the authentication Manage Data key.
+   * Defaults to the host in server.interactiveDomain, then "localhost".
+   * @optional
+   */
+  homeDomain?: string;
+
+  /**
    * JWT secret for interactive flow tokens
    * Used to sign and verify SEP-24 interactive flow tokens
    * @required
@@ -119,14 +161,14 @@ export interface SecurityConfig {
   interactiveJwtSecret: string;
 
   /**
-   * Distribution account secret key
-   * Used to sign and submit Stellar transactions for asset distribution
+   * Distribution account secret key for constructing a LocalKeypairSigner.
+   * Keep this value private; the SDK does not log it or submit transactions automatically.
    * @required
    */
   distributionAccountSecret: string;
 
   /**
-   * Challenge transaction time limit in seconds
+   * SEP-10 challenge time limit in seconds. Must be an integer from 1 to 300.
    * @optional - defaults to 300
    */
   challengeExpirationSeconds?: number;
@@ -245,8 +287,8 @@ export interface AssetsConfig {
  */
 export interface KycConfig {
   /**
-   * Required KYC level
-   * @optional - defaults to 'basic'
+   * Required KYC level. When omitted, explicitly enabled requirements still apply.
+   * A level of 'none' suppresses all resolved requirements for the asset.
    */
   level?: KycLevel;
 
@@ -410,7 +452,9 @@ export interface FrameworkConfig {
     url: string;
 
     /**
-     * Database schema name
+     * PostgreSQL schema name (1-63 ASCII letters, digits, or underscores;
+     * must start with a letter or underscore). Defaults to "public".
+     * SQLite accepts only "main".
      * @optional
      */
     schema?: string;
@@ -621,7 +665,7 @@ export interface AnchorKitConfig {
   kyc?: KycConfig;
 
   /**
-   * Required KYC fields by asset code
+   * Additional required KYC fields by asset code. An absent policy contributes no fields.
    * @optional
    */
   kycRequired?: Record<string, string[]>;
@@ -652,6 +696,12 @@ export interface AnchorKitConfig {
     callbackTimeoutMs?: number;
 
     /**
+     * Maximum time allowed for a cooperative webhook callback.
+     * @optional - defaults to 30000
+     */
+    timeoutMs?: number;
+
+    /**
      * Called after webhook event verification and persistence.
      */
     onEvent?: (
@@ -665,6 +715,7 @@ export interface AnchorKitConfig {
         receivedAt: string;
         signature?: string;
         rawBody: string | Buffer | Uint8Array;
+        signal?: AbortSignal;
       },
     ) => Promise<void> | void;
   };

@@ -41,6 +41,15 @@ function isValidUrlString(url: string): boolean {
   }
 }
 
+function isHttpsUrl(value: unknown): boolean {
+  if (typeof value !== 'string' || value.length === 0) return false;
+  try {
+    return new URL(value).protocol === 'https:';
+  } catch {
+    return false;
+  }
+}
+
 function isValidClientDomain(value: unknown): value is string {
   return (
     typeof value === 'string' &&
@@ -123,6 +132,17 @@ function validateFrameworkNumbers(framework: AnchorKitConfig['framework']): bool
     (!Number.isInteger(framework.queue.concurrency) || framework.queue.concurrency < 1)
   ) {
     throw new Error('framework.queue.concurrency must be a finite integer >= 1');
+  }
+
+  if (
+    framework.queue?.maxPendingJobs !== undefined &&
+    !isPositiveSafeInteger(framework.queue.maxPendingJobs)
+  ) {
+    throw new Error('framework.queue.maxPendingJobs must be a positive safe integer');
+  }
+
+  if (framework.queue?.onError !== undefined && typeof framework.queue.onError !== 'function') {
+    throw new Error('framework.queue.onError must be a function');
   }
 
   const watchersEnabled = framework.watchers?.enabled;
@@ -624,7 +644,13 @@ function validateAnchorKitConfig(config: AnchorKitConfig): boolean {
   }
   validateKycConfig(config.kyc);
 
-  for (const key of ['host', 'corsOrigins'] as const) {
+  for (const key of [
+    'host',
+    'corsOrigins',
+    'webAuthEndpoint',
+    'transferServerSep24',
+    'webAuthDomain',
+  ] as const) {
     const value = server[key];
     if (value !== undefined && value !== null && !ServerConfigSchema[key].validate(value)) {
       throw new Error(`server.${key}: invalid value`);
@@ -772,6 +798,24 @@ export const ServerConfigSchema: Record<keyof Required<ServerConfig>, SchemaFiel
         return false;
       }
     },
+  },
+  webAuthEndpoint: {
+    type: 'string',
+    required: false,
+    description: 'HTTPS SEP-10 endpoint published in stellar.toml.',
+    validate: (value) => isHttpsUrl(value),
+  },
+  webAuthDomain: {
+    type: 'string',
+    required: false,
+    description: 'Domain serving the SEP-10 web authentication endpoint.',
+    validate: isValidClientDomain,
+  },
+  transferServerSep24: {
+    type: 'string',
+    required: false,
+    description: 'HTTPS SEP-24 transfer server published in stellar.toml.',
+    validate: (value) => isHttpsUrl(value),
   },
   corsOrigins: {
     type: 'string[]',

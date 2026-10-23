@@ -52,6 +52,8 @@ function buildFrameworkConfig(
     queue: {
       backend: input.framework.queue?.backend ?? 'memory',
       concurrency: input.framework.queue?.concurrency ?? 1,
+      maxPendingJobs: input.framework.queue?.maxPendingJobs,
+      onError: input.framework.queue?.onError,
     },
     watchers: {
       enabled: input.framework.watchers?.enabled ?? true,

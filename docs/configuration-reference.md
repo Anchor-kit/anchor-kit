@@ -63,6 +63,20 @@ const anchor = createAnchor({
 
 ## Server Configuration
 
+Anchor-Kit serves `GET` and `HEAD /.well-known/stellar.toml`. The document includes the SEP-10
+signing key and network passphrase from the active configuration. Set `server.webAuthEndpoint` and
+`server.transferServerSep24` to publish their HTTPS service URLs:
+
+```typescript
+server: {
+  webAuthEndpoint: 'https://anchor.example.com/auth',
+  transferServerSep24: 'https://anchor.example.com/sep24',
+}
+```
+
+Each service URL is optional and omitted from the document when unset. The URLs must point to
+services provided by the deployment; publishing them does not implement those services.
+
 **Status:** ✅ **Implemented**
 
 HTTP server and hosting settings. Note: Anchor-Kit does not own `listen()` or bind network ports; your Express app does.
@@ -73,6 +87,8 @@ server: {
   port?: number,                      // optional, defaults to 3000 (not used by SDK)
   debug?: boolean,                    // optional, defaults to false
   interactiveDomain?: string,         // required for SEP-24 interactive flows
+  webAuthEndpoint?: string,           // optional, HTTPS SEP-10 endpoint published in stellar.toml
+  transferServerSep24?: string,       // optional, HTTPS SEP-24 endpoint published in stellar.toml
   corsOrigins?: string[],             // optional, CORS allowed origins
   requestTimeout?: number,            // optional, defaults to 30000 ms
 }
@@ -80,14 +96,16 @@ server: {
 
 ### Fields
 
-| Field               | Type       | Default     | Status         | Notes                                                                                                           |
-| ------------------- | ---------- | ----------- | -------------- | --------------------------------------------------------------------------------------------------------------- |
-| `interactiveDomain` | `string`   | —           | ✅ Required    | Domain/URL for SEP-24 interactive flows (e.g., `https://anchor.example.com`); used in `/info` endpoint response |
-| `corsOrigins`       | `string[]` | —           | ✅ Optional    | Allowed origins for CORS; required for SEP-10 client attribution if `enableClientAttribution` is true           |
-| `host`              | `string`   | `'0.0.0.0'` | ✅ Optional    | Server bind address; for reference only (Anchor-Kit does not call `listen()`)                                   |
-| `port`              | `number`   | `3000`      | ✅ Optional    | Server port; for reference only (your Express app controls this)                                                |
-| `debug`             | `boolean`  | `false`     | 📋 Planned     | Debug mode flag; currently unused; will enable verbose logging when implemented                                 |
-| `requestTimeout`    | `number`   | `30000`     | ✅ Implemented | Maximum request duration in milliseconds                                                                        |
+| Field                 | Type       | Default     | Status         | Notes                                                                                                           |
+| --------------------- | ---------- | ----------- | -------------- | --------------------------------------------------------------------------------------------------------------- |
+| `interactiveDomain`   | `string`   | —           | ✅ Required    | Domain/URL for SEP-24 interactive flows (e.g., `https://anchor.example.com`); used in `/info` endpoint response |
+| `webAuthEndpoint`     | `string`   | —           | ✅ Optional    | HTTPS SEP-10 URL published as `WEB_AUTH_ENDPOINT` in `/.well-known/stellar.toml`                                |
+| `transferServerSep24` | `string`   | —           | ✅ Optional    | HTTPS SEP-24 URL published as `TRANSFER_SERVER_SEP0024` in `/.well-known/stellar.toml`                          |
+| `corsOrigins`         | `string[]` | —           | ✅ Optional    | Allowed origins for CORS; required for SEP-10 client attribution if `enableClientAttribution` is true           |
+| `host`                | `string`   | `'0.0.0.0'` | ✅ Optional    | Server bind address; for reference only (Anchor-Kit does not call `listen()`)                                   |
+| `port`                | `number`   | `3000`      | ✅ Optional    | Server port; for reference only (your Express app controls this)                                                |
+| `debug`               | `boolean`  | `false`     | 📋 Planned     | Debug mode flag; currently unused; will enable verbose logging when implemented                                 |
+| `requestTimeout`      | `number`   | `30000`     | ✅ Implemented | Maximum request duration in milliseconds                                                                        |
 
 ### Example
 
@@ -95,6 +113,8 @@ server: {
 const anchor = createAnchor({
   server: {
     interactiveDomain: 'https://anchor.example.com',
+    webAuthEndpoint: 'https://anchor.example.com/auth',
+    transferServerSep24: 'https://anchor.example.com/sep24',
     corsOrigins: ['https://wallet.example.com'],
   },
   // ... other config
@@ -126,18 +146,18 @@ security: {
 
 ### Fields
 
-| Field                        | Type      | Default | Status         | Notes                                                                                                       |
-| ---------------------------- | --------- | ------- | -------------- | ----------------------------------------------------------------------------------------------------------- |
-| `sep10SigningKey`            | `string`  | —       | ✅ Required    | Private key (hex or base64) used to sign SEP-10 authentication challenges                                   |
-| `interactiveJwtSecret`       | `string`  | —       | ✅ Required    | Secret used to sign and verify SEP-24 interactive flow bearer tokens                                        |
-| `distributionAccountSecret`  | `string`  | —       | ✅ Required    | Private key for the Stellar distribution account; used to sign asset distribution transactions              |
-| `webhookSecret`              | `string`  | —       | ✅ Optional    | HMAC-SHA256 secret for webhook signature verification; required if `verifyWebhookSignatures` is true        |
-| `verifyWebhookSignatures`    | `boolean` | `true`  | ✅ Implemented | Enable/disable webhook signature verification via `x-anchor-signature` header                               |
-| `challengeExpirationSeconds` | `number`  | `300`   | ✅ Implemented | SEP-10 challenge expiry window (5 minutes default)                                                          |
-| `enableClientAttribution`    | `boolean` | `false` | ✅ Implemented | Enable SEP-10 client attribution (requires `clientDomain` and `clientDomainSigningKey`)                     |
-| `clientDomain`               | `string`  | —       | ✅ Conditional | Client's DNS hostname (without scheme); required when `enableClientAttribution` is true                     |
-| `clientDomainSigningKey`     | `string`  | —       | ✅ Conditional | Stellar public key from client's SEP-1 `SIGNING_KEY` entry; required when `enableClientAttribution` is true |
-| `authTokenLifetimeSeconds`   | `number`  | `3600`  | ✅ Implemented | SEP-10 auth token lifetime (1 hour default)                                                                 |
+| Field                        | Type      | Default | Status         | Notes                                                                                                                         |
+| ---------------------------- | --------- | ------- | -------------- | ----------------------------------------------------------------------------------------------------------------------------- |
+| `sep10SigningKey`            | `string`  | —       | ✅ Required    | Private key (hex or base64) used to sign SEP-10 authentication challenges                                                     |
+| `interactiveJwtSecret`       | `string`  | —       | ✅ Required    | Secret used to sign and verify SEP-24 interactive flow bearer tokens                                                          |
+| `distributionAccountSecret`  | `string`  | —       | ✅ Required    | Private key for constructing `LocalKeypairSigner`; never log or expose it. The SDK does not submit transactions automatically |
+| `webhookSecret`              | `string`  | —       | ✅ Optional    | HMAC-SHA256 secret for webhook signature verification; required if `verifyWebhookSignatures` is true                          |
+| `verifyWebhookSignatures`    | `boolean` | `true`  | ✅ Implemented | Enable/disable webhook signature verification via `x-anchor-signature` header                                                 |
+| `challengeExpirationSeconds` | `number`  | `300`   | ✅ Implemented | SEP-10 challenge expiry window (5 minutes default)                                                                            |
+| `enableClientAttribution`    | `boolean` | `false` | ✅ Implemented | Enable SEP-10 client attribution (requires `clientDomain` and `clientDomainSigningKey`)                                       |
+| `clientDomain`               | `string`  | —       | ✅ Conditional | Client's DNS hostname (without scheme); required when `enableClientAttribution` is true                                       |
+| `clientDomainSigningKey`     | `string`  | —       | ✅ Conditional | Stellar public key from client's SEP-1 `SIGNING_KEY` entry; required when `enableClientAttribution` is true                   |
+| `authTokenLifetimeSeconds`   | `number`  | `3600`  | ✅ Implemented | SEP-10 auth token lifetime (1 hour default)                                                                                   |
 
 ### Example
 
@@ -288,15 +308,19 @@ framework: {
   queue?: {
     backend: 'memory',           // currently only 'memory' supported
     concurrency?: number,        // optional, defaults to 1
+    maxPendingJobs?: number,     // optional, defaults to unlimited
+    onError?: (job, error) => void | Promise<void>,
   },
   // ...
 }
 ```
 
-| Field               | Type       | Default    | Status         | Notes                                                                                  |
-| ------------------- | ---------- | ---------- | -------------- | -------------------------------------------------------------------------------------- |
-| `queue.backend`     | `'memory'` | `'memory'` | ✅ Implemented | In-process task queue; retains at most 10,000 active task buckets                      |
-| `queue.concurrency` | `number`   | `1`        | ✅ Implemented | Number of concurrent background workers; scales up to handle webhook and watcher loads |
+| Field                  | Type       | Default    | Status         | Notes                                                                                                                                                      |
+| ---------------------- | ---------- | ---------- | -------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `queue.backend`        | `'memory'` | `'memory'` | ✅ Implemented | In-process task queue; retains at most 10,000 active task buckets                                                                                          |
+| `queue.concurrency`    | `number`   | `1`        | ✅ Implemented | Number of concurrent background workers; scales up to handle webhook and watcher loads                                                                     |
+| `queue.maxPendingJobs` | `number`   | unlimited  | ✅ Implemented | Maximum waiting jobs; running jobs do not count toward the limit. Must be a positive safe integer.                                                         |
+| `queue.onError`        | function   | —          | ✅ Implemented | Called with the failed job and error when a worker throws. Without a handler, or if the handler throws, the queue logs the error and continues processing. |
 
 **Example:**
 
@@ -305,10 +329,14 @@ framework: {
   queue: {
     backend: 'memory',
     concurrency: 5,
+    maxPendingJobs: 100,
+    onError: (job, error) => logger.error({ job, error }, 'Background job failed'),
   },
   // ...
 }
 ```
+
+Focused check: `bun test tests/core/factory-background-startup.test.ts`. It must pass the public-factory assertions that enforce the configured pending limit and invoke `onError` after a worker failure.
 
 ---
 

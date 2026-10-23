@@ -45,9 +45,9 @@ for (const requiredText of [
   'Express-compatible runtime',
   'host owns the HTTP server',
   'SEP-10 challenge',
-  'Deposit record',
+  'deposit record',
   'Webhook',
-  'Queue and watcher',
+  'queue and watcher',
   'not implemented end to end',
   'does not submit a Stellar payment',
 ]) {

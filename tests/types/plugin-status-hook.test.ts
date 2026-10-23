@@ -13,12 +13,38 @@ describe('AnchorPluginHooks.onTransactionStatusChange', () => {
       observedStatuses = [oldStatus, newStatus];
     };
 
-    await onStatusChange({}, 'pending_user', 'completed');
+    await onStatusChange(
+      {
+        id: 'deposit-1',
+        account: 'GTEST',
+        kind: 'deposit',
+        assetCode: 'USD',
+        amount: '1',
+        status: 'pending_user',
+        createdAt: new Date(0).toISOString(),
+        updatedAt: new Date(0).toISOString(),
+      },
+      'pending_user',
+      'completed',
+    );
     expect(observedStatuses).toEqual(['pending_user', 'completed']);
 
     const invalidStatusCall = () => {
-      // @ts-expect-error Invalid transaction lifecycle status
-      void onStatusChange({}, 'pending', 'completed');
+      void onStatusChange(
+        {
+          id: 'deposit-1',
+          account: 'GTEST',
+          kind: 'deposit',
+          assetCode: 'USD',
+          amount: '1',
+          status: 'pending_user',
+          createdAt: new Date(0).toISOString(),
+          updatedAt: new Date(0).toISOString(),
+        },
+        // @ts-expect-error Invalid transaction lifecycle status
+        'pending',
+        'completed',
+      );
     };
     expect(invalidStatusCall).toBeTypeOf('function');
   });

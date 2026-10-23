@@ -15,6 +15,7 @@ describe('ServerConfigSchema', () => {
     expect(ServerConfigSchema).toHaveProperty('port');
     expect(ServerConfigSchema).toHaveProperty('debug');
     expect(ServerConfigSchema).toHaveProperty('interactiveDomain');
+    expect(ServerConfigSchema).toHaveProperty('webAuthDomain');
     expect(ServerConfigSchema).toHaveProperty('corsOrigins');
     expect(ServerConfigSchema).toHaveProperty('requestTimeout');
   });
@@ -77,6 +78,18 @@ describe('ServerConfigSchema', () => {
       expect(ServerConfigSchema.interactiveDomain.validate('not-a-url')).toBe(false);
       expect(ServerConfigSchema.interactiveDomain.validate('')).toBe(false);
       expect(ServerConfigSchema.interactiveDomain.validate(123)).toBe(false);
+    });
+  });
+
+  describe('webAuthDomain field', () => {
+    it('validates DNS-style domains', () => {
+      expect(ServerConfigSchema.webAuthDomain.validate('auth.anchor.example.com')).toBe(true);
+      expect(ServerConfigSchema.webAuthDomain.validate('localhost')).toBe(true);
+    });
+    it('rejects URLs and invalid domain labels', () => {
+      expect(ServerConfigSchema.webAuthDomain.validate('https://anchor.example.com')).toBe(false);
+      expect(ServerConfigSchema.webAuthDomain.validate('-invalid.example')).toBe(false);
+      expect(ServerConfigSchema.webAuthDomain.validate('')).toBe(false);
     });
   });
 
