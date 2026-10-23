@@ -256,6 +256,31 @@ describe('SqlDatabaseAdapter - webhook event deduplication (sqlite)', () => {
     expect(fetched.errorMessage).toBeNull();
   });
 
+  it('preserves unresolved webhook status when reading a timed-out event', async () => {
+    const eventId = `evt-unresolved-${randomUUID()}`;
+    const inserted = await db.insertOrGetWebhookEvent({
+      id: randomUUID(),
+      eventId,
+      provider: 'test-provider',
+      payload: { type: 'payment.initiated' },
+    });
+
+    await db.updateWebhookEventStatus({
+      id: inserted.record.id,
+      status: 'unresolved',
+      errorMessage: 'callback timed out',
+    });
+
+    const duplicate = await db.insertOrGetWebhookEvent({
+      id: randomUUID(),
+      eventId,
+      provider: 'test-provider',
+      payload: {},
+    });
+    expect(duplicate.record.status).toBe('unresolved');
+    expect(duplicate.record.errorMessage).toBe('callback timed out');
+  });
+
   it('upgrades a legacy single-column event_id UNIQUE constraint in place', async () => {
     const upgradeUrl = makeSqliteDbUrlForTests();
     const upgradePath = upgradeUrl.startsWith('file:')

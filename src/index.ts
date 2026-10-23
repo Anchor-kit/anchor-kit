@@ -28,6 +28,7 @@ export type {
   DatabaseAdapter,
   IdempotencyRecord,
   InteractiveTransactionRecord,
+  KycVerificationProvider,
   PaymentRailAdapter,
   QueueJob,
   QueueDrainStatus,
@@ -38,4 +39,5 @@ export type {
   WebhookProcessor,
   WatcherTaskRecord,
 } from './runtime/interfaces.ts';
+export { MockKycVerificationProvider } from './runtime/kyc/mock-provider.ts';
 export type { ExpressLikeMiddleware } from './runtime/http/express-router.ts';

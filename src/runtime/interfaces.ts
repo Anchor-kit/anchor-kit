@@ -1,10 +1,19 @@
 import type { TransactionStatus } from '@/types/transaction-status.ts';
+import type { KycData, KycVerificationDecision } from '@/types/foundation.ts';
 import type {
   NormalizedPaymentRailEvent,
   PaymentRailInitiationRequest,
   PaymentRailOperation,
   RailCapabilityResult,
 } from '@/types/transaction.ts';
+
+export interface KycVerificationProvider {
+  verify(input: {
+    customerId: string;
+    operationKey: string;
+    data: KycData;
+  }): Promise<KycVerificationDecision>;
+}
 
 export interface PaymentRailAdapter {
   readonly provider: string;
@@ -51,6 +60,12 @@ export interface InteractiveTransactionRecord {
   kind: 'deposit';
   assetCode: string;
   amount: string;
+  amountIn?: string | null;
+  amountOut?: string | null;
+  amountFee?: string | null;
+  currency?: string | null;
+  railReference?: string | null;
+  stellarTransactionHash?: string | null;
   status: TransactionStatus;
   createdAt: string;
   updatedAt: string;
@@ -147,6 +162,12 @@ export interface DatabaseAdapter {
     kind: 'deposit';
     assetCode: string;
     amount: string;
+    amountIn?: string | null;
+    amountOut?: string | null;
+    amountFee?: string | null;
+    currency?: string | null;
+    railReference?: string | null;
+    stellarTransactionHash?: string | null;
     status: TransactionStatus;
   }): Promise<InteractiveTransactionRecord>;
   getInteractiveTransactionById(id: string): Promise<InteractiveTransactionRecord | null>;

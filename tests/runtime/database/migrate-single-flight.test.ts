@@ -71,13 +71,13 @@ function attachPostgresClient(adapter: SqlDatabaseAdapter, client: unknown): Sql
 }
 
 /**
- * Twenty-two queries define migration sequence after webhook-attempt columns
- * and provider-scoped deduplication were both added:
- *   7 CREATE TABLE + 1 ALTER idempotency_keys + 1 DO block for webhook dedupe
- *   + 1 migration lookup + 5 ALTER webhook_events + 1 migration insert
- *   + 6 CREATE INDEX.
+ * Twenty-eight queries define migration sequence after transaction fields,
+ * webhook-attempt columns, and provider-scoped deduplication were added:
+ *   7 CREATE TABLE + 1 ALTER idempotency_keys + 6 ALTER transaction fields
+ *   + 1 DO block for webhook dedupe + 1 migration lookup + 5 ALTER webhook_events
+ *   + 1 migration insert + 6 CREATE INDEX.
  */
-const POSTGRES_SEQUENCE_LENGTH = 22;
+const POSTGRES_SEQUENCE_LENGTH = 28;
 
 describe('Concurrent database migrations (#600)', () => {
   it('runs a single migration sequence for concurrent callers', async () => {

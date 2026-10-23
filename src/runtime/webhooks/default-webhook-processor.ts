@@ -4,7 +4,7 @@ import type {
   WebhookEventRecord,
   WebhookProcessor,
 } from '@/runtime/interfaces.ts';
-import type { AnchorKitConfigSnapshot } from '@/types/config.ts';
+import type { AnchorKitConfig, AnchorKitConfigSnapshot } from '@/types/config.ts';
 import { createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
 
 interface DefaultWebhookProcessorOptions {
@@ -45,6 +45,9 @@ export function deriveWebhookOperationKey(provider: string, eventId: string): st
 export class DefaultWebhookProcessor implements WebhookProcessor {
   private readonly config: AnchorKitConfigSnapshot;
   private readonly database: DatabaseAdapter;
+  private readonly activeControllers = new Set<AbortController>();
+  private readonly activeProcesses = new Set<Promise<{ duplicate: boolean; eventId: string }>>();
+  private shuttingDown = false;
 
   constructor(options: DefaultWebhookProcessorOptions) {
     this.config = options.config;
@@ -187,6 +190,56 @@ export class DefaultWebhookProcessor implements WebhookProcessor {
       attemptId: attemptId,
       attemptCount: claimed.attemptCount,
     };
+  }
+
+  private async invokeCallback(
+    callback: NonNullable<AnchorKitConfig['webhooks']>['onEvent'],
+    input: {
+      event: {
+        id: string;
+        eventId: string;
+        provider: string;
+        payload: Record<string, unknown>;
+      };
+      context: {
+        receivedAt: string;
+        signature?: string;
+        rawBody: string | Buffer | Uint8Array;
+        signal?: AbortSignal;
+      };
+    },
+  ): Promise<void> {
+    if (!callback) return;
+    if (this.shuttingDown) {
+      throw new Error('Webhook processor is shutting down');
+    }
+
+    const controller = new AbortController();
+    this.activeControllers.add(controller);
+    const timeoutMs = this.config.webhooks?.timeoutMs ?? 30_000;
+    const timeout = setTimeout(
+      () => controller.abort(new Error('Webhook callback deadline exceeded')),
+      timeoutMs,
+    );
+    const aborted = new Promise<never>((_, reject) => {
+      controller.signal.addEventListener(
+        'abort',
+        () => reject(controller.signal.reason ?? new Error('Webhook callback aborted')),
+        { once: true },
+      );
+    });
+
+    try {
+      await Promise.race([
+        Promise.resolve().then(() =>
+          callback(input.event, { ...input.context, signal: controller.signal }),
+        ),
+        aborted,
+      ]);
+    } finally {
+      clearTimeout(timeout);
+      this.activeControllers.delete(controller);
+    }
   }
 
   private verifySignatureIfEnabled(input: {

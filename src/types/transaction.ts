@@ -197,6 +197,15 @@ export interface Transaction {
   /** Transaction fee amount */
   amount_fee?: Amount;
 
+  /** ISO currency code associated with the transaction's fiat amount */
+  currency?: string;
+
+  /** Payment rail reference used for reconciliation */
+  rail_reference?: string;
+
+  /** Stellar transaction hash used for chain reconciliation */
+  stellar_transaction_hash?: string;
+
   // ============================================
   // Reference & Information Fields
   // ============================================

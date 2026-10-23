@@ -178,15 +178,24 @@ function parseJsonObject(value: unknown, parseSerializedText: boolean): Record<s
   return parsed as Record<string, unknown>;
 }
 
+function validateSchemaIdentifier(schema: string): string {
+  if (schema.length > 63 || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(schema)) {
+    throw new ConfigError(
+      'Database schema must be a PostgreSQL identifier (1-63 ASCII letters, digits, or underscores; it cannot start with a digit)',
+    );
+  }
+  return schema;
+}
+
 type PersistedTaskStatus = 'pending' | 'processed' | 'failed';
 type PersistedWebhookStatus = PersistedTaskStatus | 'unresolved';
 
-function parsePersistedTaskStatus(value: unknown, recordType: 'watcher task'): PersistedTaskStatus {
+function parsePersistedTaskStatus(value: unknown): PersistedTaskStatus {
   if (value === 'pending' || value === 'processed' || value === 'failed') {
     return value;
   }
 
-  throw new MalformedPersistedDataError(`Invalid persisted ${recordType} status.`);
+  throw new MalformedPersistedDataError('Invalid persisted watcher task status.');
 }
 
 function parsePersistedWebhookStatus(value: unknown): PersistedWebhookStatus {
@@ -215,6 +224,7 @@ const WEBHOOK_COMPOSITE_UNIQUE_PATTERN = /UNIQUE\s*\(\s*provider\s*,\s*event_id\
 export class SqlDatabaseAdapter implements DatabaseAdapter {
   private readonly provider: FrameworkConfig['database']['provider'];
   private readonly url: string;
+  private readonly schema: string | null;
   private sqlite: SqliteLike | null = null;
   private postgres: PostgresClient | null = null;
   private connectPromise: Promise<void> | null = null;
@@ -225,6 +235,15 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
   constructor(databaseConfig: FrameworkConfig['database']) {
     this.provider = databaseConfig.provider;
     this.url = databaseConfig.url;
+    this.schema =
+      databaseConfig.schema !== undefined
+        ? validateSchemaIdentifier(databaseConfig.schema)
+        : this.provider === 'postgres'
+          ? 'public'
+          : null;
+    if (this.provider === 'sqlite' && this.schema && this.schema !== 'main') {
+      throw new ConfigError('SQLite only supports the default "main" database schema');
+    }
   }
 
   public async connect(): Promise<void> {
@@ -360,6 +379,12 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
           kind TEXT NOT NULL,
           asset_code TEXT NOT NULL,
           amount TEXT NOT NULL,
+          amount_in TEXT,
+          amount_out TEXT,
+          amount_fee TEXT,
+          currency TEXT,
+          rail_reference TEXT,
+          stellar_transaction_hash TEXT,
           status TEXT NOT NULL,
           created_at TEXT NOT NULL,
           updated_at TEXT NOT NULL
@@ -399,6 +424,10 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
           created_at TEXT NOT NULL
         );
 
+        CREATE TABLE IF NOT EXISTS anchor_kit_schema_migrations (
+          version INTEGER PRIMARY KEY,
+          applied_at TEXT NOT NULL
+        );
         CREATE TABLE IF NOT EXISTS settlement_jobs (
           id TEXT PRIMARY KEY,
           operation_id TEXT NOT NULL UNIQUE,
@@ -416,6 +445,7 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
           "ALTER TABLE idempotency_keys ADD COLUMN status TEXT NOT NULL DEFAULT 'completed'",
         );
       }
+      this.migrateInteractiveTransactionFieldsSqlite();
       this.upgradeLegacyWebhookDedupeSqlite();
       await this.applyWebhookAttemptMigrationSqlite();
       for (const statement of SQLITE_INDEX_STATEMENTS) {
@@ -448,11 +478,29 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
           kind TEXT NOT NULL,
           asset_code TEXT NOT NULL,
           amount TEXT NOT NULL,
+          amount_in TEXT,
+          amount_out TEXT,
+          amount_fee TEXT,
+          currency TEXT,
+          rail_reference TEXT,
+          stellar_transaction_hash TEXT,
           status TEXT NOT NULL,
           created_at TIMESTAMPTZ NOT NULL,
           updated_at TIMESTAMPTZ NOT NULL
         );
       `);
+      for (const column of [
+        'amount_in TEXT',
+        'amount_out TEXT',
+        'amount_fee TEXT',
+        'currency TEXT',
+        'rail_reference TEXT',
+        'stellar_transaction_hash TEXT',
+      ]) {
+        await this.postgres.query(
+          `ALTER TABLE interactive_transactions ADD COLUMN IF NOT EXISTS ${column}`,
+        );
+      }
       await this.postgres.query(`
         CREATE TABLE IF NOT EXISTS idempotency_keys (
           id TEXT PRIMARY KEY,
@@ -564,6 +612,35 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
       'INSERT INTO schema_migrations (version, applied_at) VALUES ($1, $2) ON CONFLICT(version) DO NOTHING',
       [WEBHOOK_ATTEMPT_MIGRATION_VERSION, nowIso()],
     );
+  }
+
+  private migrateInteractiveTransactionFieldsSqlite(): void {
+    if (!this.sqlite) throw new ConfigError('Database not connected');
+
+    const existingColumns = this.sqlite
+      .prepare('PRAGMA table_info(interactive_transactions)')
+      .all() as Array<{ name?: unknown }>;
+    const existingNames = new Set(existingColumns.map((column) => String(column.name)));
+    const columnDefinitions = [
+      ['amount_in', 'TEXT'],
+      ['amount_out', 'TEXT'],
+      ['amount_fee', 'TEXT'],
+      ['currency', 'TEXT'],
+      ['rail_reference', 'TEXT'],
+      ['stellar_transaction_hash', 'TEXT'],
+    ] as const;
+
+    for (const [column, type] of columnDefinitions) {
+      if (!existingNames.has(column)) {
+        this.sqlite.exec(`ALTER TABLE interactive_transactions ADD COLUMN ${column} ${type}`);
+      }
+    }
+
+    this.sqlite
+      .prepare(
+        'INSERT INTO anchor_kit_schema_migrations (version, applied_at) VALUES (?, ?) ON CONFLICT(version) DO NOTHING',
+      )
+      .run(1, nowIso());
   }
 
   /**
@@ -750,6 +827,12 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
     kind: 'deposit';
     assetCode: string;
     amount: string;
+    amountIn?: string | null;
+    amountOut?: string | null;
+    amountFee?: string | null;
+    currency?: string | null;
+    railReference?: string | null;
+    stellarTransactionHash?: string | null;
     status: TransactionStatus;
   }): Promise<InteractiveTransactionRecord> {
     const createdAt = nowIso();
@@ -758,7 +841,7 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
     if (this.sqlite) {
       this.sqlite
         .prepare(
-          'INSERT INTO interactive_transactions (id, account, kind, asset_code, amount, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+          'INSERT INTO interactive_transactions (id, account, kind, asset_code, amount, amount_in, amount_out, amount_fee, currency, rail_reference, stellar_transaction_hash, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
         )
         .run(
           input.id,
@@ -766,19 +849,31 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
           input.kind,
           input.assetCode,
           input.amount,
+          input.amountIn ?? null,
+          input.amountOut ?? null,
+          input.amountFee ?? null,
+          input.currency ?? null,
+          input.railReference ?? null,
+          input.stellarTransactionHash ?? null,
           input.status,
           createdAt,
           updatedAt,
         );
     } else {
       await this.requirePostgres().query(
-        'INSERT INTO interactive_transactions (id, account, kind, asset_code, amount, status, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)',
+        'INSERT INTO interactive_transactions (id, account, kind, asset_code, amount, amount_in, amount_out, amount_fee, currency, rail_reference, stellar_transaction_hash, status, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)',
         [
           input.id,
           input.account,
           input.kind,
           input.assetCode,
           input.amount,
+          input.amountIn ?? null,
+          input.amountOut ?? null,
+          input.amountFee ?? null,
+          input.currency ?? null,
+          input.railReference ?? null,
+          input.stellarTransactionHash ?? null,
           input.status,
           createdAt,
           updatedAt,
@@ -792,6 +887,12 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
       kind: input.kind,
       assetCode: input.assetCode,
       amount: input.amount,
+      amountIn: input.amountIn,
+      amountOut: input.amountOut,
+      amountFee: input.amountFee,
+      currency: input.currency,
+      railReference: input.railReference,
+      stellarTransactionHash: input.stellarTransactionHash,
       status: input.status,
       createdAt,
       updatedAt,
@@ -1639,6 +1740,21 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
       kind: 'deposit',
       assetCode: String(row.asset_code),
       amount: String(row.amount),
+      amountIn:
+        row.amount_in === null || row.amount_in === undefined ? null : String(row.amount_in),
+      amountOut:
+        row.amount_out === null || row.amount_out === undefined ? null : String(row.amount_out),
+      amountFee:
+        row.amount_fee === null || row.amount_fee === undefined ? null : String(row.amount_fee),
+      currency: row.currency === null || row.currency === undefined ? null : String(row.currency),
+      railReference:
+        row.rail_reference === null || row.rail_reference === undefined
+          ? null
+          : String(row.rail_reference),
+      stellarTransactionHash:
+        row.stellar_transaction_hash === null || row.stellar_transaction_hash === undefined
+          ? null
+          : String(row.stellar_transaction_hash),
       status,
       createdAt: String(row.created_at),
       updatedAt: String(row.updated_at),
@@ -1683,7 +1799,7 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
 
   private mapWatcherRow(row: Record<string, unknown>): WatcherTaskRecord {
     const payload = parseJsonObject(row.payload, this.provider === 'sqlite');
-    const status = parsePersistedTaskStatus(row.status, 'watcher task');
+    const status = parsePersistedTaskStatus(row.status);
 
     return {
       id: String(row.id),

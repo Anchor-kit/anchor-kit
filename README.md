@@ -97,6 +97,7 @@ const anchor = createAnchor({
   },
   webhooks: {
     onEvent: async (event, ctx) => {
+      if (ctx.signal.aborted) return;
       console.log('webhook event', event.eventId, ctx.receivedAt);
     },
   },

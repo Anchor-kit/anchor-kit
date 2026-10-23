@@ -22,6 +22,7 @@ This file tracks where the codebase currently aligns or diverges from the canoni
 - In-memory queue adapter for bounded background work and graceful shutdown.
 - SQL-backed settlement job records with stable operation identity and reconnect-safe pending state.
 - Transaction watcher lifecycle for polling pending transactions, persisting watcher tasks, and dispatching work through the queue.
+- Typed KYC verification contract and deterministic in-memory mock provider for local development and tests; customer persistence and asset-policy enforcement are not yet connected.
 - SEP-10 signer-weight verification primitive; account signer lookup and endpoint integration remain separate work.
 - Provider-neutral payment rail adapter contract for initiation, event verification, status lookup, and recovery; no provider implementation is bundled.
 

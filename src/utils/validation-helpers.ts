@@ -633,7 +633,13 @@ function validateAnchorKitConfig(config: AnchorKitConfig): boolean {
   }
   validateKycConfig(config.kyc);
 
-  for (const key of ['host', 'corsOrigins', 'webAuthEndpoint', 'transferServerSep24'] as const) {
+  for (const key of [
+    'host',
+    'corsOrigins',
+    'webAuthEndpoint',
+    'transferServerSep24',
+    'webAuthDomain',
+  ] as const) {
     const value = server[key];
     if (value !== undefined && value !== null && !ServerConfigSchema[key].validate(value)) {
       throw new Error(`server.${key}: invalid value`);
@@ -739,6 +745,12 @@ export const ServerConfigSchema: Record<keyof Required<ServerConfig>, SchemaFiel
     required: false,
     description: 'HTTPS SEP-10 endpoint published in stellar.toml.',
     validate: (value) => isHttpsUrl(value),
+  },
+  webAuthDomain: {
+    type: 'string',
+    required: false,
+    description: 'Domain serving the SEP-10 web authentication endpoint.',
+    validate: isValidClientDomain,
   },
   transferServerSep24: {
     type: 'string',
