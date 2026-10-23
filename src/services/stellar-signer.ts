@@ -5,6 +5,32 @@ export interface StellarTransactionSigner {
   signTransaction(transactionXdr: string, networkPassphrase: string): Promise<string>;
 }
 
+export interface StellarAccountSigner {
+  key: string;
+  weight: number;
+}
+
+export interface StellarAccountThresholds {
+  low: number;
+  medium: number;
+  high: number;
+}
+
+export interface StellarAccountRecord {
+  accountId: string;
+  signers: StellarAccountSigner[];
+  thresholds: StellarAccountThresholds;
+}
+
+export type StellarAccountLookupResult =
+  | { status: 'found'; account: StellarAccountRecord }
+  | { status: 'not_found' }
+  | { status: 'upstream_error'; message: string };
+
+export interface StellarAccountLookup {
+  lookupAccount(accountId: string): Promise<StellarAccountLookupResult>;
+}
+
 export class LocalKeypairSigner implements StellarTransactionSigner {
   readonly #keypair: Keypair;
 

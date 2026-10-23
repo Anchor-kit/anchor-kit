@@ -1,7 +1,11 @@
 import type { AnchorConfig } from '@/core/config.ts';
 import { errorHandler } from '../../utils/error-handler.ts';
 import { InMemoryRateLimiter, type RateLimitRule } from './rate-limiter.ts';
-import type { DatabaseAdapter, WebhookProcessor } from '@/runtime/interfaces.ts';
+import type {
+  AccountLookup,
+  DatabaseAdapter,
+  WebhookProcessor,
+} from '@/runtime/interfaces.ts';
 import type { RouteDefinition } from '@/types/foundation.ts';
 import type { AnchorPluginHooks } from '@/types/plugin.ts';
 import { Keypair } from '@stellar/stellar-sdk';
@@ -25,6 +29,7 @@ interface RouterDependencies {
   depositRequestHooks?: NonNullable<AnchorPluginHooks['onDepositRequest']>[];
   sep10ChallengeHooks?: NonNullable<AnchorPluginHooks['onSep10Challenge']>[];
   pluginRoutes?: Array<{ pluginId: string; route: RouteDefinition }>;
+  accountLookup?: AccountLookup;
 }
 
 export class AnchorExpressRouter {
@@ -65,6 +70,7 @@ export class AnchorExpressRouter {
       rateLimiter: new InMemoryRateLimiter(),
       rateRules,
       pluginRoutes,
+      accountLookup: dependencies.accountLookup,
     };
   }
 
