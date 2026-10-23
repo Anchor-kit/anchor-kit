@@ -130,7 +130,7 @@ class ControllableFakeDatabaseAdapter implements DatabaseAdapter {
 function makeTestContext(dbAdapter: DatabaseAdapter, serverKeypair: Keypair): ExpressRouterContext {
   const config = new AnchorConfig({
     network: { network: 'testnet' },
-    server: { interactiveDomain: 'https://anchor.test' },
+    server: { homeDomain: 'anchor.test', interactiveDomain: 'https://anchor.test' },
     security: {
       sep10SigningKey: serverKeypair.secret(),
       interactiveJwtSecret: 'test-jwt-secret-key-1234567890',
@@ -181,7 +181,7 @@ async function buildSignedChallengeXdr(
   })
     .addOperation(
       Operation.manageData({
-        name: 'anchor_auth',
+        name: `${context.config.get('server').homeDomain} auth`,
         value: nonce,
         source: account,
       }),

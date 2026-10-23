@@ -52,7 +52,11 @@ describe('Config Validation Improvements (#124, #125)', () => {
 
     const validConfig = new AnchorConfig({
       ...validBaseConfig,
-      server: { host: 'localhost', corsOrigins: ['https://app.example.com'] },
+      server: {
+        homeDomain: 'anchor.example.com',
+        host: 'localhost',
+        corsOrigins: ['https://app.example.com'],
+      },
     });
     expect(() => validConfig.validate()).not.toThrow();
     expect(validConfig.get('server').corsOrigins).toEqual(['https://app.example.com']);
@@ -338,7 +342,7 @@ describe('Config Validation Improvements (#124, #125)', () => {
     const dbUrl = makeSqliteDbUrlForTests();
     const anchor = createAnchor({
       network: { network: 'testnet' },
-      server: { interactiveDomain: 'https://anchor.example.com' },
+      server: { homeDomain: 'anchor.example.com', interactiveDomain: 'https://anchor.example.com' },
       security: {
         sep10SigningKey: testSep10SigningKey,
         interactiveJwtSecret: 'jwt-secret',

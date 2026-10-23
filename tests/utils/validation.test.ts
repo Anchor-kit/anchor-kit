@@ -255,7 +255,7 @@ describe('Asset Validation (#254)', () => {
 describe('Operational Boolean Options Validation (#550)', () => {
   const baseConfig: AnchorKitConfig = {
     network: { network: 'testnet' },
-    server: { port: 3000 },
+    server: { homeDomain: 'anchor.example.com', port: 3000 },
     security: {
       sep10SigningKey: 'secret-key-10',
       interactiveJwtSecret: 'jwt-secret',
@@ -387,7 +387,7 @@ describe('Operational Boolean Options Validation (#550)', () => {
 describe('Operational Website Validation (#388)', () => {
   const baseConfig: AnchorKitConfig = {
     network: { network: 'testnet' },
-    server: { port: 3000 },
+    server: { homeDomain: 'anchor.example.com', port: 3000 },
     security: {
       sep10SigningKey: 'secret-key-10',
       interactiveJwtSecret: 'jwt-secret',
@@ -592,7 +592,7 @@ describe('Email Validation (#607)', () => {
 describe('Documentation URLs Validation (#549)', () => {
   const baseConfig: AnchorKitConfig = {
     network: { network: 'testnet' },
-    server: { port: 3000 },
+    server: { homeDomain: 'anchor.example.com', port: 3000 },
     security: {
       sep10SigningKey: 'secret-key-10',
       interactiveJwtSecret: 'jwt-secret',

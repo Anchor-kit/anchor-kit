@@ -705,6 +705,26 @@ export interface SchemaField {
   validate: (value: unknown) => boolean;
 }
 
+function isValidHomeDomain(value: unknown): value is string {
+  if (typeof value !== 'string' || value.trim() !== value || value.length === 0) {
+    return false;
+  }
+
+  const labels = value.split('.');
+  if (
+    labels.some(
+      (label) =>
+        label.length === 0 ||
+        label.length > 63 ||
+        !/^[a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?$/.test(label),
+    )
+  ) {
+    return false;
+  }
+
+  return new TextEncoder().encode(`${value} auth`).length <= 64;
+}
+
 /**
  * ServerConfigSchema
  * Runtime schema for validating partial ServerConfig objects.

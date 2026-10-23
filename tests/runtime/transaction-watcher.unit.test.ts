@@ -351,7 +351,7 @@ describe('TransactionWatcher Unit Tests', () => {
       (cutoffIso: string) => Promise<InteractiveTransactionRecord[]>
     >(
       () =>
-        new Promise((_, reject) => {
+        new Promise<InteractiveTransactionRecord[]>((_, reject) => {
           rejectTick.mockImplementation(() => reject(new Error('db failure')));
         }),
     );
@@ -366,23 +366,6 @@ describe('TransactionWatcher Unit Tests', () => {
     expect(
       (transactionWatcher as unknown as { timer: ReturnType<typeof setInterval> | null }).timer,
     ).toBeNull();
-  });
-
-  it('stop() resolves even when an active tick rejects and clears the timer', async () => {
-    const rejectTick = vi.fn();
-    mockDatabase.listPendingTransactionsBefore = vi.fn(
-      () =>
-        new Promise((_, reject) => {
-          rejectTick.mockImplementation(() => reject(new Error('db failure')));
-        }),
-    );
-
-    await transactionWatcher.start();
-    const stopPromise = transactionWatcher.stop();
-    rejectTick();
-
-    await expect(stopPromise).resolves.toBeUndefined();
-    expect((transactionWatcher as unknown as { timer: ReturnType<typeof setInterval> | null }).timer).toBeNull();
   });
 
   it('enqueues a cleanup_records job with the configured retention days', async () => {

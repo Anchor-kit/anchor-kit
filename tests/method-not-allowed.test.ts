@@ -89,6 +89,7 @@ describe('HTTP Method Not Allowed (405) with Allow header', () => {
     anchor = createAnchor({
       network: { network: 'testnet' },
       server: {
+        homeDomain: 'anchor.example.com',
         interactiveDomain: 'http://localhost:3000',
       },
       security: {

@@ -52,7 +52,7 @@ async function invoke(anchor: ReturnType<typeof createAnchor>, url: string, body
 function makeAnchor() {
   return createAnchor({
     network: { network: 'testnet' },
-    server: {},
+    server: { homeDomain: 'anchor.example.com' },
     security: {
       sep10SigningKey: Keypair.random().secret(),
       interactiveJwtSecret: 'test-jwt-secret',

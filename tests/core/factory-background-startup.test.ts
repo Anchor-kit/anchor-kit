@@ -66,7 +66,7 @@ describe('AnchorInstance concurrent background startup', () => {
   it('exposes queue counts without exposing queued job payloads', async () => {
     const anchor = createAnchor({
       network: { network: 'testnet' },
-      server: { interactiveDomain: 'https://anchor.example.com' },
+      server: { homeDomain: 'anchor.example.com', interactiveDomain: 'https://anchor.example.com' },
       security: {
         sep10SigningKey: Keypair.random().secret(),
         interactiveJwtSecret: 'jwt-test-secret',
@@ -126,7 +126,10 @@ describe('AnchorInstance concurrent background startup', () => {
     async (_description, transactionRetentionDays, watcherRetentionDays, expectedRetentionDays) => {
       const anchor = createAnchor({
         network: { network: 'testnet' },
-        server: { interactiveDomain: 'https://anchor.example.com' },
+        server: {
+          homeDomain: 'anchor.example.com',
+          interactiveDomain: 'https://anchor.example.com',
+        },
         security: {
           sep10SigningKey: Keypair.random().secret(),
           interactiveJwtSecret: 'jwt-test-secret',
@@ -174,7 +177,7 @@ describe('AnchorInstance concurrent background startup', () => {
   it('does not start duplicate background work when startBackgroundJobs is called concurrently', async () => {
     const anchor = createAnchor({
       network: { network: 'testnet' },
-      server: { interactiveDomain: 'https://anchor.example.com' },
+      server: { homeDomain: 'anchor.example.com', interactiveDomain: 'https://anchor.example.com' },
       security: {
         sep10SigningKey: Keypair.random().secret(),
         interactiveJwtSecret: 'jwt-test-secret',
@@ -238,7 +241,7 @@ describe('AnchorInstance concurrent background startup', () => {
   it('shares a stop failure with concurrent callers without stopping the service twice', async () => {
     const anchor = createAnchor({
       network: { network: 'testnet' },
-      server: { interactiveDomain: 'https://anchor.example.com' },
+      server: { homeDomain: 'anchor.example.com', interactiveDomain: 'https://anchor.example.com' },
       security: {
         sep10SigningKey: Keypair.random().secret(),
         interactiveJwtSecret: 'jwt-test-secret',

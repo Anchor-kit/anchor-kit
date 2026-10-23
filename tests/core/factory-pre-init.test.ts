@@ -6,7 +6,7 @@ describe('AnchorInstance pre-init router access', () => {
   it('throws ConfigError with init guidance before initialization', () => {
     const anchor = createAnchor({
       network: { network: 'testnet' },
-      server: { interactiveDomain: 'https://anchor.example.com' },
+      server: { homeDomain: 'anchor.example.com', interactiveDomain: 'https://anchor.example.com' },
       security: {
         sep10SigningKey: 'SCZJBZ6S7HWMQVT7DM74JVHVDKCEE5P6I6T3E5M7LJM6LJM6LJM6LJM6',
         interactiveJwtSecret: 'jwt-test-secret',

@@ -800,7 +800,9 @@ async function handleAuthChallenge(
     return;
   }
 
-  if (extractNonceFromChallenge(hookedChallengeTx) !== nonce) {
+  if (
+    extractNonceFromChallenge(hookedChallengeTx, context.config.get('server').homeDomain) !== nonce
+  ) {
     sendJson(res, 500, {
       error: 'challenge_hook_failed',
       message: 'SEP-10 challenge hook returned an invalid transaction',

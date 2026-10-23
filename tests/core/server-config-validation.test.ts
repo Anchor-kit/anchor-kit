@@ -7,7 +7,7 @@ import { SecurityConfigSchema, ServerConfigSchema } from '@/utils/validation.ts'
 
 const baseConfig: AnchorKitConfig = {
   network: { network: 'testnet' },
-  server: {},
+  server: { homeDomain: 'anchor.example.com' },
   security: {
     sep10SigningKey: 'secret-key-10',
     interactiveJwtSecret: 'jwt-secret',
@@ -29,21 +29,30 @@ const baseConfig: AnchorKitConfig = {
   },
 };
 
-function configWithServer(server: ServerConfig): AnchorKitConfig {
-  return { ...baseConfig, server };
+function configWithServer(server: Partial<ServerConfig>): AnchorKitConfig {
+  return { ...baseConfig, server: { ...baseConfig.server, ...server } };
 }
 
 describe('server config validation', () => {
-  it('accepts partial server settings without adding or changing values', () => {
+  it('validates the SEP-10 home domain and operation-name byte limit', () => {
+    expect(ServerConfigSchema.homeDomain.validate('anchor.example.com')).toBe(true);
+    expect(ServerConfigSchema.homeDomain.validate('localhost')).toBe(true);
+    expect(ServerConfigSchema.homeDomain.validate('https://anchor.example.com')).toBe(false);
+    expect(ServerConfigSchema.homeDomain.validate('anchor.example.com/path')).toBe(false);
+    expect(ServerConfigSchema.homeDomain.validate(`${'a'.repeat(58)}.com`)).toBe(false);
+  });
+
+  it('accepts partial server settings with a required home domain', () => {
     const server = { host: 'localhost' };
     const config = new AnchorConfig(configWithServer(server));
 
     expect(() => config.validate()).not.toThrow();
-    expect(config.get('server')).toEqual(server);
+    expect(config.get('server')).toEqual({ homeDomain: 'anchor.example.com', ...server });
   });
 
   it('accepts complete server settings unchanged', () => {
     const server: ServerConfig = {
+      homeDomain: 'anchor.example.com',
       host: '127.0.0.1',
       port: 65535,
       debug: false,
