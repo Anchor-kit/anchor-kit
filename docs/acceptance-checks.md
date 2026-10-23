@@ -45,6 +45,19 @@ Expected: the fake adapter supplied through `createAnchor` receives exactly one
 `connect()`, one `migrate()`, and one `disconnect()` for one init/shutdown
 cycle, including when shutdown is called twice.
 
+## Interactive session validation and revocation (#718)
+
+```sh
+bun test tests/runtime/interactive-session-revocation.test.ts
+```
+
+Expected: all eight assertions pass. Expired, revoked, wrong-account and
+wrong-transaction sessions are rejected by the shared gate before any write -
+the completion write helper is never invoked and no persisted row changes -
+completion consumes the permitted action exactly once under both a replay and a
+five-way concurrent race, and the transaction read endpoint applies the same
+gate while a plain bearer read keeps working.
+
 Run the following acceptance checks from the repository root:
 
 | Gate                                                  | Command                                                                   | Expected result                                                                                                                                                                           |

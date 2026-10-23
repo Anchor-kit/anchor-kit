@@ -180,6 +180,30 @@ export interface DatabaseAdapter {
   }): Promise<InteractiveTransactionRecord>;
   getInteractiveTransactionById(id: string): Promise<InteractiveTransactionRecord | null>;
   listPendingTransactionsBefore(cutoffIso: string): Promise<InteractiveTransactionRecord[]>;
+
+  insertInteractiveSession(input: {
+    id: string;
+    account: string;
+    transactionId: string;
+    actions: string[];
+    expiresAt: string;
+  }): Promise<InteractiveSessionRecord>;
+  getInteractiveSessionById(id: string): Promise<InteractiveSessionRecord | null>;
+  /**
+   * Revokes a session. Returns `true` only when this call performed the
+   * revocation, so a second call observes the session was already revoked.
+   */
+  revokeInteractiveSession(id: string): Promise<boolean>;
+  /**
+   * Atomically consumes `action` for `id`.
+   *
+   * Returns `true` exactly once per (session, action) pair: the record is only
+   * updated while it is unrevoked, unexpired, the action is still permitted,
+   * and the stored consumption list is unchanged since it was read. Every
+   * other outcome - unknown session, revoked, expired, unpermitted action, or
+   * a replay/concurrent caller - returns `false` and leaves the record alone.
+   */
+  consumeInteractiveSessionAction(id: string, action: string): Promise<boolean>;
   updateTransactionStatus(
     id: string,
     status: TransactionStatus,

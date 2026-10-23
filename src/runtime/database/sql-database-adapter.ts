@@ -3,6 +3,7 @@ import type {
   AuthChallengeRecord,
   DatabaseAdapter,
   IdempotencyRecord,
+  InteractiveSessionRecord,
   InteractiveTransactionRecord,
   TransactionTransitionResult,
   SettlementJobRecord,
@@ -89,7 +90,8 @@ export const SQLITE_JOURNAL_MODE = 'WAL';
 export const SQLITE_BUSY_TIMEOUT_MS = 5000;
 
 /**
- * Indexes supporting watcher polling and retention cleanup.
+ * Indexes supporting watcher polling, retention cleanup, and interactive
+ * session lookups.
  *
  * Watcher polling filters `watcher_tasks` by `status` and orders by
  * `created_at`, while retention deletes rows by `created_at` combined with a
@@ -97,6 +99,10 @@ export const SQLITE_BUSY_TIMEOUT_MS = 5000;
  * are pruned by `expires_at`, and idempotency keys by `created_at`. Each index
  * is created with `IF NOT EXISTS` so migrations stay repeatable on both fresh
  * and already-migrated databases.
+ *
+ * Interactive sessions are loaded by id on every gated request, and are also
+ * looked up by transaction when a hosted flow is resumed, so both columns are
+ * indexed.
  */
 export const SQLITE_INDEX_STATEMENTS: readonly string[] = [
   'CREATE INDEX IF NOT EXISTS idx_watcher_tasks_status_created_at ON watcher_tasks (status, created_at)',
@@ -105,6 +111,8 @@ export const SQLITE_INDEX_STATEMENTS: readonly string[] = [
   'CREATE INDEX IF NOT EXISTS idx_auth_challenges_expires_at ON auth_challenges (expires_at)',
   'CREATE INDEX IF NOT EXISTS idx_idempotency_keys_created_at ON idempotency_keys (created_at)',
   'CREATE INDEX IF NOT EXISTS idx_settlement_jobs_status_created_at ON settlement_jobs (status, created_at)',
+  'CREATE INDEX IF NOT EXISTS idx_interactive_sessions_transaction_id ON interactive_sessions (transaction_id)',
+  'CREATE INDEX IF NOT EXISTS idx_interactive_sessions_expires_at ON interactive_sessions (expires_at)',
 ];
 
 export const POSTGRES_INDEX_STATEMENTS: readonly string[] = [
@@ -114,6 +122,8 @@ export const POSTGRES_INDEX_STATEMENTS: readonly string[] = [
   'CREATE INDEX IF NOT EXISTS idx_auth_challenges_expires_at ON auth_challenges (expires_at)',
   'CREATE INDEX IF NOT EXISTS idx_idempotency_keys_created_at ON idempotency_keys (created_at)',
   'CREATE INDEX IF NOT EXISTS idx_settlement_jobs_status_created_at ON settlement_jobs (status, created_at)',
+  'CREATE INDEX IF NOT EXISTS idx_interactive_sessions_transaction_id ON interactive_sessions (transaction_id)',
+  'CREATE INDEX IF NOT EXISTS idx_interactive_sessions_expires_at ON interactive_sessions (expires_at)',
 ];
 
 const CORE_MIGRATIONS: readonly SchemaMigration[] = [

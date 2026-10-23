@@ -106,6 +106,18 @@ class ControllableFakeDatabaseAdapter implements DatabaseAdapter {
   async updateTransactionStatus(_id: string, _status: string): Promise<boolean> {
     return true;
   }
+  async insertInteractiveSession(): Promise<never> {
+    throw new Error('Not implemented');
+  }
+  async getInteractiveSessionById(): Promise<null> {
+    return null;
+  }
+  async revokeInteractiveSession(): Promise<boolean> {
+    return false;
+  }
+  async consumeInteractiveSessionAction(): Promise<boolean> {
+    return false;
+  }
   async getIdempotencyRecord(): Promise<null> {
     return null;
   }

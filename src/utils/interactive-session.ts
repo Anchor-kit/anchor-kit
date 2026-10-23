@@ -10,6 +10,19 @@ export interface InteractiveSessionClaims {
   actions: string[];
 }
 
+/**
+ * Returns true once a persisted interactive session has passed its expiry.
+ *
+ * A missing or unparseable expiry counts as expired, so a session whose
+ * lifetime cannot be established never authorizes an action. The boundary is
+ * inclusive - a session is expired at, not merely after, `expiresAt` - which
+ * matches `isAuthChallengeExpired` for SEP-10 challenges.
+ */
+export function isInteractiveSessionExpired(expiresAt: string, nowMs = Date.now()): boolean {
+  const expirationMs = Date.parse(expiresAt);
+  return !Number.isFinite(expirationMs) || nowMs >= expirationMs;
+}
+
 /** Create a short-lived JWT scoped to one account, deposit, and action set. */
 export async function createInteractiveSession(
   claims: InteractiveSessionClaims,
