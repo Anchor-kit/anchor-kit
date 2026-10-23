@@ -198,6 +198,10 @@ import { makeSqliteDbUrlForTests } from 'anchor-kit';
 const databaseUrl = makeSqliteDbUrlForTests();
 ```
 
+Run `bun test tests/runtime/atomic-idempotency-concurrency.test.ts` to check PostgreSQL concurrency. It skips five PostgreSQL cases when both `TEST_POSTGRES_URL` and `DATABASE_URL` are unset. CI and `REQUIRE_POSTGRES_TESTS` require a working PostgreSQL connection.
+
+Run `bun test tests/core/plugin-lifecycle.test.ts` to check reverse-order cleanup during shutdown and initialization rollback. The tests also check that cleanup failures do not prevent database disconnect.
+
 ### Custom database adapters
 
 Pass a caller-created `DatabaseAdapter` as the second argument to `createAnchor`.

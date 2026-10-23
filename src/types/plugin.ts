@@ -75,4 +75,9 @@ export interface AnchorPlugin {
    * Plugin initialization lifecycle
    */
   init?: (instance: AnchorInstance) => Promise<void> | void;
+
+  /**
+   * Release resources allocated during initialization
+   */
+  cleanup?: () => Promise<void> | void;
 }

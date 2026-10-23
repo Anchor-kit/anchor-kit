@@ -36,6 +36,7 @@ export interface CreateAnchorOptions {
 export class AnchorInstance {
   public readonly config: AnchorConfig;
   private plugins: Map<string, AnchorPlugin> = new Map();
+  private initializedPlugins: AnchorPlugin[] = [];
 
   private database: DatabaseAdapter | null = null;
   private readonly injectedDatabaseAdapter?: DatabaseAdapter;
@@ -151,6 +152,7 @@ export class AnchorInstance {
         this.initialized = true;
 
         for (const plugin of this.plugins.values()) {
+          this.initializedPlugins.push(plugin);
           if (plugin.init) {
             await plugin.init(this);
           }
@@ -263,12 +265,25 @@ export class AnchorInstance {
     if (this.shutdownPromise) return this.shutdownPromise;
 
     this.shutdownPromise = (async () => {
+      const shutdownErrors: unknown[] = [];
       try {
         await this.initPromise?.catch(() => undefined);
         if (!this.initialized) return;
 
-        await this.stopBackgroundJobs();
-        await this.requireDatabase().disconnect();
+        try {
+          await this.stopBackgroundJobs();
+        } catch (error) {
+          shutdownErrors.push(error);
+        }
+
+        shutdownErrors.push(...(await this.cleanupInitializedPlugins()));
+
+        try {
+          await this.requireDatabase().disconnect();
+        } catch (error) {
+          shutdownErrors.push(error);
+        }
+
         this.initialized = false;
         this.backgroundJobsRunning = false;
         this.watchers = [];
@@ -276,6 +291,10 @@ export class AnchorInstance {
         this.webhookProcessor = null;
         this.queue = null;
         this.database = null;
+
+        if (shutdownErrors.length > 0) {
+          throw new AggregateError(shutdownErrors, 'Anchor shutdown failed');
+        }
       } finally {
         this.shutdownPromise = null;
       }
@@ -331,12 +350,23 @@ export class AnchorInstance {
   }
 
   private async rollbackInitialization(): Promise<void> {
+    const rollbackErrors: unknown[] = [];
     if (this.backgroundJobsRunning || this.initialized) {
-      await this.stopBackgroundJobs();
+      try {
+        await this.stopBackgroundJobs();
+      } catch (error) {
+        rollbackErrors.push(error);
+      }
     }
 
+    rollbackErrors.push(...(await this.cleanupInitializedPlugins()));
+
     if (this.database) {
-      await this.database.disconnect().catch(() => undefined);
+      try {
+        await this.database.disconnect();
+      } catch (error) {
+        rollbackErrors.push(error);
+      }
     }
 
     this.initialized = false;
@@ -346,6 +376,29 @@ export class AnchorInstance {
     this.webhookProcessor = null;
     this.watchers = [];
     this.expressRouter = null;
+
+    if (rollbackErrors.length > 0) {
+      console.error(
+        'Anchor initialization rollback failed',
+        new AggregateError(rollbackErrors, 'One or more resources failed to clean up'),
+      );
+    }
+  }
+
+  private async cleanupInitializedPlugins(): Promise<unknown[]> {
+    const plugins = this.initializedPlugins.splice(0).reverse();
+    const errors: unknown[] = [];
+
+    for (const plugin of plugins) {
+      if (!plugin.cleanup) continue;
+      try {
+        await plugin.cleanup();
+      } catch (error) {
+        errors.push(error);
+      }
+    }
+
+    return errors;
   }
 
   private ensureInitialized(): void {

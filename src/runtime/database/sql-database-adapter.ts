@@ -30,6 +30,8 @@ interface PostgresClient {
   ): Promise<{ rows: T[]; rowCount?: number }>;
 }
 
+type PostgresClientConstructor = new (config: { connectionString: string }) => PostgresClient;
+
 const SQLITE_FILE_PREFIX = 'file:';
 const SQLITE_URL_PREFIX = 'sqlite:';
 const sqliteMigrationLocks = new Map<string, Promise<void>>();
@@ -492,6 +494,7 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
   private readonly schema: string | null;
   private sqlite: SqliteLike | null = null;
   private postgres: PostgresClient | null = null;
+  private postgresClientConstructor: PostgresClientConstructor | null = null;
   private readonly migrations: readonly SchemaMigration[];
   private connectPromise: Promise<void> | null = null;
   private disconnectPromise: Promise<void> | null = null;
@@ -547,9 +550,8 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
         if (this.provider === 'postgres') {
           const moduleName = 'pg';
           const pgModuleUnknown: unknown = await import(moduleName);
-          const pgModule = pgModuleUnknown as {
-            Client: new (config: { connectionString: string }) => PostgresClient;
-          };
+          const pgModule = pgModuleUnknown as { Client: PostgresClientConstructor };
+          this.postgresClientConstructor = pgModule.Client;
           const client = new pgModule.Client({ connectionString: this.url });
           this.postgres = client;
           await this.postgres.connect();
@@ -560,6 +562,7 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
       } catch (error) {
         this.sqlite = null;
         this.postgres = null;
+        this.postgresClientConstructor = null;
         throw error;
       }
     })();
@@ -584,8 +587,10 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
     this.disconnectPromise = (async () => {
       const sqlite = this.sqlite;
       const postgres = this.postgres;
+      const postgresClientConstructor = this.postgresClientConstructor;
       this.sqlite = null;
       this.postgres = null;
+      this.postgresClientConstructor = null;
 
       try {
         if (sqlite) {
@@ -598,6 +603,7 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
       } catch (error) {
         this.sqlite = sqlite;
         this.postgres = postgres;
+        this.postgresClientConstructor = postgresClientConstructor;
         throw error;
       }
     })();
@@ -1620,9 +1626,18 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
       });
       create();
     } else {
-      const postgres = this.requirePostgres();
-      await postgres.query('BEGIN');
+      const Client = this.postgresClientConstructor;
+      if (!Client) {
+        throw new ConfigError('PostgreSQL client is not connected');
+      }
+
+      const postgres = new Client({ connectionString: this.url });
+      let transactionStarted = false;
+      let operationError: unknown;
       try {
+        await postgres.connect();
+        await postgres.query('BEGIN');
+        transactionStarted = true;
         await postgres.query(
           'INSERT INTO interactive_transactions (id, account, kind, asset_code, amount, status, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)',
           [
@@ -1650,9 +1665,35 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
           throw new ConfigError('Pending idempotency reservation was not found');
         }
         await postgres.query('COMMIT');
+        transactionStarted = false;
       } catch (error) {
-        await postgres.query('ROLLBACK');
-        throw error;
+        operationError = error;
+        if (transactionStarted) {
+          try {
+            await postgres.query('ROLLBACK');
+          } catch (rollbackError) {
+            operationError = new AggregateError([error, rollbackError], 'Deposit rollback failed', {
+              cause: error,
+            });
+          }
+        }
+      }
+
+      try {
+        await postgres.end();
+      } catch (endError) {
+        if (operationError) {
+          throw new AggregateError(
+            [operationError, endError],
+            'Deposit connection cleanup failed',
+            { cause: endError },
+          );
+        }
+        throw endError;
+      }
+
+      if (operationError) {
+        throw operationError;
       }
     }
 
@@ -1836,7 +1877,6 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
         operationKey,
       ],
     );
-
     const row =
       insertedPg.rows[0] ??
       (
