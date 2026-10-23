@@ -110,6 +110,18 @@ function makeFakeDb(rejectOnIdempotency = false): {
     async updateTransactionStatus() {
       return true;
     },
+    async insertInteractiveSession(): Promise<never> {
+      throw new Error('Not implemented');
+    },
+    async getInteractiveSessionById() {
+      return null;
+    },
+    async revokeInteractiveSession() {
+      return false;
+    },
+    async consumeInteractiveSessionAction() {
+      return false;
+    },
     async getIdempotencyRecord() {
       return null;
     },

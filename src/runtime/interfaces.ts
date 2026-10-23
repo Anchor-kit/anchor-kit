@@ -51,6 +51,45 @@ export interface InteractiveTransactionRecord {
   updatedAt: string;
 }
 
+/**
+ * Server-side record of an interactive deposit session.
+ *
+ * A hosted interactive flow is only reachable through a URL that carries a
+ * transaction id, so the URL alone proves nothing. This record is the
+ * authority the anchor consults before allowing a state-changing action:
+ * it pins the session to one account and one transaction, carries its own
+ * expiry, records revocation, and tracks which permitted actions have already
+ * been consumed so a completion cannot be replayed.
+ */
+export interface InteractiveSessionRecord {
+  id: string;
+  account: string;
+  transactionId: string;
+  /** Actions this session may perform, e.g. `['view', 'complete']`. */
+  actions: string[];
+  /** Actions already consumed, in the order they were consumed. */
+  consumedActions: string[];
+  expiresAt: string;
+  /** Set when the session is revoked; `null` while it is still usable. */
+  revokedAt: string | null;
+  createdAt: string;
+}
+
+/**
+ * Why an interactive session was rejected. Every reason is evaluated by the
+ * shared gate before any write is attempted, so callers can report a stable
+ * error code without touching persisted state.
+ */
+export type InteractiveSessionRejection =
+  | 'missing_session'
+  | 'session_not_found'
+  | 'session_expired'
+  | 'session_revoked'
+  | 'wrong_account'
+  | 'wrong_transaction'
+  | 'action_not_permitted'
+  | 'action_already_consumed';
+
 export interface IdempotencyRecord {
   id: string;
   scope: string;
@@ -116,6 +155,30 @@ export interface DatabaseAdapter {
   }): Promise<InteractiveTransactionRecord>;
   getInteractiveTransactionById(id: string): Promise<InteractiveTransactionRecord | null>;
   listPendingTransactionsBefore(cutoffIso: string): Promise<InteractiveTransactionRecord[]>;
+
+  insertInteractiveSession(input: {
+    id: string;
+    account: string;
+    transactionId: string;
+    actions: string[];
+    expiresAt: string;
+  }): Promise<InteractiveSessionRecord>;
+  getInteractiveSessionById(id: string): Promise<InteractiveSessionRecord | null>;
+  /**
+   * Revokes a session. Returns `true` only when this call performed the
+   * revocation, so a second call observes the session was already revoked.
+   */
+  revokeInteractiveSession(id: string): Promise<boolean>;
+  /**
+   * Atomically consumes `action` for `id`.
+   *
+   * Returns `true` exactly once per (session, action) pair: the record is only
+   * updated while it is unrevoked, unexpired, the action is still permitted,
+   * and the stored consumption list is unchanged since it was read. Every
+   * other outcome - unknown session, revoked, expired, unpermitted action, or
+   * a replay/concurrent caller - returns `false` and leaves the record alone.
+   */
+  consumeInteractiveSessionAction(id: string, action: string): Promise<boolean>;
   updateTransactionStatus(
     id: string,
     status: TransactionStatus,

@@ -3,12 +3,14 @@ import type {
   AuthChallengeRecord,
   DatabaseAdapter,
   IdempotencyRecord,
+  InteractiveSessionRecord,
   InteractiveTransactionRecord,
   SettlementJobRecord,
   WatcherTaskRecord,
   WebhookEventRecord,
 } from '@/runtime/interfaces.ts';
 import type { FrameworkConfig } from '@/types/config.ts';
+import { isInteractiveSessionExpired } from '../../utils/interactive-session.ts';
 import { isTransactionStatus, type TransactionStatus } from '../../types/transaction-status.ts';
 import type { Database } from 'bun:sqlite';
 import { randomUUID } from 'node:crypto';
@@ -48,7 +50,8 @@ export const SQLITE_JOURNAL_MODE = 'WAL';
 export const SQLITE_BUSY_TIMEOUT_MS = 5000;
 
 /**
- * Indexes supporting watcher polling and retention cleanup.
+ * Indexes supporting watcher polling, retention cleanup, and interactive
+ * session lookups.
  *
  * Watcher polling filters `watcher_tasks` by `status` and orders by
  * `created_at`, while retention deletes rows by `created_at` combined with a
@@ -56,6 +59,10 @@ export const SQLITE_BUSY_TIMEOUT_MS = 5000;
  * are pruned by `expires_at`, and idempotency keys by `created_at`. Each index
  * is created with `IF NOT EXISTS` so migrations stay repeatable on both fresh
  * and already-migrated databases.
+ *
+ * Interactive sessions are loaded by id on every gated request, and are also
+ * looked up by transaction when a hosted flow is resumed, so both columns are
+ * indexed.
  */
 export const SQLITE_INDEX_STATEMENTS: readonly string[] = [
   'CREATE INDEX IF NOT EXISTS idx_watcher_tasks_status_created_at ON watcher_tasks (status, created_at)',
@@ -63,6 +70,8 @@ export const SQLITE_INDEX_STATEMENTS: readonly string[] = [
   'CREATE INDEX IF NOT EXISTS idx_auth_challenges_expires_at ON auth_challenges (expires_at)',
   'CREATE INDEX IF NOT EXISTS idx_idempotency_keys_created_at ON idempotency_keys (created_at)',
   'CREATE INDEX IF NOT EXISTS idx_settlement_jobs_status_created_at ON settlement_jobs (status, created_at)',
+  'CREATE INDEX IF NOT EXISTS idx_interactive_sessions_transaction_id ON interactive_sessions (transaction_id)',
+  'CREATE INDEX IF NOT EXISTS idx_interactive_sessions_expires_at ON interactive_sessions (expires_at)',
 ];
 
 export const POSTGRES_INDEX_STATEMENTS: readonly string[] = [
@@ -71,7 +80,42 @@ export const POSTGRES_INDEX_STATEMENTS: readonly string[] = [
   'CREATE INDEX IF NOT EXISTS idx_auth_challenges_expires_at ON auth_challenges (expires_at)',
   'CREATE INDEX IF NOT EXISTS idx_idempotency_keys_created_at ON idempotency_keys (created_at)',
   'CREATE INDEX IF NOT EXISTS idx_settlement_jobs_status_created_at ON settlement_jobs (status, created_at)',
+  'CREATE INDEX IF NOT EXISTS idx_interactive_sessions_transaction_id ON interactive_sessions (transaction_id)',
+  'CREATE INDEX IF NOT EXISTS idx_interactive_sessions_expires_at ON interactive_sessions (expires_at)',
 ];
+
+/**
+ * Stores the permitted and consumed action lists as JSON text.
+ *
+ * Both columns are written with `JSON.stringify` and read back through
+ * `JSON.parse`, so the on-disk form round-trips byte-for-byte for string
+ * arrays. `consumeInteractiveSessionAction` relies on that stability to
+ * compare-and-set on the stored text.
+ */
+function normalizeInteractiveActions(actions: readonly string[]): string[] {
+  return [...new Set(actions.filter((action) => action.length > 0))];
+}
+
+function parseStringArray(value: unknown, label: string): string[] {
+  let parsed: unknown = value;
+
+  if (typeof value === 'string') {
+    try {
+      parsed = JSON.parse(value);
+    } catch (error) {
+      throw new MalformedPersistedDataError(
+        `Malformed persisted ${label}: ${error instanceof Error ? error.message : String(error)}`,
+        { value: value.slice(0, 200) },
+      );
+    }
+  }
+
+  if (!Array.isArray(parsed) || !parsed.every((entry) => typeof entry === 'string')) {
+    throw new MalformedPersistedDataError(`Persisted ${label} must be an array of strings.`);
+  }
+
+  return parsed;
+}
 
 function nowIso(): string {
   return new Date().toISOString();
@@ -302,6 +346,17 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
           updated_at TEXT NOT NULL
         );
 
+        CREATE TABLE IF NOT EXISTS interactive_sessions (
+          id TEXT PRIMARY KEY,
+          account TEXT NOT NULL,
+          transaction_id TEXT NOT NULL,
+          actions TEXT NOT NULL,
+          consumed_actions TEXT NOT NULL DEFAULT '[]',
+          expires_at TEXT NOT NULL,
+          revoked_at TEXT,
+          created_at TEXT NOT NULL
+        );
+
         CREATE TABLE IF NOT EXISTS idempotency_keys (
           id TEXT PRIMARY KEY,
           scope TEXT NOT NULL,
@@ -379,6 +434,18 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
           status TEXT NOT NULL,
           created_at TIMESTAMPTZ NOT NULL,
           updated_at TIMESTAMPTZ NOT NULL
+        );
+      `);
+      await this.postgres.query(`
+        CREATE TABLE IF NOT EXISTS interactive_sessions (
+          id TEXT PRIMARY KEY,
+          account TEXT NOT NULL,
+          transaction_id TEXT NOT NULL,
+          actions TEXT NOT NULL,
+          consumed_actions TEXT NOT NULL DEFAULT '[]',
+          expires_at TIMESTAMPTZ NOT NULL,
+          revoked_at TIMESTAMPTZ,
+          created_at TIMESTAMPTZ NOT NULL
         );
       `);
       await this.postgres.query(`
@@ -634,6 +701,139 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
           'UPDATE interactive_transactions SET status = $1, updated_at = $2 WHERE id = $3 RETURNING id',
           [status, updatedAt, id],
         );
+    return response.rows.length > 0;
+  }
+
+  public async insertInteractiveSession(input: {
+    id: string;
+    account: string;
+    transactionId: string;
+    actions: string[];
+    expiresAt: string;
+  }): Promise<InteractiveSessionRecord> {
+    const createdAt = nowIso();
+    const actions = normalizeInteractiveActions(input.actions);
+    const consumedActions: string[] = [];
+
+    if (this.sqlite) {
+      this.sqlite
+        .prepare(
+          'INSERT INTO interactive_sessions (id, account, transaction_id, actions, consumed_actions, expires_at, revoked_at, created_at) VALUES (?, ?, ?, ?, ?, ?, NULL, ?)',
+        )
+        .run(
+          input.id,
+          input.account,
+          input.transactionId,
+          JSON.stringify(actions),
+          JSON.stringify(consumedActions),
+          input.expiresAt,
+          createdAt,
+        );
+    } else {
+      await this.requirePostgres().query(
+        'INSERT INTO interactive_sessions (id, account, transaction_id, actions, consumed_actions, expires_at, revoked_at, created_at) VALUES ($1, $2, $3, $4, $5, $6, NULL, $7)',
+        [
+          input.id,
+          input.account,
+          input.transactionId,
+          JSON.stringify(actions),
+          JSON.stringify(consumedActions),
+          input.expiresAt,
+          createdAt,
+        ],
+      );
+    }
+
+    return {
+      id: input.id,
+      account: input.account,
+      transactionId: input.transactionId,
+      actions,
+      consumedActions,
+      expiresAt: input.expiresAt,
+      revokedAt: null,
+      createdAt,
+    };
+  }
+
+  public async getInteractiveSessionById(id: string): Promise<InteractiveSessionRecord | null> {
+    if (this.sqlite) {
+      const row = this.sqlite
+        .prepare('SELECT * FROM interactive_sessions WHERE id = ? LIMIT 1')
+        .get(id) as Record<string, unknown> | null;
+      return row ? this.mapInteractiveSessionRow(row) : null;
+    }
+
+    const response = await this.requirePostgres().query<Record<string, unknown>>(
+      'SELECT * FROM interactive_sessions WHERE id = $1 LIMIT 1',
+      [id],
+    );
+    const row = response.rows[0];
+    return row ? this.mapInteractiveSessionRow(row) : null;
+  }
+
+  public async revokeInteractiveSession(id: string): Promise<boolean> {
+    const revokedAt = nowIso();
+    if (this.sqlite) {
+      const result = this.sqlite
+        .prepare(
+          'UPDATE interactive_sessions SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL',
+        )
+        .run(revokedAt, id);
+      return result.changes > 0;
+    }
+
+    const response = await this.requirePostgres().query(
+      'UPDATE interactive_sessions SET revoked_at = $1 WHERE id = $2 AND revoked_at IS NULL',
+      [revokedAt, id],
+    );
+    return (response.rowCount ?? 0) > 0;
+  }
+
+  public async consumeInteractiveSessionAction(id: string, action: string): Promise<boolean> {
+    // The compare-and-set can lose to a concurrent writer that consumed a
+    // *different* action, so retry a bounded number of times. A replay of this
+    // same action is detected on the re-read and returns false, and at most
+    // one caller can ever append a given action.
+    const maxAttempts = 3;
+
+    for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+      const record = await this.getInteractiveSessionById(id);
+      if (!record) return false;
+      if (record.revokedAt !== null) return false;
+      if (isInteractiveSessionExpired(record.expiresAt)) return false;
+      if (!record.actions.includes(action)) return false;
+      if (record.consumedActions.includes(action)) return false;
+
+      const expected = JSON.stringify(record.consumedActions);
+      const next = JSON.stringify([...record.consumedActions, action]);
+
+      if (await this.compareAndSetConsumedActions(id, expected, next)) {
+        return true;
+      }
+    }
+
+    return false;
+  }
+
+  private async compareAndSetConsumedActions(
+    id: string,
+    expectedConsumedActions: string,
+    nextConsumedActions: string,
+  ): Promise<boolean> {
+    if (this.sqlite) {
+      const result = this.sqlite
+        .prepare(
+          'UPDATE interactive_sessions SET consumed_actions = ? WHERE id = ? AND consumed_actions = ? AND revoked_at IS NULL',
+        )
+        .run(nextConsumedActions, id, expectedConsumedActions);
+      return result.changes > 0;
+    }
+
+    const response = await this.requirePostgres().query<{ id: string }>(
+      'UPDATE interactive_sessions SET consumed_actions = $1 WHERE id = $2 AND consumed_actions = $3 AND revoked_at IS NULL RETURNING id',
+      [nextConsumedActions, id, expectedConsumedActions],
+    );
     return response.rows.length > 0;
   }
 
@@ -1291,6 +1491,22 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
       status,
       createdAt: String(row.created_at),
       updatedAt: String(row.updated_at),
+    };
+  }
+
+  private mapInteractiveSessionRow(row: Record<string, unknown>): InteractiveSessionRecord {
+    return {
+      id: String(row.id),
+      account: String(row.account),
+      transactionId: String(row.transaction_id),
+      actions: parseStringArray(row.actions, 'interactive session actions'),
+      consumedActions: parseStringArray(
+        row.consumed_actions,
+        'interactive session consumed actions',
+      ),
+      expiresAt: String(row.expires_at),
+      revokedAt: row.revoked_at ? String(row.revoked_at) : null,
+      createdAt: String(row.created_at),
     };
   }
 
