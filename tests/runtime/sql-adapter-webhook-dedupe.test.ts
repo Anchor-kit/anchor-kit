@@ -1,11 +1,25 @@
 import { makeSqliteDbUrlForTests } from '@/core/factory.ts';
 import { createSqlDatabaseAdapter } from '@/runtime/database/sql-database-adapter.ts';
 import type { DatabaseAdapter } from '@/runtime/interfaces.ts';
+import { Database } from 'bun:sqlite';
 import { randomUUID } from 'node:crypto';
 import { unlinkSync } from 'node:fs';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
-describe('SqlDatabaseAdapter – webhook event deduplication (sqlite)', () => {
+/**
+ * AK-046 - Webhook deduplication is scoped by (provider, event_id).
+ *
+ * Acceptance gate:
+ *   - Two providers delivering the same event_id are independent events.
+ *   - Duplicates within one provider still collapse to one execution owner.
+ *   - Legacy databases still carrying UNIQUE(event_id) upgrade in place.
+ *
+ * Run command:
+ *   bun test tests/runtime/sql-adapter-webhook-dedupe.test.ts
+ *
+ * Expected result: all assertions pass (0 failures).
+ */
+describe('SqlDatabaseAdapter - webhook event deduplication (sqlite)', () => {
   const dbUrl = makeSqliteDbUrlForTests();
   const dbPath = dbUrl.startsWith('file:') ? dbUrl.slice('file:'.length) : dbUrl;
   let db: DatabaseAdapter;
@@ -45,7 +59,7 @@ describe('SqlDatabaseAdapter – webhook event deduplication (sqlite)', () => {
     expect(result.record.errorMessage).toBeNull();
   });
 
-  it('second insert with same event_id returns inserted: false and the existing record', async () => {
+  it('second insert with same event_id and provider returns inserted: false and the existing record', async () => {
     const eventId = `evt-${randomUUID()}`;
     const payload = { type: 'payment.completed', amount: '200' };
     const firstId = randomUUID();
@@ -69,6 +83,59 @@ describe('SqlDatabaseAdapter – webhook event deduplication (sqlite)', () => {
     expect(duplicate.record.id).toBe(firstId);
     expect(duplicate.record.eventId).toBe(eventId);
     expect(duplicate.record.payload).toEqual(payload);
+  });
+
+  it('same event_id from two different providers are independent events', async () => {
+    const eventId = `evt-shared-${randomUUID()}`;
+    const payload = { type: 'payment.completed', amount: '100' };
+
+    const providerA = await db.insertOrGetWebhookEvent({
+      id: randomUUID(),
+      eventId,
+      provider: 'provider-a',
+      payload,
+    });
+    const providerB = await db.insertOrGetWebhookEvent({
+      id: randomUUID(),
+      eventId,
+      provider: 'provider-b',
+      payload,
+    });
+
+    expect(providerA.inserted).toBe(true);
+    expect(providerB.inserted).toBe(true);
+    expect(providerA.record.id).not.toBe(providerB.record.id);
+    expect(providerA.record.provider).toBe('provider-a');
+    expect(providerB.record.provider).toBe('provider-b');
+    expect(providerA.record.eventId).toBe(eventId);
+    expect(providerB.record.eventId).toBe(eventId);
+  });
+
+  it('repeated deliveries within a single provider still deduplicate to one owner', async () => {
+    const eventId = `evt-dup-${randomUUID()}`;
+    const firstPayload = { type: 'payment.completed', amount: '100' };
+
+    const first = await db.insertOrGetWebhookEvent({
+      id: randomUUID(),
+      eventId,
+      provider: 'provider-a',
+      payload: firstPayload,
+    });
+    expect(first.inserted).toBe(true);
+
+    const duplicate = await db.insertOrGetWebhookEvent({
+      id: randomUUID(),
+      eventId,
+      provider: 'provider-a',
+      payload: { type: 'tampered', amount: '999' },
+    });
+
+    expect(duplicate.inserted).toBe(false);
+    expect(duplicate.record.id).toBe(first.record.id);
+    expect(duplicate.record.eventId).toBe(eventId);
+    expect(duplicate.record.provider).toBe('provider-a');
+    // The first caller's payload is preserved.
+    expect(duplicate.record.payload).toEqual(firstPayload);
   });
 
   it('allows a failed event to retry once by resetting it to pending', async () => {
@@ -161,7 +228,6 @@ describe('SqlDatabaseAdapter – webhook event deduplication (sqlite)', () => {
     const eventId = `evt-${randomUUID()}`;
     const payload = { type: 'deposit.completed', amount: '50' };
 
-    // Insert the event
     const { record: inserted } = await db.insertOrGetWebhookEvent({
       id: randomUUID(),
       eventId,
@@ -171,13 +237,11 @@ describe('SqlDatabaseAdapter – webhook event deduplication (sqlite)', () => {
     expect(inserted.status).toBe('pending');
     expect(inserted.processedAt).toBeNull();
 
-    // Mark it as processed (no errorMessage)
     await db.updateWebhookEventStatus({
       id: inserted.id,
       status: 'processed',
     });
 
-    // Re-fetch via the canonical insert-or-get path using the same eventId
     const { record: fetched, inserted: wasInserted } = await db.insertOrGetWebhookEvent({
       id: randomUUID(),
       eventId,
@@ -185,13 +249,83 @@ describe('SqlDatabaseAdapter – webhook event deduplication (sqlite)', () => {
       payload,
     });
 
-    // Should return the existing record, not insert a new one
     expect(wasInserted).toBe(false);
     expect(fetched.id).toBe(inserted.id);
-
-    // Status fields must reflect the processed update
     expect(fetched.status).toBe('processed');
     expect(fetched.processedAt).not.toBeNull();
     expect(fetched.errorMessage).toBeNull();
+  });
+
+  it('upgrades a legacy single-column event_id UNIQUE constraint in place', async () => {
+    const upgradeUrl = makeSqliteDbUrlForTests();
+    const upgradePath = upgradeUrl.startsWith('file:')
+      ? upgradeUrl.slice('file:'.length)
+      : upgradeUrl;
+
+    // Seed a database that mimics the pre-AK-046 schema: event_id is globally
+    // UNIQUE and no composite (provider, event_id) constraint exists.
+    const legacyDb = new Database(upgradePath);
+    legacyDb.exec(`
+      CREATE TABLE webhook_events (
+        id TEXT PRIMARY KEY,
+        event_id TEXT NOT NULL UNIQUE,
+        provider TEXT NOT NULL,
+        payload TEXT NOT NULL,
+        status TEXT NOT NULL,
+        error_message TEXT,
+        processed_at TEXT,
+        created_at TEXT NOT NULL
+      );
+    `);
+    legacyDb
+      .prepare(
+        `INSERT INTO webhook_events (id, event_id, provider, payload, status, error_message, processed_at, created_at)
+         VALUES (?, ?, ?, ?, 'processed', NULL, ?, ?)`,
+      )
+      .run(
+        'legacy-row',
+        'evt-shared-legacy',
+        'provider-a',
+        '{}',
+        '2024-01-01T00:00:00.000Z',
+        '2024-01-01T00:00:00.000Z',
+      );
+    legacyDb.close();
+
+    const upgradeDb = createSqlDatabaseAdapter({ provider: 'sqlite', url: upgradeUrl });
+    try {
+      await upgradeDb.connect();
+      await upgradeDb.migrate();
+
+      // The existing provider-a row was preserved by the rebuild.
+      const existing = await upgradeDb.insertOrGetWebhookEvent({
+        id: randomUUID(),
+        eventId: 'evt-shared-legacy',
+        provider: 'provider-a',
+        payload: {},
+      });
+      expect(existing.inserted).toBe(false);
+      expect(existing.record.id).toBe('legacy-row');
+      expect(existing.record.status).toBe('processed');
+
+      // A different provider using the same event_id must be inserted
+      // independently after the upgrade.
+      const incoming = await upgradeDb.insertOrGetWebhookEvent({
+        id: randomUUID(),
+        eventId: 'evt-shared-legacy',
+        provider: 'provider-b',
+        payload: {},
+      });
+      expect(incoming.inserted).toBe(true);
+      expect(incoming.record.provider).toBe('provider-b');
+      expect(incoming.record.id).not.toBe('legacy-row');
+    } finally {
+      await upgradeDb.disconnect();
+      try {
+        unlinkSync(upgradePath);
+      } catch {
+        // ignore cleanup errors
+      }
+    }
   });
 });

@@ -16,10 +16,11 @@ async function invoke(anchor: ReturnType<typeof createAnchor>, url: string, body
   req.url = url;
   req.headers = body ? { 'content-type': 'application/json' } : {};
 
-  return new Promise<{ status: number; body: string }>((resolve) => {
+  return new Promise<{ status: number; body: string; endCalls: number }>((resolve) => {
     let statusCode = 200;
     let headersSent = false;
     let responseBody = '';
+    let endCalls = 0;
     const res = {
       get statusCode() {
         return statusCode;
@@ -38,21 +39,22 @@ async function invoke(anchor: ReturnType<typeof createAnchor>, url: string, body
         return undefined;
       },
       end(value?: string) {
+        endCalls += 1;
         responseBody = value ?? '';
         headersSent = true;
-        resolve({ status: statusCode, body: responseBody });
+        resolve({ status: statusCode, body: responseBody, endCalls });
       },
     } as unknown as ServerResponse;
     anchor.getExpressRouter()(req, res, (error) => {
-      if (error) resolve({ status: 500, body: 'handler error' });
+      if (error) resolve({ status: 500, body: 'handler error', endCalls: 0 });
     });
   });
 }
 
-function makeAnchor() {
+function makeAnchor(requestTimeout = 30000) {
   return createAnchor({
     network: { network: 'testnet' },
-    server: {},
+    server: { requestTimeout },
     security: {
       sep10SigningKey: Keypair.random().secret(),
       interactiveJwtSecret: 'test-jwt-secret',
@@ -129,6 +131,38 @@ describe('plugin routes', () => {
     });
 
     await expect(anchor.init()).rejects.toThrow(/registered by both/);
+  });
+
+  it('aborts a delayed route handler at the deadline and keeps the timeout response single', async () => {
+    const anchor = makeAnchor(1);
+    let handlerObservedAbort = false;
+    let writesAfterDeadline = 0;
+    const plugin: AnchorPlugin = {
+      id: 'slow',
+      routes: [
+        {
+          method: 'GET',
+          path: '/plugin/slow',
+          handler: async ({ signal }) => {
+            await new Promise((resolve) => setTimeout(resolve, 20));
+            handlerObservedAbort = signal.aborted;
+            if (!signal.aborted) writesAfterDeadline += 1;
+            return { ok: true };
+          },
+        },
+      ],
+    };
+    anchor.use(plugin);
+    await anchor.init();
+
+    const result = await invoke(anchor, '/plugin/slow');
+    await new Promise((resolve) => setTimeout(resolve, 25));
+
+    expect(result.status).toBe(504);
+    expect(result.endCalls).toBe(1);
+    expect(handlerObservedAbort).toBe(true);
+    expect(writesAfterDeadline).toBe(0);
+    await anchor.shutdown();
   });
 
   it('rejects plugin routes that shadow built-in endpoints', async () => {
