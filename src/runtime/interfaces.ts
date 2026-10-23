@@ -1,5 +1,11 @@
 import type { TransactionStatus } from '@/types/transaction-status.ts';
 import type { KycData, KycVerificationDecision } from '@/types/foundation.ts';
+import type {
+  NormalizedPaymentRailEvent,
+  PaymentRailInitiationRequest,
+  PaymentRailOperation,
+  RailCapabilityResult,
+} from '@/types/transaction.ts';
 
 export interface KycVerificationProvider {
   verify(input: {
@@ -7,6 +13,31 @@ export interface KycVerificationProvider {
     operationKey: string;
     data: KycData;
   }): Promise<KycVerificationDecision>;
+}
+
+export interface PaymentRailAdapter {
+  readonly provider: string;
+  readonly capabilities: Readonly<{
+    initiation: boolean;
+    eventVerification: boolean;
+    statusLookup: boolean;
+    recovery: boolean;
+  }>;
+  initiate(
+    input: PaymentRailInitiationRequest,
+  ): Promise<RailCapabilityResult<PaymentRailOperation>>;
+  verifyEvent(input: {
+    rawBody: string | Buffer | Uint8Array;
+    signature?: string;
+  }): Promise<RailCapabilityResult<NormalizedPaymentRailEvent>>;
+  getStatus(input: {
+    operationId: string;
+    reference: string;
+  }): Promise<RailCapabilityResult<PaymentRailOperation>>;
+  recover(input: {
+    operationId: string;
+    reference: string;
+  }): Promise<RailCapabilityResult<PaymentRailOperation>>;
 }
 
 export interface AuthChallengeRecord {
@@ -45,7 +76,7 @@ export interface WebhookEventRecord {
   eventId: string;
   provider: string;
   payload: Record<string, unknown>;
-  status: 'pending' | 'processed' | 'failed';
+  status: 'pending' | 'processed' | 'failed' | 'unresolved';
   errorMessage: string | null;
   processedAt: string | null;
   createdAt: string;
@@ -59,6 +90,15 @@ export interface WatcherTaskRecord {
   errorMessage: string | null;
   processedAt: string | null;
   createdAt: string;
+}
+
+export interface SettlementJobRecord {
+  id: string;
+  operationId: string;
+  payloadRef: string;
+  status: 'pending' | 'processing' | 'completed' | 'failed';
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface DatabaseAdapter {
@@ -144,7 +184,7 @@ export interface DatabaseAdapter {
   }): Promise<{ record: WebhookEventRecord; inserted: boolean }>;
   updateWebhookEventStatus(input: {
     id: string;
-    status: 'processed' | 'failed';
+    status: 'processed' | 'failed' | 'unresolved';
     errorMessage?: string;
   }): Promise<void>;
 
@@ -160,6 +200,17 @@ export interface DatabaseAdapter {
     errorMessage?: string;
   }): Promise<void>;
   countProcessedWatcherTasks(): Promise<number>;
+  insertOrGetSettlementJob(input: {
+    id: string;
+    operationId: string;
+    payloadRef: string;
+  }): Promise<{ record: SettlementJobRecord; inserted: boolean }>;
+  getSettlementJobByOperationId(operationId: string): Promise<SettlementJobRecord | null>;
+  listPendingSettlementJobs(limit: number): Promise<SettlementJobRecord[]>;
+  updateSettlementJobStatus(input: {
+    operationId: string;
+    status: SettlementJobRecord['status'];
+  }): Promise<boolean>;
   cleanupOldRecords(cutoffIso: string): Promise<void>;
 }
 

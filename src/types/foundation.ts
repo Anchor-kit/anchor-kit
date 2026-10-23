@@ -99,6 +99,8 @@ export interface RouteDefinition {
 export interface PluginRouteContext {
   request: IncomingMessage;
   response: ServerResponse;
+  /** Aborted when the HTTP request exceeds its configured deadline. */
+  signal: AbortSignal;
   params: Record<string, string>;
   query: Record<string, string | Array<string>>;
   body: Record<string, unknown>;

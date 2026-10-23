@@ -8,7 +8,10 @@
 export * from './types';
 
 export { AnchorInstance, createAnchor, makeSqliteDbUrlForTests } from './core/factory';
+export type { CreateAnchorOptions } from './core/factory';
 export * from './core/errors';
+export { LocalKeypairSigner } from './services/stellar-signer.ts';
+export type { StellarTransactionSigner } from './services/stellar-signer.ts';
 export * as utils from './utils';
 export {
   AssetSchema,
@@ -25,10 +28,13 @@ export type {
   IdempotencyRecord,
   InteractiveTransactionRecord,
   KycVerificationProvider,
+  PaymentRailAdapter,
   QueueJob,
   QueueDrainStatus,
   QueueAdapter,
+  SettlementJobRecord,
   Watcher,
+  WebhookEventRecord,
   WebhookProcessor,
   WatcherTaskRecord,
 } from './runtime/interfaces.ts';

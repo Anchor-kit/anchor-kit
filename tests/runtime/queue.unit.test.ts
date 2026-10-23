@@ -21,6 +21,14 @@ function watcherTaskId(job: QueueJob): number {
   return Number(job.payload.watcherTaskId);
 }
 
+function watcherTaskLabel(job: QueueJob): string {
+  if (job.type !== 'process_watcher_task') {
+    throw new Error('Expected process_watcher_task job');
+  }
+
+  return job.payload.watcherTaskId;
+}
+
 describe('InMemoryQueueAdapter', () => {
   it('rejects invalid constructor concurrency values', () => {
     for (const value of [0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY]) {
@@ -585,5 +593,105 @@ describe('InMemoryQueueAdapter', () => {
     await queue.stop();
 
     expect(completed).toEqual(['in-flight', '1']);
+  });
+
+  it('reports a failed job and continues processing later jobs', async () => {
+    const failures: Array<{ job: QueueJob; error: unknown }> = [];
+    const completed: string[] = [];
+    let resolveCompleted: (() => void) | undefined;
+    const completedPromise = new Promise<void>((resolve) => {
+      resolveCompleted = resolve;
+    });
+    const queue = new InMemoryQueueAdapter({
+      concurrency: 1,
+      onError: (job, error) => {
+        failures.push({ job, error });
+      },
+    });
+
+    await queue.start(async (job) => {
+      const id = watcherTaskLabel(job);
+      if (id === 'fail') throw new Error('worker failed');
+      completed.push(id);
+      resolveCompleted?.();
+    });
+    await queue.enqueue({ type: 'process_watcher_task', payload: { watcherTaskId: 'fail' } });
+    await queue.enqueue({ type: 'process_watcher_task', payload: { watcherTaskId: 'succeed' } });
+    await completedPromise;
+    await queue.stop();
+
+    expect(failures).toHaveLength(1);
+    expect(failures[0]?.job.type).toBe('process_watcher_task');
+    expect(failures[0]?.error).toEqual(new Error('worker failed'));
+    expect(completed).toEqual(['succeed']);
+  });
+
+  it('limits pending jobs and accepts more after the queue drains', async () => {
+    const queue = new InMemoryQueueAdapter({ concurrency: 1, maxPendingJobs: 1 });
+    let completedCount = 0;
+    let resolveDrained: (() => void) | undefined;
+    const drained = new Promise<void>((resolve) => {
+      resolveDrained = resolve;
+    });
+
+    await queue.enqueue({ type: 'process_watcher_task', payload: { watcherTaskId: '1' } });
+    await expect(
+      queue.enqueue({ type: 'process_watcher_task', payload: { watcherTaskId: '2' } }),
+    ).rejects.toThrow('In-memory queue is full');
+
+    await queue.start(async () => {
+      completedCount += 1;
+      if (completedCount === 2) resolveDrained?.();
+    });
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    await queue.enqueue({ type: 'process_watcher_task', payload: { watcherTaskId: '3' } });
+    await drained;
+    await queue.stop();
+
+    expect(completedCount).toBe(2);
+  });
+
+  it('excludes in-flight work from capacity and rejects concurrent overflow', async () => {
+    const queue = new InMemoryQueueAdapter({ concurrency: 1, maxPendingJobs: 1 });
+    let signalWorkerStarted: (() => void) | undefined;
+    const workerStarted = new Promise<void>((resolve) => {
+      signalWorkerStarted = resolve;
+    });
+    let releaseWorker: (() => void) | undefined;
+    const workerGate = new Promise<void>((resolve) => {
+      releaseWorker = resolve;
+    });
+    let signalPendingComplete: (() => void) | undefined;
+    const pendingComplete = new Promise<void>((resolve) => {
+      signalPendingComplete = resolve;
+    });
+    const completed: string[] = [];
+
+    await queue.start(async (job) => {
+      const id = watcherTaskLabel(job);
+      if (id === 'in-flight') {
+        signalWorkerStarted?.();
+        await workerGate;
+      }
+      completed.push(id);
+      if (id === 'pending-1') signalPendingComplete?.();
+    });
+    await queue.enqueue({
+      type: 'process_watcher_task',
+      payload: { watcherTaskId: 'in-flight' },
+    });
+    await workerStarted;
+
+    const enqueueResults = await Promise.allSettled([
+      queue.enqueue({ type: 'process_watcher_task', payload: { watcherTaskId: 'pending-1' } }),
+      queue.enqueue({ type: 'process_watcher_task', payload: { watcherTaskId: 'pending-2' } }),
+    ]);
+    expect(enqueueResults.map((result) => result.status)).toEqual(['fulfilled', 'rejected']);
+
+    releaseWorker?.();
+    await pendingComplete;
+    await queue.stop();
+
+    expect(completed).toEqual(['in-flight', 'pending-1']);
   });
 });
