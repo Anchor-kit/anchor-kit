@@ -36,7 +36,10 @@ try {
       const signingKey = 'SAAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQC5MY';
       const anchor = createAnchor({
         network: { network: 'testnet' },
-        server: { interactiveDomain: 'https://anchor.example.com' },
+        server: {
+          homeDomain: 'anchor.example.com',
+          interactiveDomain: 'https://anchor.example.com',
+        },
         security: {
           sep10SigningKey: signingKey,
           interactiveJwtSecret: 'node-consumer-smoke-jwt-secret',
