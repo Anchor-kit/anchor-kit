@@ -48,6 +48,53 @@ bun run test:watch
 bun run test:coverage
 ```
 
+## Building the SDK
+
+The build pipeline bundles `src/index.ts` into `dist/index.js` (all `@/` path-aliases resolved at bundle time) and emits TypeScript declarations into `dist/`.
+
+```bash
+npm run build
+```
+
+The build does three things in sequence:
+
+1. **rolldown** bundles `src/index.ts` → `dist/index.js`, resolving every `@/…` import so no alias leaks into the output.
+2. **tsc** (`tsconfig.types.json`) emits `.d.ts` declaration files into `dist/src/`.
+3. **`scripts/fix-dts-imports.mjs`** rewrites any `@/…` specifiers that TypeScript preserved verbatim in those declaration files to correct relative paths.
+
+### Acceptance gate: no @/ imports in dist/
+
+After building, run either of these commands to confirm the acceptance criterion:
+
+```bash
+# Focused alias check (JS and .d.ts files)
+npm run check:aliases
+```
+
+Expected output:
+
+```
+check-alias-imports: OK – no @/ imports found in dist/ (dist).
+```
+
+```bash
+# Consumer fixture (static analysis of the bundle)
+npm run check:consumer
+```
+
+Expected output:
+
+```
+✓ No @/ specifiers in dist/index.js
+✓ dist/index.js contains export "createAnchor"
+✓ dist/index.js contains export "makeSqliteDbUrlForTests"
+✓ No @/ specifiers in dist/**/*.d.ts
+
+All checks passed.
+```
+
+Both commands exit `0` when clean and `1` with a list of offending lines when `@/` imports are found.
+
 ## Code Style
 
 We enforce code style using [ESLint](https://eslint.org/) and [Prettier](https://prettier.io/).

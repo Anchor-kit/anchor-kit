@@ -34,6 +34,7 @@ export interface DepositRequestHookContext extends AnchorPluginContext<
 > {
   account: string;
   asset: Asset;
+  signal: AbortSignal;
 }
 
 export interface AnchorPluginHooks {

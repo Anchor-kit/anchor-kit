@@ -1,8 +1,13 @@
 import { execFileSync } from 'node:child_process';
+import { dirname, join } from 'node:path';
 
-const output = execFileSync('npm', ['pack', '--dry-run', '--json', '--ignore-scripts'], {
-  encoding: 'utf8',
-});
+const npmCli = join(dirname(process.execPath), 'node_modules', 'npm', 'bin', 'npm-cli.js');
+const command = process.platform === 'win32' ? process.execPath : 'npm';
+const args =
+  process.platform === 'win32'
+    ? [npmCli, 'pack', '--dry-run', '--json', '--ignore-scripts']
+    : ['pack', '--dry-run', '--json', '--ignore-scripts'];
+const output = execFileSync(command, args, { encoding: 'utf8' });
 const [packResult] = JSON.parse(output);
 const files = new Set(packResult?.files?.map(({ path }) => path) ?? []);
 
