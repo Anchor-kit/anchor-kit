@@ -4,6 +4,7 @@ import type {
   DatabaseAdapter,
   IdempotencyRecord,
   InteractiveTransactionRecord,
+  TransactionTransitionAuditRecord,
   TransactionTransitionResult,
   SettlementJobRecord,
   WatcherTaskRecord,
