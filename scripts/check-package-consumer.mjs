@@ -8,6 +8,9 @@ const root = fileURLToPath(new URL('../', import.meta.url));
 const fixture = resolve(root, 'tests/fixtures/package-consumer');
 const tempDir = mkdtempSync(join(tmpdir(), 'anchor-kit-consumer-'));
 
+// The consumer smoke must use the same pinned Bun version as the build.
+const pinnedBunVersion = process.env.ANCHOR_KIT_BUN_VERSION;
+
 function run(command, args, cwd) {
   const result = spawnSync(command, args, {
     cwd,
@@ -22,7 +25,22 @@ function run(command, args, cwd) {
   return result.stdout;
 }
 
+function assertPinnedBunVersion() {
+  if (!pinnedBunVersion) {
+    throw new Error(
+      'ANCHOR_KIT_BUN_VERSION is not set; the package smoke must use the same pinned Bun version as the build',
+    );
+  }
+  const actual = run('bun', ['--version'], root).trim();
+  if (actual !== pinnedBunVersion) {
+    throw new Error(
+      `Bun version mismatch: expected ${pinnedBunVersion} (ANCHOR_KIT_BUN_VERSION) but found ${actual}`,
+    );
+  }
+}
+
 try {
+  assertPinnedBunVersion();
   run('npm', ['pack', '--pack-destination', tempDir], root);
   const packageArchive = readdirSync(tempDir).find((name) => name.endsWith('.tgz'));
   if (!packageArchive) {
