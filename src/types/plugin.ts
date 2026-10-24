@@ -39,6 +39,22 @@ export interface DepositRequestHookContext extends AnchorPluginContext<
   signal: AbortSignal;
 }
 
+/**
+ * Durable record of one committed transaction status transition.
+ * Persisted by the database adapter alongside the status update.
+ */
+export interface TransactionTransitionRecord {
+  /** Unique identity of this transition; stable across replays. */
+  transitionId: string;
+  transactionId: string;
+  oldStatus: TransactionStatus;
+  newStatus: TransactionStatus;
+  reason: string;
+  /** Operation identity that caused the transition (e.g. expiry job id). */
+  operationId: string;
+  occurredAt: string;
+}
+
 export interface AnchorPluginHooks {
   /** Throw to reject with HTTP 400 `deposit_rejected` before persistence. */
   onDepositRequest?: (ctx: DepositRequestHookContext) => Promise<void>;

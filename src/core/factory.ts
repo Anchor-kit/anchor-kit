@@ -9,6 +9,7 @@ import { validatePluginRoutes } from '../runtime/http/express-router-impl.ts';
 import type {
   DatabaseAdapter,
   InteractiveTransactionRecord,
+  TransactionTransitionRecord,
   QueueAdapter,
   QueueDrainStatus,
   Watcher,
