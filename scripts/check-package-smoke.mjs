@@ -9,6 +9,8 @@ const temporaryDirectory = mkdtempSync(join(tmpdir(), 'anchor-kit-package-smoke-
 const consumerDirectory = join(temporaryDirectory, 'consumer');
 mkdirSync(consumerDirectory);
 
+const expectedBunVersion = process.env.ANCHOR_KIT_BUN_VERSION ?? '1.2.0';
+
 function findBunExecutable() {
   const pathEntries = (process.env.PATH ?? '').split(delimiter);
   const executables = pathEntries.flatMap((directory) => [
@@ -41,6 +43,13 @@ function run(command, args, cwd) {
 }
 
 try {
+  const bunVersion = run('bun', ['--version'], repositoryRoot).trim();
+  if (bunVersion !== expectedBunVersion) {
+    throw new Error(
+      `Bun ${expectedBunVersion} is required for the package smoke; found ${bunVersion}`,
+    );
+  }
+
   const npmCommand = 'npm';
   const bunCommand = 'bun';
   const packOutput = run(
