@@ -45,8 +45,9 @@ try {
     tempDir,
   );
   run('npm', ['exec', '--', 'tsc', '--project', 'tsconfig.json'], tempDir);
+  run('npm', ['exec', '--', 'node', 'consumer.mjs'], tempDir);
   console.log(
-    'PASS: a clean external TypeScript consumer resolves createAnchor and public types through package exports',
+    'PASS: a clean external TypeScript consumer resolves createAnchor and public types through package exports, and the installed runtime import executes',
   );
 } finally {
   rmSync(tempDir, { recursive: true, force: true });

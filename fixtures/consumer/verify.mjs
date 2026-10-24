@@ -26,6 +26,8 @@
 import { readFileSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { readdirSync, statSync } from 'node:fs';
+import { join } from 'node:path';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 // Resolve paths relative to the repo root (two levels up from fixtures/consumer/).
@@ -75,9 +77,6 @@ for (const name of expectedExports) {
 }
 
 // ── Check 3: No @/ specifiers in declaration files ───────────────────────────
-import { readdirSync, statSync } from 'node:fs';
-import { join } from 'node:path';
-
 function* walkDts(dir) {
   for (const entry of readdirSync(dir)) {
     const full = join(dir, entry);
