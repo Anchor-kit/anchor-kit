@@ -68,6 +68,12 @@ jobs:
       - name: Build
         run: bun run build
 
+      - name: Bun consumer fixture (installed package)
+        run: bun run smoke:bun-consumer
+
+      - name: Node consumer fixture (installed package)
+        run: bun run smoke:node-consumer
+
       - name: Node PostgreSQL package smoke test
         run: bun run smoke:node-postgres
         env:

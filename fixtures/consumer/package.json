@@ -5,6 +5,8 @@
   "description": "Reproducible consumer fixture proving anchor-kit resolves without @/ imports",
   "type": "module",
   "scripts": {
-    "verify": "node verify.mjs"
+    "verify": "node verify.mjs",
+    "verify:node": "node verify.mjs",
+    "verify:bun": "bun verify.mjs"
   }
 }
