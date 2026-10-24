@@ -63,6 +63,11 @@ jobs:
       - name: Verify npm package contents
         run: bun run check:pack
 
+      - name: Run installed-package consumer checks
+        run: |
+          bun run test:consumer:bun
+          bun run test:consumer:node
+
       - name: Update npm for trusted publishing support
         run: npm install -g npm@latest
 
