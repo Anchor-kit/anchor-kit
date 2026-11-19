@@ -6,26 +6,26 @@ export interface StellarTransactionSigner {
 }
 
 export interface StellarAccountSigner {
-  key: string;
-  weight: number;
+  readonly key: string;
+  readonly weight: number;
 }
 
 export interface StellarAccountThresholds {
-  low: number;
-  medium: number;
-  high: number;
+  readonly low: number;
+  readonly medium: number;
+  readonly high: number;
 }
 
 export interface StellarAccountRecord {
-  accountId: string;
-  signers: StellarAccountSigner[];
-  thresholds: StellarAccountThresholds;
+  readonly accountId: string;
+  readonly signers: readonly StellarAccountSigner[];
+  readonly thresholds: StellarAccountThresholds;
 }
 
 export type StellarAccountLookupResult =
-  | { status: 'found'; account: StellarAccountRecord }
-  | { status: 'not_found' }
-  | { status: 'upstream_error'; message: string };
+  | { readonly status: 'found'; readonly account: StellarAccountRecord }
+  | { readonly status: 'not_found'; readonly accountId: string }
+  | { readonly status: 'upstream_error'; readonly accountId: string; readonly message: string };
 
 export interface StellarAccountLookup {
   lookupAccount(accountId: string): Promise<StellarAccountLookupResult>;

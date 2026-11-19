@@ -1,7 +1,12 @@
 import type { AnchorConfig } from '@/core/config.ts';
 import { ConfigError, PayloadTooLargeError, ValidationError } from '@/core/errors.ts';
 import { InMemoryRateLimiter, type RateLimitRule } from '@/runtime/http/rate-limiter.ts';
-import type { AccountSigner, DatabaseAdapter, WebhookProcessor } from '@/runtime/interfaces.ts';
+import type {
+  AccountLookup,
+  AccountSigner,
+  DatabaseAdapter,
+  WebhookProcessor,
+} from '@/runtime/interfaces.ts';
 import type { PluginRouteContext, RouteDefinition } from '@/types/foundation.ts';
 import type { AnchorPluginHooks, DepositRequestBody } from '@/types/plugin.ts';
 import { IdempotencyUtils } from '../../utils/idempotency.ts';
@@ -23,25 +28,6 @@ import { extractClientIdentifier } from './client-identifier.ts';
 const SEP10_AUTH_OPERATION_SUFFIX = ' auth';
 
 /**
- * Result of looking up an account's configured signers via an injectable
- * SEP-10 account lookup. Distinguishes not-found from upstream failures.
- */
-export type Sep10AccountLookupResult =
-  | {
-      status: 'found';
-      account: {
-        signers: Array<{ key: string; weight: number }>;
-        thresholds: { low: number; medium: number; high: number };
-      };
-    }
-  | { status: 'not_found' }
-  | { status: 'unavailable'; reason?: string };
-
-export interface Sep10AccountLookup {
-  lookup(accountId: string): Promise<Sep10AccountLookupResult>;
-}
-
-/**
  * Stable issuer for bearer access tokens minted by the anchor API.
  * Tokens issued by a different service must not be accepted here, even when
  * they are signed with the same shared secret.
@@ -58,6 +44,7 @@ export const ACCESS_TOKEN_AUDIENCE = 'anchor-api';
 export interface ExpressRouterContext {
   config: AnchorConfig;
   database: DatabaseAdapter;
+  accountLookup?: AccountLookup;
   webhookProcessor: WebhookProcessor;
   sep10ServerKeypair: Keypair;
   networkPassphrase: string;
