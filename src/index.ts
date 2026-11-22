@@ -33,6 +33,8 @@ export type {
   QueueJob,
   QueueDrainStatus,
   QueueAdapter,
+  Sep10AccountLookup,
+  Sep10AccountSigners,
   SettlementJobRecord,
   Watcher,
   WebhookEventRecord,

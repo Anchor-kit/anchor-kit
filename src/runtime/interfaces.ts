@@ -45,6 +45,35 @@ export interface AccountSigner {
   weight: number;
 }
 
+/**
+ * Signer summary for a SEP-10 client account.
+ *
+ * `signers` must be the complete authorization set reported by the network,
+ * including the master key entry (whose public key equals the account ID) when
+ * the master key has non-zero weight. Duplicate keys are rejected.
+ */
+export interface Sep10AccountSigners {
+  signers: readonly AccountSigner[];
+  /** Account thresholds; SEP-10 authentication requires the medium threshold. */
+  thresholds: {
+    low: number;
+    medium: number;
+    high: number;
+  };
+}
+
+/**
+ * Injectable SEP-10 client account lookup.
+ *
+ * Return `null` only when the account genuinely does not exist on the network;
+ * that selects the protocol's nonexistent-account signature branch. Throw for
+ * transport or upstream failures so an outage is never treated as an absent
+ * account.
+ */
+export interface Sep10AccountLookup {
+  load(accountId: string): Promise<Sep10AccountSigners | null>;
+}
+
 export interface AuthChallengeRecord {
   id: string;
   account: string;
