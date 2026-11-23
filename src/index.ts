@@ -11,6 +11,8 @@ export { AnchorInstance, createAnchor, makeSqliteDbUrlForTests } from './core/fa
 export type { CreateAnchorOptions } from './core/factory';
 export * from './core/errors';
 export { LocalKeypairSigner } from './services/stellar-signer.ts';
+export { emitTransactionTrace } from './services/transaction-trace.ts';
+export type { TransactionTraceEvent, TransactionTraceSink } from './services/transaction-trace.ts';
 export type { StellarTransactionSigner } from './services/stellar-signer.ts';
 export * as utils from './utils';
 export {
