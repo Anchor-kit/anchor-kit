@@ -21,7 +21,7 @@ export {
   AnchorKitConfigSchema,
   StellarUtils,
 } from './utils';
-export type { Memo, PaymentParams } from './utils';
+export type { Memo, PaymentParams, SettlementPaymentParams } from './utils';
 export type {
   AuthChallengeRecord,
   AccountSigner,

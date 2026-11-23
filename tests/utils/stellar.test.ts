@@ -77,6 +77,58 @@ describe('StellarUtils', () => {
   });
 
   describe('buildPaymentXdr() and parseXdrTransaction()', () => {
+    it('builds settlement XDR from the loaded sequence, fee and bounded timeout', async () => {
+      const started = Math.floor(Date.now() / 1000);
+      const xdr = await StellarUtils.buildSettlementPaymentXdr({
+        source: validAccountId,
+        destination: validAccountId,
+        amount: '12.3456789',
+        assetCode: 'USDC',
+        issuer: validAccountId,
+        network: 'testnet',
+        sequence: '123456789012345',
+        fee: '300',
+        timeoutSeconds: 120,
+      });
+      const transaction = new Transaction(xdr, Networks.TESTNET);
+      const payment = asPaymentOperation(transaction.operations[0]);
+      expect(transaction.sequence).toBe('123456789012346');
+      expect(transaction.fee).toBe('300');
+      expect(Number(transaction.timeBounds?.maxTime)).toBeGreaterThanOrEqual(started + 120);
+      expect(Number(transaction.timeBounds?.maxTime)).toBeLessThanOrEqual(
+        Math.floor(Date.now() / 1000) + 120,
+      );
+      expect(payment.amount).toBe('12.3456789');
+      expect(transaction.operations[0]).toMatchObject({ destination: validAccountId });
+      expect(transaction.operations[0]).toMatchObject({
+        asset: expect.objectContaining({ code: 'USDC', issuer: validAccountId }),
+      });
+    });
+
+    it.each([
+      { sequence: '-1' },
+      { sequence: '9223372036854775807' },
+      { fee: '0' },
+      { fee: '4294967296' },
+      { timeoutSeconds: 0 },
+      { timeoutSeconds: 1.5 },
+      { network: 'invalid' },
+    ])('rejects invalid settlement parameters %o', async (invalid) => {
+      await expect(
+        StellarUtils.buildSettlementPaymentXdr({
+          source: validAccountId,
+          destination: validAccountId,
+          amount: '1',
+          assetCode: 'XLM',
+          network: 'testnet',
+          sequence: '10',
+          fee: '100',
+          timeoutSeconds: 30,
+          ...invalid,
+        } as import('@/utils/stellar.ts').SettlementPaymentParams),
+      ).rejects.toThrow();
+    });
+
     it('should build and round-trip a generated UUID hash memo', async () => {
       const transactionId = '550e8400-e29b-41d4-a716-446655440000';
       const memo = StellarUtils.generateMemo(transactionId);

@@ -1,5 +1,13 @@
 # Focused issue acceptance checks
 
+For settlement payment XDR, run:
+
+```sh
+bun test tests/utils/stellar.test.ts
+```
+
+Expected result: 48 tests pass. The settlement check verifies the account sequence, fee, expiry, recipient, asset, and amount. The caller must load and safely allocate the account sequence before building a transaction; this helper does not submit it.
+
 Run the focused tests from the repository root:
 
 ```sh
