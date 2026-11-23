@@ -3,10 +3,10 @@
 For Paystack input conversion, run:
 
 ```sh
-bun test tests/services/paystack-inputs.test.ts
+bun test tests/services/paystack-inputs.test.ts tests/services/paystack-status.test.ts
 ```
 
-Expected result: 3 tests pass. The check covers exact minor-unit conversion and reference validation; it makes no provider requests.
+Expected result: 5 tests pass. The checks cover exact minor-unit conversion, reference validation, and test-mode status lookup using recorded responses; they make no provider requests. Callers must compare the returned amount and currency with the expected operation before acting on a payment status.
 
 Run the focused tests from the repository root:
 

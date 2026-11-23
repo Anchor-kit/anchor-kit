@@ -12,6 +12,7 @@ export type { CreateAnchorOptions } from './core/factory';
 export * from './core/errors';
 export { LocalKeypairSigner } from './services/stellar-signer.ts';
 export { paystackSubunits, validatePaystackReference } from './services/paystack-inputs.ts';
+export { getPaystackTestStatus } from './services/paystack-status.ts';
 export type { StellarTransactionSigner } from './services/stellar-signer.ts';
 export * as utils from './utils';
 export {
