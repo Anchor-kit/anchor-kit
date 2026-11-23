@@ -1,5 +1,13 @@
 # Focused issue acceptance checks
 
+For refund serialization, run:
+
+```sh
+bun test tests/services/refund-serialization.test.ts
+```
+
+Expected result: 2 tests pass. The check covers transaction linkage and exact totals for completed refund payments. It does not persist or send refunds.
+
 Run the focused tests from the repository root:
 
 ```sh
