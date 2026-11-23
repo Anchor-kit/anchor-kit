@@ -9,6 +9,7 @@ import { validatePluginRoutes } from '../runtime/http/express-router-impl.ts';
 import type {
   DatabaseAdapter,
   InteractiveTransactionRecord,
+  PaymentRailAdapter,
   QueueAdapter,
   QueueDrainStatus,
   Watcher,
@@ -27,6 +28,7 @@ export interface CreateAnchorOptions {
    * disconnect during shutdown; do not share it with another active instance.
    */
   databaseAdapter?: DatabaseAdapter;
+  paymentRailAdapters?: readonly PaymentRailAdapter[];
 }
 
 /**
@@ -40,6 +42,7 @@ export class AnchorInstance {
 
   private database: DatabaseAdapter | null = null;
   private readonly injectedDatabaseAdapter?: DatabaseAdapter;
+  private readonly paymentRailAdapters?: readonly PaymentRailAdapter[];
   private queue: QueueAdapter | null = null;
   private webhookProcessor: WebhookProcessor | null = null;
   private watchers: Watcher[] = [];
@@ -56,6 +59,7 @@ export class AnchorInstance {
     this.config = new AnchorConfig(config);
     this.config.validate();
     this.injectedDatabaseAdapter = options.databaseAdapter;
+    this.paymentRailAdapters = options.paymentRailAdapters;
   }
 
   /**
@@ -115,6 +119,7 @@ export class AnchorInstance {
         this.webhookProcessor = new DefaultWebhookProcessor({
           config: this.config.getConfig(),
           database: this.database,
+          paymentRailAdapters: this.paymentRailAdapters,
         });
 
         const watchersEnabled = frameworkConfig.watchers?.enabled ?? true;
