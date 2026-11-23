@@ -1,5 +1,13 @@
 # Focused issue acceptance checks
 
+For Paystack input conversion, run:
+
+```sh
+bun test tests/services/paystack-inputs.test.ts
+```
+
+Expected result: 3 tests pass. The check covers exact minor-unit conversion and reference validation; it makes no provider requests.
+
 Run the focused tests from the repository root:
 
 ```sh
