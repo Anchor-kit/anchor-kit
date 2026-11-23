@@ -11,10 +11,11 @@ import type {
   InteractiveTransactionRecord,
   QueueAdapter,
   QueueDrainStatus,
+  QueueJobFailure,
   Watcher,
   WebhookProcessor,
 } from '@/runtime/interfaces.ts';
-import { InMemoryQueueAdapter } from '@/runtime/queue/in-memory-queue.ts';
+import { InMemoryQueueAdapter, PermanentJobError } from '@/runtime/queue/in-memory-queue.ts';
 import { TransactionWatcher } from '@/runtime/watchers/transaction-watcher.ts';
 import { DefaultWebhookProcessor } from '@/runtime/webhooks/default-webhook-processor.ts';
 import type { SchemaMigration } from '@/types/foundation.ts';
@@ -109,7 +110,10 @@ export class AnchorInstance {
         this.queue = new InMemoryQueueAdapter({
           concurrency: queueConcurrency,
           maxPendingJobs: frameworkConfig.queue?.maxPendingJobs,
+          retry: frameworkConfig.queue?.retry,
+          classifyError: frameworkConfig.queue?.classifyError,
           onError: frameworkConfig.queue?.onError,
+          onFailedJob: frameworkConfig.queue?.onFailedJob,
         });
 
         this.webhookProcessor = new DefaultWebhookProcessor({
@@ -254,6 +258,29 @@ export class AnchorInstance {
   /** Return pending and active queue counts without exposing job payloads. */
   public getQueueStatus(): QueueDrainStatus {
     return this.queue?.status ?? { pending: 0, active: 0 };
+  }
+
+  /**
+   * Return permanent or attempt-exhausted queue work for operator review.
+   *
+   * Terminal failures are never reported as success: a job that fails permanently or
+   * exhausts its bounded retries is recorded here and passed to
+   * `framework.queue.onFailedJob`, if configured.
+   */
+  public getFailedQueueJobs(): readonly QueueJobFailure[] {
+    return this.queue?.listFailedJobs?.() ?? [];
+  }
+
+  /**
+   * Re-enqueue a failed job with a fresh attempt budget after operator review.
+   * Returns false when the id is unknown or the active queue does not retain failures.
+   */
+  public async requeueFailedQueueJob(id: string): Promise<boolean> {
+    const queue = this.requireQueue();
+    if (!queue.requeueFailedJob) {
+      throw new ConfigError('Queue adapter does not support failed-job requeue');
+    }
+    return queue.requeueFailedJob(id);
   }
 
   /**
@@ -429,16 +456,16 @@ export class AnchorInstance {
       !('type' in input) ||
       !('payload' in input)
     ) {
-      return;
+      throw new PermanentJobError('Malformed queue job: expected an object with type and payload');
     }
 
     const job = input as { type: unknown; payload: unknown };
     if (typeof job.type !== 'string') {
-      return;
+      throw new PermanentJobError('Malformed queue job: type must be a string');
     }
 
     if (typeof job.payload !== 'object' || job.payload === null || Array.isArray(job.payload)) {
-      return;
+      throw new PermanentJobError('Malformed queue job: payload must be an object');
     }
 
     const payload = job.payload as Record<string, unknown>;
@@ -446,7 +473,9 @@ export class AnchorInstance {
     if (job.type === 'expire_transaction') {
       const transactionIdValue = payload.transactionId;
       if (typeof transactionIdValue !== 'string' || transactionIdValue.length === 0) {
-        return;
+        throw new PermanentJobError(
+          'Malformed expire_transaction job: payload.transactionId must be a non-empty string',
+        );
       }
 
       const transaction = await database.getInteractiveTransactionById(transactionIdValue);
@@ -472,7 +501,9 @@ export class AnchorInstance {
     if (job.type === 'process_watcher_task') {
       const watcherTaskIdValue = payload.watcherTaskId;
       if (typeof watcherTaskIdValue !== 'string' || watcherTaskIdValue.length === 0) {
-        return;
+        throw new PermanentJobError(
+          'Malformed process_watcher_task job: payload.watcherTaskId must be a non-empty string',
+        );
       }
 
       await database.updateWatcherTaskStatus({
@@ -485,7 +516,9 @@ export class AnchorInstance {
     if (job.type === 'cleanup_records') {
       const retentionDaysValue = payload.retentionDays;
       if (typeof retentionDaysValue !== 'number' || !Number.isFinite(retentionDaysValue)) {
-        return;
+        throw new PermanentJobError(
+          'Malformed cleanup_records job: payload.retentionDays must be a finite number',
+        );
       }
 
       const cutoffMs = Date.now() - retentionDaysValue * 24 * 60 * 60 * 1000;
@@ -494,7 +527,7 @@ export class AnchorInstance {
       return;
     }
 
-    throw new Error(`Unknown queue job type: ${String(job.type)}`);
+    throw new PermanentJobError(`Unknown queue job type: ${String(job.type)}`);
   }
 
   private async notifyTransactionStatusChange(
@@ -509,8 +542,9 @@ export class AnchorInstance {
       try {
         await hook(transaction, oldStatus, newStatus);
       } catch (error) {
-        // The in-memory queue is best-effort and drops failed jobs without retry.
-        // Log hook failures and continue so one plugin cannot block other hooks.
+        // Plugin hook failures must not block other hooks or fail an already-persisted
+        // transaction transition. The queue retry policy does not cover this side effect,
+        // so log it for operator review instead of silently discarding it.
         console.error(`[AnchorKit] Plugin "${plugin.id}" transaction status hook failed`, error);
       }
     }
