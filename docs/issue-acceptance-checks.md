@@ -1,5 +1,13 @@
 # Focused issue acceptance checks
 
+For the example deposit placeholder, run:
+
+```sh
+bun test tests/example-express-app.test.ts
+```
+
+Expected result: 18 tests pass. The deposit URL returns a non-cacheable unavailable page. It does not yet collect fields or complete a deposit.
+
 Run the focused tests from the repository root:
 
 ```sh
