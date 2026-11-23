@@ -20,6 +20,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 
 type SqliteLike = Database;
+type SqliteStatement = ReturnType<SqliteLike['prepare']>;
 
 interface PostgresClient {
   connect(): Promise<void>;
@@ -416,6 +417,34 @@ function configureSqliteConnection(database: SqliteLike, path: string): void {
   database.exec(`PRAGMA journal_mode = ${SQLITE_JOURNAL_MODE};`);
 }
 
+function trackSqliteStatements(database: SqliteLike): () => void {
+  const statements = new Set<WeakRef<SqliteStatement>>();
+  const trackedDatabase = database as unknown as { prepare(sql: string): SqliteStatement };
+  const prepare = trackedDatabase.prepare.bind(trackedDatabase);
+
+  trackedDatabase.prepare = (sql: string): SqliteStatement => {
+    const statement = prepare(sql);
+    statements.add(new WeakRef(statement));
+    return statement;
+  };
+
+  return () => {
+    for (const reference of statements) {
+      const statement = reference.deref();
+      if (!statement) {
+        continue;
+      }
+
+      try {
+        statement.finalize();
+      } catch (error) {
+        void error;
+      }
+    }
+    statements.clear();
+  };
+}
+
 function parseJsonObject(value: unknown, parseSerializedText: boolean): Record<string, unknown> {
   let parsed = value;
 
@@ -496,6 +525,7 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
   private postgres: PostgresClient | null = null;
   private postgresClientConstructor: PostgresClientConstructor | null = null;
   private readonly migrations: readonly SchemaMigration[];
+  private finalizeSqliteStatements: (() => void) | null = null;
   private connectPromise: Promise<void> | null = null;
   private disconnectPromise: Promise<void> | null = null;
   private migratePromise: Promise<void> | null = null;
@@ -534,16 +564,18 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
         if (this.provider === 'sqlite') {
           const path = toSqlitePath(this.url);
           const database = await loadSqliteDatabase(path);
+          const finalizeStatements = trackSqliteStatements(database);
 
           try {
             configureSqliteConnection(database, path);
           } catch (error) {
-            // Do not leak the handle when the connection cannot be tuned.
+            finalizeStatements();
             database.close();
             throw error;
           }
 
           this.sqlite = database;
+          this.finalizeSqliteStatements = finalizeStatements;
           return;
         }
 
@@ -588,12 +620,15 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
       const sqlite = this.sqlite;
       const postgres = this.postgres;
       const postgresClientConstructor = this.postgresClientConstructor;
+      const finalizeStatements = this.finalizeSqliteStatements;
       this.sqlite = null;
       this.postgres = null;
       this.postgresClientConstructor = null;
+      this.finalizeSqliteStatements = null;
 
       try {
         if (sqlite) {
+          finalizeStatements?.();
           sqlite.close();
         }
 
@@ -604,6 +639,7 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
         this.sqlite = sqlite;
         this.postgres = postgres;
         this.postgresClientConstructor = postgresClientConstructor;
+        this.finalizeSqliteStatements = finalizeStatements;
         throw error;
       }
     })();
