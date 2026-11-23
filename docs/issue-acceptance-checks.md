@@ -3,10 +3,10 @@
 For refund serialization, run:
 
 ```sh
-bun test tests/services/refund-serialization.test.ts
+bun test tests/services/refund-serialization.test.ts tests/runtime/database/refund-operations.test.ts tests/mvp-express.integration.test.ts
 ```
 
-Expected result: 2 tests pass. The check covers transaction linkage and exact totals for completed refund payments. It does not persist or send refunds.
+Expected result: all three files pass. The checks cover transaction linkage, SQLite persistence across reconnect, guarded status changes, and exact refund totals in an authorized transaction response. The tests do not send refunds. PostgreSQL coverage runs when `DATABASE_URL` points to a disposable database.
 
 Run the focused tests from the repository root:
 

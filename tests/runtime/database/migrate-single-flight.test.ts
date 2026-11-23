@@ -90,7 +90,7 @@ describe('Concurrent database migrations (#600)', () => {
 
     expect(
       client.queries.filter((query) => query.sql.startsWith('INSERT INTO anchor_kit_migrations')),
-    ).toHaveLength(3);
+    ).toHaveLength(4);
     expect(client.maxInFlight).toBe(1);
   });
 
@@ -107,7 +107,7 @@ describe('Concurrent database migrations (#600)', () => {
     expect(results).toEqual([undefined, undefined, undefined, undefined, undefined]);
     expect(
       client.queries.filter((query) => query.sql.startsWith('INSERT INTO anchor_kit_migrations')),
-    ).toHaveLength(3);
+    ).toHaveLength(4);
   });
 
   it('serializes SQLite migration calls into a single sequence', async () => {
@@ -128,6 +128,7 @@ describe('Concurrent database migrations (#600)', () => {
         'core:001-initial-schema',
         'core:002-idempotency-status',
         'core:003-current-runtime-tables',
+        'core:004-refund-operations',
       ]);
 
       // The schema is usable after the shared migration.
@@ -185,7 +186,7 @@ describe('Concurrent database migrations (#600)', () => {
     await expect(adapter.migrate()).resolves.toBeUndefined();
     expect(
       client.queries.filter((query) => query.sql.startsWith('INSERT INTO anchor_kit_migrations')),
-    ).toHaveLength(3);
+    ).toHaveLength(4);
   });
 
   it('lets a fresh caller retry once the in-flight migration has settled', async () => {
@@ -204,7 +205,7 @@ describe('Concurrent database migrations (#600)', () => {
     await adapter.migrate();
     expect(
       client.queries.filter((query) => query.sql.startsWith('INSERT INTO anchor_kit_migrations')),
-    ).toHaveLength(3);
+    ).toHaveLength(4);
     expect(
       client.queries.filter((query) =>
         query.sql.startsWith('SELECT name FROM anchor_kit_migrations'),

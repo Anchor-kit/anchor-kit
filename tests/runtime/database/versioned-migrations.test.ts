@@ -110,6 +110,7 @@ describe('versioned database migrations', () => {
         { name: 'core:001-initial-schema' },
         { name: 'core:002-idempotency-status' },
         { name: 'core:003-current-runtime-tables' },
+        { name: 'core:004-refund-operations' },
       ]);
     } finally {
       await adapter.disconnect();

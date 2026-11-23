@@ -32,6 +32,7 @@ export type {
   InteractiveTransactionRecord,
   KycVerificationProvider,
   PaymentRailAdapter,
+  RefundRecord,
   QueueJob,
   QueueDrainStatus,
   QueueAdapter,
