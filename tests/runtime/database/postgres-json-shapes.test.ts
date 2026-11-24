@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import { MalformedPersistedDataError } from '@/core/errors.ts';
 import { SqlDatabaseAdapter } from '@/runtime/database/sql-database-adapter.ts';
 
@@ -6,15 +6,13 @@ const postgresMock = {
   rows: [] as Array<Record<string, unknown>>,
 };
 
-mock.module('pg', () => ({
-  Client: class {
-    async connect(): Promise<void> {}
-    async end(): Promise<void> {}
-    async query<T extends Record<string, unknown>>(): Promise<{ rows: T[]; rowCount: number }> {
-      return { rows: postgresMock.rows as T[], rowCount: postgresMock.rows.length };
-    }
-  },
-}));
+class FakePostgresClient {
+  async connect(): Promise<void> {}
+  async end(): Promise<void> {}
+  async query<T extends Record<string, unknown>>(): Promise<{ rows: T[]; rowCount: number }> {
+    return { rows: postgresMock.rows as T[], rowCount: postgresMock.rows.length };
+  }
+}
 
 describe('PostgreSQL persisted webhook and watcher data', () => {
   let adapter: SqlDatabaseAdapter;
@@ -22,7 +20,7 @@ describe('PostgreSQL persisted webhook and watcher data', () => {
   beforeEach(async () => {
     postgresMock.rows = [];
     adapter = new SqlDatabaseAdapter({ provider: 'postgres', url: 'postgres://local/test' });
-    await adapter.connect();
+    Object.assign(adapter, { postgres: new FakePostgresClient() });
   });
 
   afterEach(async () => {
