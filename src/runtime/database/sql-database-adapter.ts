@@ -553,8 +553,17 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
           const pgModule = pgModuleUnknown as { Client: PostgresClientConstructor };
           this.postgresClientConstructor = pgModule.Client;
           const client = new pgModule.Client({ connectionString: this.url });
+          try {
+            await client.connect();
+            if (this.schema && this.schema !== 'public') {
+              await client.query(`CREATE SCHEMA IF NOT EXISTS "${this.schema}"`);
+            }
+            await client.query(`SET search_path TO "${this.schema ?? 'public'}"`);
+          } catch (error) {
+            await client.end().catch(() => {});
+            throw error;
+          }
           this.postgres = client;
-          await this.postgres.connect();
           return;
         }
 
@@ -1636,6 +1645,7 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
       let operationError: unknown;
       try {
         await postgres.connect();
+        await postgres.query(`SET search_path TO "${this.schema ?? 'public'}"`);
         await postgres.query('BEGIN');
         transactionStarted = true;
         await postgres.query(
