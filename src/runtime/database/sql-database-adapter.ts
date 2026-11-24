@@ -9,6 +9,8 @@ import type {
   WatcherTaskRecord,
   WebhookEventRecord,
 } from '@/runtime/interfaces.ts';
+import type { PaymentRailOperation } from '@/types/transaction.ts';
+import { parseRecoveredOperation } from '@/runtime/webhooks/recovery-result.ts';
 import type { Customer } from '@/types/customer.ts';
 import { getAllowedNextTransactionStatuses } from '@/types/transaction-status.ts';
 import type { FrameworkConfig } from '@/types/config.ts';
@@ -352,6 +354,20 @@ const CORE_MIGRATIONS: readonly SchemaMigration[] = [
               updated_at TIMESTAMPTZ NOT NULL
             );
           `,
+      );
+    },
+  },
+  {
+    name: 'core:005-webhook-recovery-result',
+    async up({ dialect, execute, hasColumn }) {
+      if (!(await hasColumn('webhook_events', 'recovery_result'))) {
+        await execute(
+          `ALTER TABLE webhook_events ADD COLUMN recovery_result ${dialect === 'sqlite' ? 'TEXT' : 'JSONB'}`,
+        );
+      }
+      // Existing unfinished events may already have caused an external effect.
+      await execute(
+        "UPDATE webhook_events SET attempt_number = 1 WHERE attempt_number = 0 AND status IN ('pending', 'failed', 'unresolved')",
       );
     },
   },
@@ -1756,7 +1772,7 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
           // in which case changes === 0 and this caller loses the race.
           const cas = this.sqlite
             .prepare(
-              "UPDATE webhook_events SET payload = ?, status = 'pending', error_message = NULL, processed_at = NULL, attempt_id = NULL, lease_owner = NULL, lease_expires_at = NULL, operation_key = COALESCE(operation_key, ?) WHERE id = ? AND status = 'failed'",
+              "UPDATE webhook_events SET payload = ?, status = 'pending', error_message = NULL, processed_at = NULL, attempt_number = CASE WHEN attempt_number = 0 THEN 1 ELSE attempt_number END, attempt_id = NULL, lease_owner = NULL, lease_expires_at = NULL, operation_key = COALESCE(operation_key, ?) WHERE id = ? AND status = 'failed'",
             )
             .run(JSON.stringify(input.payload), operationKey, record.id);
 
@@ -1830,7 +1846,7 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
         // Compare-and-set: only claim execution if the row is still 'failed'.
         // RETURNING id lets us detect whether the UPDATE matched any row.
         const cas = await this.requirePostgres().query<{ id: string }>(
-          "UPDATE webhook_events SET payload = $1::jsonb, status = 'pending', error_message = NULL, processed_at = NULL, attempt_id = NULL, lease_owner = NULL, lease_expires_at = NULL, operation_key = COALESCE(operation_key, $2) WHERE id = $3 AND status = 'failed' RETURNING id",
+          "UPDATE webhook_events SET payload = $1::jsonb, status = 'pending', error_message = NULL, processed_at = NULL, attempt_number = CASE WHEN attempt_number = 0 THEN 1 ELSE attempt_number END, attempt_id = NULL, lease_owner = NULL, lease_expires_at = NULL, operation_key = COALESCE(operation_key, $2) WHERE id = $3 AND status = 'failed' RETURNING id",
           [JSON.stringify(input.payload), operationKey, record.id],
         );
 
@@ -1904,7 +1920,7 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
     if (this.sqlite) {
       const result = this.sqlite
         .prepare(
-          "UPDATE webhook_events SET attempt_id = ?, attempt_number = attempt_number + 1, lease_owner = ?, lease_expires_at = ? WHERE id = ? AND status = 'pending' AND (lease_expires_at IS NULL OR lease_expires_at < ?)",
+          "UPDATE webhook_events SET attempt_id = ?, attempt_number = attempt_number + 1, lease_owner = ?, lease_expires_at = ? WHERE id = ? AND status = 'pending' AND attempt_number = 0 AND (lease_expires_at IS NULL OR lease_expires_at < ?)",
         )
         .run(input.attemptId, input.leaseOwner, input.leaseExpiresAt, input.id, now);
 
@@ -1920,7 +1936,7 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
     }
 
     const response = await this.requirePostgres().query<Record<string, unknown>>(
-      "UPDATE webhook_events SET attempt_id = $1, attempt_number = attempt_number + 1, lease_owner = $2, lease_expires_at = $3 WHERE id = $4 AND status = 'pending' AND (lease_expires_at IS NULL OR lease_expires_at < $5) RETURNING *",
+      "UPDATE webhook_events SET attempt_id = $1, attempt_number = attempt_number + 1, lease_owner = $2, lease_expires_at = $3 WHERE id = $4 AND status = 'pending' AND attempt_number = 0 AND (lease_expires_at IS NULL OR lease_expires_at < $5) RETURNING *",
       [input.attemptId, input.leaseOwner, input.leaseExpiresAt, input.id, now],
     );
 
@@ -1933,18 +1949,129 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
     leaseOwner: string;
     leaseDurationMs: number;
   }): Promise<WebhookEventRecord | null> {
-    if (!Number.isSafeInteger(input.leaseDurationMs) || input.leaseDurationMs <= 0) {
+    if (
+      !Number.isSafeInteger(input.leaseDurationMs) ||
+      input.leaseDurationMs <= 0 ||
+      input.leaseDurationMs > 86400000
+    ) {
       throw new RangeError('Webhook lease duration must be a positive safe integer');
     }
+    const attemptId = randomUUID();
+    if (this.sqlite) {
+      const row = this.sqlite
+        .prepare(
+          `UPDATE webhook_events SET attempt_id = ?, attempt_number = attempt_number + 1, lease_owner = ?,
+        lease_expires_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '+' || ? || ' seconds') WHERE id = ? AND status = 'pending'
+        AND attempt_number = 0 AND (lease_expires_at IS NULL OR lease_expires_at <= strftime('%Y-%m-%dT%H:%M:%fZ', 'now')) RETURNING *`,
+        )
+        .get(attemptId, input.leaseOwner, input.leaseDurationMs / 1000, input.id) as Record<
+        string,
+        unknown
+      > | null;
+      return row ? this.mapWebhookRow(row) : null;
+    }
+    const response = await this.requirePostgres().query<Record<string, unknown>>(
+      `UPDATE webhook_events SET attempt_id = $1, attempt_number = attempt_number + 1, lease_owner = $2,
+      lease_expires_at = clock_timestamp() + ($3 * interval '1 millisecond') WHERE id = $4 AND status = 'pending' AND attempt_number = 0
+      AND (lease_expires_at IS NULL OR lease_expires_at <= clock_timestamp()) RETURNING *`,
+      [attemptId, input.leaseOwner, input.leaseDurationMs, input.id],
+    );
+    return response.rows[0] ? this.mapWebhookRow(response.rows[0]) : null;
+  }
 
-    const now = Date.now();
-    return this.claimWebhookEventAttempt({
-      id: input.id,
-      attemptId: randomUUID(),
-      leaseOwner: input.leaseOwner,
-      leaseExpiresAt: new Date(now + input.leaseDurationMs).toISOString(),
-      nowIso: new Date(now).toISOString(),
-    });
+  public async claimWebhookRecovery(input: {
+    id: string;
+    leaseOwner: string;
+    leaseDurationMs: number;
+  }): Promise<WebhookEventRecord | null> {
+    if (
+      !input.id.trim() ||
+      !input.leaseOwner.trim() ||
+      !Number.isSafeInteger(input.leaseDurationMs) ||
+      input.leaseDurationMs < 1 ||
+      input.leaseDurationMs > 86400000
+    )
+      throw new RangeError('Invalid webhook recovery lease');
+    const attemptId = randomUUID();
+    if (this.sqlite) {
+      const row = this.sqlite
+        .prepare(
+          `UPDATE webhook_events SET status = 'unresolved', attempt_id = ?, attempt_number = attempt_number + 1, lease_owner = ?,
+        lease_expires_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '+' || ? || ' seconds')
+        WHERE id = ? AND attempt_number > 0 AND status IN ('pending', 'unresolved')
+        AND (lease_expires_at IS NULL OR lease_expires_at <= strftime('%Y-%m-%dT%H:%M:%fZ', 'now')) RETURNING *`,
+        )
+        .get(attemptId, input.leaseOwner, input.leaseDurationMs / 1000, input.id) as Record<
+        string,
+        unknown
+      > | null;
+      return row ? this.mapWebhookRow(row) : null;
+    }
+    const response = await this.requirePostgres().query<Record<string, unknown>>(
+      `UPDATE webhook_events SET status = 'unresolved', attempt_id = $1, attempt_number = attempt_number + 1, lease_owner = $2,
+      lease_expires_at = clock_timestamp() + ($3 * interval '1 millisecond') WHERE id = $4 AND attempt_number > 0 AND status IN ('pending', 'unresolved')
+      AND (lease_expires_at IS NULL OR lease_expires_at <= clock_timestamp()) RETURNING *`,
+      [attemptId, input.leaseOwner, input.leaseDurationMs, input.id],
+    );
+    return response.rows[0] ? this.mapWebhookRow(response.rows[0]) : null;
+  }
+
+  public async completeWebhookRecovery(input: {
+    id: string;
+    attemptId: string;
+    leaseOwner: string;
+    status: 'processed' | 'failed' | 'unresolved';
+    result: PaymentRailOperation | null;
+  }): Promise<boolean> {
+    const parsed = input.result === null ? null : parseRecoveredOperation(input.result);
+    if (
+      !['processed', 'failed', 'unresolved'].includes(input.status) ||
+      (input.result !== null && parsed === null) ||
+      (parsed === null && input.status !== 'unresolved') ||
+      (parsed?.status === 'succeeded' && input.status !== 'processed') ||
+      (parsed?.status === 'failed' && input.status !== 'failed') ||
+      ((parsed?.status === 'pending' || parsed?.status === 'unknown') &&
+        input.status !== 'unresolved')
+    ) {
+      throw new RangeError('Invalid webhook recovery result');
+    }
+    const result = parsed === null ? null : JSON.stringify(parsed);
+    if (this.sqlite) {
+      const updated = this.sqlite
+        .prepare(
+          `UPDATE webhook_events SET status = ?, recovery_result = ?, processed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
+        lease_owner = NULL, lease_expires_at = NULL WHERE id = ? AND attempt_id = ? AND lease_owner = ? AND status = 'unresolved'
+        AND lease_expires_at > strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+        AND (? IS NULL OR (COALESCE(operation_key, provider || ':' || event_id) = ? AND provider = ?))`,
+        )
+        .run(
+          input.status,
+          result,
+          input.id,
+          input.attemptId,
+          input.leaseOwner,
+          parsed?.operationId ?? null,
+          parsed?.operationId ?? null,
+          parsed?.provider ?? null,
+        );
+      return updated.changes > 0;
+    }
+    const updated = await this.requirePostgres().query<{ id: string }>(
+      `UPDATE webhook_events SET status = $1, recovery_result = $2::jsonb, processed_at = clock_timestamp(),
+      lease_owner = NULL, lease_expires_at = NULL WHERE id = $3 AND attempt_id = $4 AND lease_owner = $5 AND status = 'unresolved'
+      AND lease_expires_at > clock_timestamp()
+      AND ($6::text IS NULL OR (COALESCE(operation_key, provider || ':' || event_id) = $6 AND provider = $7)) RETURNING id`,
+      [
+        input.status,
+        result,
+        input.id,
+        input.attemptId,
+        input.leaseOwner,
+        parsed?.operationId ?? null,
+        parsed?.provider ?? null,
+      ],
+    );
+    return updated.rows.length > 0;
   }
 
   public async completeWebhookAttempt(input: {
@@ -1960,14 +2087,14 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
     if (this.sqlite) {
       const result = this.sqlite
         .prepare(
-          "UPDATE webhook_events SET status = ?, error_message = ?, processed_at = ?, lease_owner = NULL, lease_expires_at = NULL WHERE id = ? AND attempt_id = ? AND lease_owner = ? AND status = 'pending'",
+          "UPDATE webhook_events SET status = ?, error_message = ?, processed_at = ?, lease_owner = NULL, lease_expires_at = NULL WHERE id = ? AND attempt_id = ? AND lease_owner = ? AND status = 'pending' AND lease_expires_at > strftime('%Y-%m-%dT%H:%M:%fZ', 'now')",
         )
         .run(input.status, errorMessage, processedAt, input.id, input.attemptId, input.leaseOwner);
       return result.changes > 0;
     }
 
     const result = await this.requirePostgres().query<{ id: string }>(
-      "UPDATE webhook_events SET status = $1, error_message = $2, processed_at = $3, lease_owner = NULL, lease_expires_at = NULL WHERE id = $4 AND attempt_id = $5 AND lease_owner = $6 AND status = 'pending' RETURNING id",
+      "UPDATE webhook_events SET status = $1, error_message = $2, processed_at = $3, lease_owner = NULL, lease_expires_at = NULL WHERE id = $4 AND attempt_id = $5 AND lease_owner = $6 AND status = 'pending' AND lease_expires_at > clock_timestamp() RETURNING id",
       [input.status, errorMessage, processedAt, input.id, input.attemptId, input.leaseOwner],
     );
     return result.rows.length > 0;
@@ -2292,6 +2419,12 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
   private mapWebhookRow(row: Record<string, unknown>): WebhookEventRecord {
     const payload = parseJsonObject(row.payload, this.provider === 'sqlite');
     const status = parsePersistedWebhookStatus(row.status);
+    const recoveryResult =
+      row.recovery_result == null
+        ? null
+        : parseRecoveredOperation(parseJsonObject(row.recovery_result, this.provider === 'sqlite'));
+    if (row.recovery_result != null && recoveryResult === null)
+      throw new MalformedPersistedDataError('Invalid persisted webhook recovery result');
 
     return {
       id: String(row.id),
@@ -2299,6 +2432,7 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
       provider: String(row.provider),
       payload,
       status,
+      ...(recoveryResult === null ? {} : { recoveryResult }),
       errorMessage: row.error_message ? String(row.error_message) : null,
       processedAt: row.processed_at ? String(row.processed_at) : null,
       createdAt: String(row.created_at),

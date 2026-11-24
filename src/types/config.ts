@@ -1,4 +1,5 @@
 import type { QueueJob } from '@/runtime/interfaces.ts';
+import type { PaymentRailOperation } from '@/types/transaction.ts';
 
 /**
  * Configuration Types for Anchor-Kit
@@ -700,6 +701,13 @@ export interface AnchorKitConfig {
      * @optional - defaults to 30000
      */
     timeoutMs?: number;
+
+    /** Read-only lookup of an existing provider operation by its stable operation key. */
+    recoverOperation?: (input: {
+      operationKey: string;
+      provider: string;
+      eventId: string;
+    }) => Promise<PaymentRailOperation | null>;
 
     /**
      * Called after webhook event verification and persistence.

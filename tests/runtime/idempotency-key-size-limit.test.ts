@@ -162,6 +162,12 @@ function makeFakeDb(rejectOnIdempotency = false): {
     async insertOrGetWebhookEvent() {
       throw new Error('Not implemented in this stub');
     },
+    async claimWebhookRecovery() {
+      return null;
+    },
+    async completeWebhookRecovery() {
+      return false;
+    },
     async claimWebhookAttempt() {
       return null;
     },

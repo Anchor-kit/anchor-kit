@@ -63,6 +63,8 @@ describe('AnchorInstance pre-init router access', () => {
       deletePendingIdempotencyRecord: unexpectedDatabaseCall,
       insertOrGetWebhookEvent: unexpectedDatabaseCall,
       claimWebhookAttempt: unexpectedDatabaseCall,
+      claimWebhookRecovery: unexpectedDatabaseCall,
+      completeWebhookRecovery: unexpectedDatabaseCall,
       completeWebhookAttempt: unexpectedDatabaseCall,
       updateWebhookEventStatus: unexpectedDatabaseCall,
       insertOrGetSettlementJob: unexpectedDatabaseCall,
