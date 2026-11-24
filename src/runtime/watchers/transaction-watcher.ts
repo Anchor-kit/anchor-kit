@@ -136,12 +136,9 @@ export class TransactionWatcher implements Watcher {
     const cutoff = new Date(Date.now() - this.transactionTimeoutMs).toISOString();
     const pendingTransactions = await this.database.listPendingTransactionsBefore(cutoff);
 
-    for (const transaction of pendingTransactions) {
-      await this.queue.enqueue({
-        type: 'expire_transaction',
-        payload: { transactionId: transaction.id },
-      });
-    }
+    // A timeout cannot establish whether the user sent the external payment.
+    // Keep stale transfers pending until a rail status lookup can distinguish
+    // missing payments from delayed or already-paid transfers.
 
     const watcherTaskId = randomUUID();
     await this.database.insertWatcherTask({
