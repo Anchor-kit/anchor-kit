@@ -42,3 +42,13 @@ export type {
 } from './runtime/interfaces.ts';
 export { MockKycVerificationProvider } from './runtime/kyc/mock-provider.ts';
 export type { ExpressLikeMiddleware } from './runtime/http/express-router.ts';
+
+export { AnchorClient, AnchorClientError } from './client/anchor-client.ts';
+export type {
+  AnchorClientOptions,
+  AuthChallenge,
+  AuthToken,
+  DepositRequest,
+  InteractiveResponse,
+  TransactionResponse,
+} from './client/anchor-client.ts';
