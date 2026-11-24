@@ -1,5 +1,5 @@
 import { makeSqliteDbUrlForTests } from '@/core/factory.ts';
-import { createAnchor, type AnchorInstance } from '@/index.ts';
+import { createAnchor, utils, type AnchorInstance } from '@/index.ts';
 import type { DatabaseAdapter } from '@/runtime/interfaces.ts';
 import type { AnchorPlugin } from '@/types/plugin.ts';
 import { ACCESS_TOKEN_AUDIENCE, ACCESS_TOKEN_ISSUER } from '@/runtime/http/express-router-impl.ts';
@@ -1592,6 +1592,51 @@ describe('MVP Express-mounted integration', () => {
     );
     expect(response.body.account).toBe(clientKeypair.publicKey());
     expect(response.body).not.toHaveProperty('idempotency_replay');
+    expect(response.body).not.toHaveProperty('type');
+    expect(response.body).not.toHaveProperty('url');
+  });
+
+  it('6b) standard SEP-24 form initiation returns a scoped URL and stable ID', async () => {
+    const request = {
+      method: 'POST',
+      path: '/transactions/deposit/interactive',
+      headers: {
+        'content-type': 'application/x-www-form-urlencoded',
+        authorization: `Bearer ${accessToken}`,
+        'idempotency-key': 'sep24-standard-initiation',
+        'x-forwarded-for': '10.0.0.99',
+      },
+      rawBody: new URLSearchParams({ asset_code: 'USDC', amount: '25.5' }).toString(),
+    };
+    const response = await invoke(request);
+
+    expect(response.status).toBe(200);
+    expect(Object.keys(response.body).sort()).toEqual(['id', 'type', 'url']);
+    expect(response.body.type).toBe('interactive_customer_info_needed');
+    const id = String(response.body.id);
+    const url = new URL(String(response.body.url));
+    expect(url.origin).toBe('https://anchor.example.com');
+    expect(url.pathname).toBe(`/deposit/${encodeURIComponent(id)}`);
+    expect(response.headers['cache-control']).toBe('no-store');
+
+    const session = url.searchParams.get('token');
+    expect(session).toBeTruthy();
+    await expect(
+      utils.verifyInteractiveSession(session ?? '', 'jwt-test-secret', id, 'deposit'),
+    ).resolves.toEqual({
+      account: clientKeypair.publicKey(),
+      transactionId: id,
+      actions: ['deposit'],
+    });
+    await expect(
+      utils.verifyInteractiveSession(session ?? '', 'jwt-test-secret', 'other-id', 'deposit'),
+    ).rejects.toThrow('Interactive session is not authorized for this action');
+
+    const replay = await invoke(request);
+    expect(replay.status).toBe(200);
+    expect(replay.body.id).toBe(id);
+    expect(replay.body.type).toBe('interactive_customer_info_needed');
+    expect(replay.body).toHaveProperty('url');
   });
 
   it('6a) decimal deposit amounts preserve their exact string formatting through create, persist, and lookup', async () => {
