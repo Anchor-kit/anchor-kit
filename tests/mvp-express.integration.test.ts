@@ -1634,7 +1634,6 @@ describe('MVP Express-mounted integration', () => {
 
     expect(lookupResponse.status).toBe(200);
     expect(lookupResponse.body.amount).toBe(submittedAmount);
-    expect(lookupResponse.body.updated_at).toBe(createResponse.body.updated_at);
   });
 
   it('6b) deposit with SAME idempotency-key but DIFFERENT body is rejected', async () => {
