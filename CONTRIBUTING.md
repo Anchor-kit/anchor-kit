@@ -139,6 +139,13 @@ A task is considered "Done" when:
 - [ ] Documentation is updated.
 - [ ] PR is approved by a maintainer.
 
+## Rail event matching
+
+Run `bun test tests/runtime/rail-event-matching.test.ts`; all assertions should pass.
+`matchRailEvent` compares a previously verified provider event against stored
+expectations using exact decimal arithmetic. It does not verify signatures, persist
+replays, or transition a deposit. Those steps must be completed before settlement.
+
 ## License
 
 By contributing, you agree that your contributions will be licensed under its MIT License.

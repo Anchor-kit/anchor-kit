@@ -42,3 +42,6 @@ export type {
 } from './runtime/interfaces.ts';
 export { MockKycVerificationProvider } from './runtime/kyc/mock-provider.ts';
 export type { ExpressLikeMiddleware } from './runtime/http/express-router.ts';
+
+export { matchRailEvent } from './runtime/settlement/match-rail-event.ts';
+export type { RailMatchResult } from './runtime/settlement/match-rail-event.ts';
