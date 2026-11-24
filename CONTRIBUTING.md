@@ -142,3 +142,9 @@ A task is considered "Done" when:
 ## License
 
 By contributing, you agree that your contributions will be licensed under its MIT License.
+
+## SEP-24 info check
+
+Run `bun test tests/runtime/sep24-info.test.ts` to check the public capability
+response. The test expects one passing case; deposits and withdrawals remain
+disabled until their payment flows are wired.

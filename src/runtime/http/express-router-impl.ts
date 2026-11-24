@@ -655,11 +655,44 @@ async function handleHealth(res: ServerResponse, method = 'GET'): Promise<void> 
 async function handleInfo(context: ExpressRouterContext, res: ServerResponse): Promise<void> {
   const fullConfig = context.config.getConfig();
   const metadata = fullConfig.metadata;
+  // Payment rail settlement and interactive withdrawals are not wired into this runtime.
+  // Advertise them only when the full flow is available, not from config intent alone.
+  // SEP-24 reserves "native" for XLM, so an issued asset with that code cannot
+  // be represented in this response without misidentifying it.
+  const protocolAssets = fullConfig.assets.assets.filter(
+    (asset, index, assets) =>
+      asset.code !== 'native' &&
+      assets.findIndex((candidate) => candidate.code === asset.code) === index,
+  );
+  const deposit = Object.fromEntries(
+    protocolAssets.map((asset) => [
+      asset.code === 'XLM' ? 'native' : asset.code,
+      {
+        enabled: false,
+        ...(asset.min_amount === undefined ? {} : { min_amount: asset.min_amount }),
+        ...(asset.max_amount === undefined ? {} : { max_amount: asset.max_amount }),
+      },
+    ]),
+  );
+  const withdraw = Object.fromEntries(
+    protocolAssets.map((asset) => [
+      asset.code === 'XLM' ? 'native' : asset.code,
+      { enabled: false },
+    ]),
+  );
   const responseBody: Record<string, unknown> = {
+    deposit,
+    withdraw,
+    fee: { enabled: false },
+    features: { account_creation: false, claimable_balances: false },
     name: fullConfig.operational?.name ?? 'Anchor-Kit Anchor',
     network: fullConfig.network.network,
     network_passphrase: context.networkPassphrase,
-    assets: fullConfig.assets.assets,
+    assets: fullConfig.assets.assets.map((asset) => ({
+      ...asset,
+      deposits_enabled: false,
+      withdrawals_enabled: false,
+    })),
     version,
     metadata: {
       ...(metadata?.tomlUrl === undefined ? {} : { tomlUrl: metadata.tomlUrl }),
@@ -685,12 +718,11 @@ async function handleInfo(context: ExpressRouterContext, res: ServerResponse): P
             features: {
               ...(metadata.features.supportsInteractiveDeposits === undefined
                 ? {}
-                : { supportsInteractiveDeposits: metadata.features.supportsInteractiveDeposits }),
+                : { supportsInteractiveDeposits: false }),
               ...(metadata.features.supportsInteractiveWithdrawals === undefined
                 ? {}
                 : {
-                    supportsInteractiveWithdrawals:
-                      metadata.features.supportsInteractiveWithdrawals,
+                    supportsInteractiveWithdrawals: false,
                   }),
               ...(metadata.features.supportsAsyncTransactionStatus === undefined
                 ? {}
