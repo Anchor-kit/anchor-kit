@@ -688,6 +688,11 @@ describe('MVP Express-mounted integration', () => {
       );
       expect(challengeTx.operations).toHaveLength(2);
       expect(challengeTx.operations[0]?.type).toBe('manageData');
+      expect(challengeTx.operations[0]).toMatchObject({
+        type: 'manageData',
+        name: 'anchor.example.com auth',
+        source: clientKeypair.publicKey(),
+      });
       expect(challengeTx.operations[1]).toMatchObject({
         type: 'manageData',
         name: 'client_domain',
