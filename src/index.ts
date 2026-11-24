@@ -42,3 +42,9 @@ export type {
 } from './runtime/interfaces.ts';
 export { MockKycVerificationProvider } from './runtime/kyc/mock-provider.ts';
 export type { ExpressLikeMiddleware } from './runtime/http/express-router.ts';
+
+export { assessIssuedAssetRecipient } from './runtime/settlement/recipient-readiness.ts';
+export type {
+  RecipientReadiness,
+  RecipientSnapshot,
+} from './runtime/settlement/recipient-readiness.ts';
