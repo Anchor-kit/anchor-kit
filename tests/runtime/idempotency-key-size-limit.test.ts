@@ -189,6 +189,9 @@ function makeFakeDb(rejectOnIdempotency = false): {
     async updateSettlementJobStatus() {
       return false;
     },
+    async confirmSettlement() {
+      throw new Error('Unexpected database call');
+    },
     async cleanupOldRecords() {},
   };
 

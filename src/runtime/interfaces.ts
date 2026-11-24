@@ -150,6 +150,17 @@ export interface SettlementJobRecord {
   updatedAt: string;
 }
 
+export type ConfirmSettlementResult =
+  | {
+      outcome: 'completed' | 'replayed';
+      transaction: InteractiveTransactionRecord;
+    }
+  | {
+      outcome: 'conflict';
+      reason: 'not_found' | 'status_mismatch' | 'confirmation_mismatch' | 'hash_mismatch';
+      transaction: InteractiveTransactionRecord | null;
+    };
+
 export interface DatabaseAdapter {
   connect(): Promise<void>;
   disconnect(): Promise<void>;
@@ -289,6 +300,12 @@ export interface DatabaseAdapter {
     operationId: string;
     status: SettlementJobRecord['status'];
   }): Promise<boolean>;
+  confirmSettlement(input: {
+    transactionId: string;
+    transactionHash: string;
+    amount: string;
+    recipient: string;
+  }): Promise<ConfirmSettlementResult>;
   cleanupOldRecords(cutoffIso: string): Promise<void>;
 }
 

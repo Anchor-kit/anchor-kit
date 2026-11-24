@@ -42,6 +42,38 @@ postgresTest('SqlDatabaseAdapter – PostgreSQL integration', () => {
     });
   });
 
+  it('completes a matching Stellar settlement once under concurrent replay', async () => {
+    const transactionId = randomUUID();
+    const transactionHash = 'c'.repeat(64);
+    await db.insertInteractiveTransaction({
+      id: transactionId,
+      account: 'GTEST1234',
+      kind: 'deposit',
+      assetCode: 'USDC',
+      amount: '25.00',
+      amountOut: '22.50',
+      status: 'pending_stellar',
+    });
+
+    const results = await Promise.all(
+      Array.from({ length: 4 }, () =>
+        db.confirmSettlement({
+          transactionId,
+          transactionHash,
+          amount: '22.5',
+          recipient: 'GTEST1234',
+        }),
+      ),
+    );
+
+    expect(results.filter((result) => result.outcome === 'completed')).toHaveLength(1);
+    expect(results.filter((result) => result.outcome === 'replayed')).toHaveLength(3);
+    await expect(db.getInteractiveTransactionById(transactionId)).resolves.toMatchObject({
+      status: 'completed',
+      stellarTransactionHash: transactionHash,
+    });
+  });
+
   it('atomically deduplicates concurrent deliveries of the same webhook event', async () => {
     const eventId = `evt-${randomUUID()}`;
     const results = await Promise.all(
