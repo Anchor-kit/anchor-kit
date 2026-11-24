@@ -53,6 +53,7 @@ describe('AnchorInstance pre-init router access', () => {
       markAuthChallengeConsumed: unexpectedDatabaseCall,
       insertInteractiveTransaction: unexpectedDatabaseCall,
       getInteractiveTransactionById: unexpectedDatabaseCall,
+      findInteractiveTransaction: unexpectedDatabaseCall,
       listPendingTransactionsBefore: unexpectedDatabaseCall,
       updateTransactionStatus: unexpectedDatabaseCall,
       getIdempotencyRecord: unexpectedDatabaseCall,

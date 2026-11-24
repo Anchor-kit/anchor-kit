@@ -4,6 +4,7 @@ import type {
   DatabaseAdapter,
   IdempotencyRecord,
   InteractiveTransactionRecord,
+  InteractiveTransactionIdentifier,
   TransactionTransitionResult,
   SettlementJobRecord,
   WatcherTaskRecord,
@@ -1217,6 +1218,31 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
     return this.mapTransactionRow(row);
   }
 
+  public async findInteractiveTransaction(input: {
+    account: string;
+    identifier: InteractiveTransactionIdentifier;
+  }): Promise<InteractiveTransactionRecord | null> {
+    const column =
+      input.identifier.kind === 'id'
+        ? 'id'
+        : input.identifier.kind === 'stellar_transaction_id'
+          ? 'stellar_transaction_hash'
+          : 'rail_reference';
+    if (this.sqlite) {
+      const rows = this.sqlite
+        .prepare(
+          `SELECT * FROM interactive_transactions WHERE account = ? AND ${column} = ? LIMIT 2`,
+        )
+        .all(input.account, input.identifier.value) as Record<string, unknown>[];
+      return rows.length === 1 ? this.mapTransactionRow(rows[0]) : null;
+    }
+    const result = await this.requirePostgres().query<Record<string, unknown>>(
+      `SELECT * FROM interactive_transactions WHERE account = $1 AND ${column} = $2 LIMIT 2`,
+      [input.account, input.identifier.value],
+    );
+    return result.rows.length === 1 ? this.mapTransactionRow(result.rows[0]) : null;
+  }
+
   public async listPendingTransactionsBefore(
     cutoffIso: string,
   ): Promise<InteractiveTransactionRecord[]> {
@@ -2254,8 +2280,10 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
           ? null
           : String(row.stellar_transaction_hash),
       status,
-      createdAt: String(row.created_at),
-      updatedAt: String(row.updated_at),
+      createdAt:
+        row.created_at instanceof Date ? row.created_at.toISOString() : String(row.created_at),
+      updatedAt:
+        row.updated_at instanceof Date ? row.updated_at.toISOString() : String(row.updated_at),
     };
   }
 

@@ -101,6 +101,9 @@ function makeFakeDb(rejectOnIdempotency = false): {
         updatedAt: now,
       };
     },
+    async findInteractiveTransaction() {
+      return null;
+    },
     async getInteractiveTransactionById() {
       return null;
     },

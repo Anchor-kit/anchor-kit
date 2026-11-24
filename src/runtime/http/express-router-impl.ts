@@ -1,7 +1,12 @@
 import type { AnchorConfig } from '@/core/config.ts';
 import { ConfigError, PayloadTooLargeError, ValidationError } from '@/core/errors.ts';
 import { InMemoryRateLimiter, type RateLimitRule } from '@/runtime/http/rate-limiter.ts';
-import type { AccountSigner, DatabaseAdapter, WebhookProcessor } from '@/runtime/interfaces.ts';
+import type {
+  AccountSigner,
+  DatabaseAdapter,
+  InteractiveTransactionIdentifier,
+  WebhookProcessor,
+} from '@/runtime/interfaces.ts';
 import type { PluginRouteContext, RouteDefinition } from '@/types/foundation.ts';
 import type { AnchorPluginHooks, DepositRequestBody } from '@/types/plugin.ts';
 import { IdempotencyUtils } from '../../utils/idempotency.ts';
@@ -384,6 +389,7 @@ const BUILT_IN_PATHS = new Set([
   '/auth/challenge',
   '/auth/token',
   '/transactions/deposit/interactive',
+  '/transaction',
   '/webhooks/events',
 ]);
 const BUILT_IN_TRANSACTION_PATH = /^\/transactions\/[^/]+$/;
@@ -739,7 +745,13 @@ async function handleInfo(context: ExpressRouterContext, res: ServerResponse): P
 
 function allowedMethodsForPath(path: string): readonly string[] | undefined {
   if (path === '/auth') return ['GET', 'POST'];
-  if (path === '/health' || path === '/info' || path === '/auth/challenge') return ['GET'];
+  if (
+    path === '/health' ||
+    path === '/info' ||
+    path === '/auth/challenge' ||
+    path === '/transaction'
+  )
+    return ['GET'];
   if (
     path === '/auth/token' ||
     path === '/transactions/deposit/interactive' ||
@@ -1458,6 +1470,73 @@ async function handleTransaction(
   sendJson(res, 200, responseData);
 }
 
+async function handleSep24Transaction(
+  context: ExpressRouterContext,
+  req: IncomingMessage,
+  res: ServerResponse,
+): Promise<void> {
+  res.setHeader('Cache-Control', 'no-store');
+  const auth = authenticate(context, req);
+  if (!auth) {
+    sendJsonUnauthorized(res, {
+      error: 'unauthorized',
+      message: 'Missing or invalid bearer token',
+    });
+    return;
+  }
+  const params = parseUrl(req).searchParams;
+  const identifiers = ['id', 'stellar_transaction_id', 'external_transaction_id'] as const;
+  const supplied = identifiers.flatMap((kind) =>
+    params.getAll(kind).map((value) => ({ kind, value })),
+  );
+  if (
+    supplied.length !== 1 ||
+    !supplied[0].value.trim() ||
+    Buffer.byteLength(supplied[0].value, 'utf8') > 256 ||
+    Array.from(supplied[0].value).some((character) => {
+      const code = character.charCodeAt(0);
+      return code < 32 || code === 127;
+    }) ||
+    supplied[0].value !== supplied[0].value.trim()
+  ) {
+    sendJson(res, 400, {
+      error: 'invalid_request',
+      message: 'Provide exactly one non-empty transaction identifier',
+    });
+    return;
+  }
+  const identifier: InteractiveTransactionIdentifier = supplied[0];
+  const transaction = await context.database.findInteractiveTransaction({
+    account: auth.account,
+    identifier,
+  });
+  if (!transaction || transaction.account !== auth.account) {
+    sendJson(res, 404, { error: 'not_found', message: 'Transaction not found' });
+    return;
+  }
+  const interactiveDomain = context.config.get('server').interactiveDomain;
+  sendJson(res, 200, {
+    transaction: {
+      id: transaction.id,
+      kind: transaction.kind,
+      status: transaction.status,
+      started_at: transaction.createdAt,
+      ...(transaction.amountIn == null ? {} : { amount_in: transaction.amountIn }),
+      ...(transaction.amountOut == null ? {} : { amount_out: transaction.amountOut }),
+      ...(transaction.amountFee == null ? {} : { amount_fee: transaction.amountFee }),
+      ...(transaction.stellarTransactionHash == null
+        ? {}
+        : { stellar_transaction_id: transaction.stellarTransactionHash }),
+      ...(transaction.railReference == null
+        ? {}
+        : { external_transaction_id: transaction.railReference }),
+      ...(interactiveDomain
+        ? { more_info_url: buildInteractiveUrl(interactiveDomain, transaction.id) }
+        : {}),
+    },
+  });
+}
+
 const MAX_PROVIDER_IDENTIFIER_LENGTH = 64;
 
 function normalizeProviderIdentifier(value: unknown): string | null {
@@ -1563,6 +1642,7 @@ const TRANSACTION_PATH_RE = /^\/transactions\/([^/]*)$/;
 const KNOWN_ROUTES: Record<string, string[]> = {
   '/health': ['GET'],
   '/info': ['GET'],
+  '/transaction': ['GET'],
   '/auth': ['GET', 'POST'],
   '/auth/challenge': ['GET'],
   '/auth/token': ['POST'],
@@ -1641,6 +1721,11 @@ export async function handleExpressRouterRequest(
 
       if (method === 'POST' && path === '/transactions/deposit/interactive') {
         await handleDepositInteractive(context, req, res);
+        return;
+      }
+
+      if (method === 'GET' && path === '/transaction') {
+        await handleSep24Transaction(context, req, res);
         return;
       }
 
