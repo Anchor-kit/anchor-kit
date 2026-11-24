@@ -11,6 +11,8 @@ import type {
 import type { PluginRouteContext, RouteDefinition } from '@/types/foundation.ts';
 import type { AnchorPluginHooks, DepositRequestBody } from '@/types/plugin.ts';
 import { IdempotencyUtils } from '../../utils/idempotency.ts';
+import { createInteractiveInitiationResponse } from '@/core/sep24/interactive-response.ts';
+import { createInteractiveSession } from '@/utils/interactive-session.ts';
 import Big from 'big.js';
 import {
   Account,
@@ -329,6 +331,76 @@ async function parsePostJsonBody(
     }
     throw error;
   }
+}
+
+function parseUrlEncodedBody(rawBody: RawBodyValue): Record<string, unknown> {
+  const body = Object.create(null) as Record<string, unknown>;
+  for (const [key, value] of new URLSearchParams(toUtf8String(rawBody))) {
+    if (Object.hasOwn(body, key)) {
+      throw new ValidationError('Form fields must not be repeated');
+    }
+    body[key] = value;
+  }
+  return body;
+}
+
+async function parseDepositRequestBody(
+  req: IncomingMessage,
+  res: ServerResponse,
+  maxBodyBytes: number,
+): Promise<{
+  rawBody: RawBodyValue;
+  body: Record<string, unknown>;
+  isStandardSep24: boolean;
+} | null> {
+  const contentType = firstNonEmptyString(req.headers['content-type']);
+  const mediaType = contentType?.split(';', 1)[0]?.trim().toLowerCase();
+  if (mediaType !== 'application/x-www-form-urlencoded') {
+    const parsed = await parsePostJsonBody(req, res, maxBodyBytes);
+    return parsed ? { ...parsed, isStandardSep24: false } : null;
+  }
+
+  let rawBody: RawBodyValue;
+  try {
+    rawBody = await readRawBody(req, maxBodyBytes);
+  } catch (error) {
+    if (error instanceof PayloadTooLargeError) {
+      sendJson(res, 413, {
+        error: 'payload_too_large',
+        message: error.message,
+      });
+      return null;
+    }
+    throw error;
+  }
+
+  try {
+    return { rawBody, body: parseUrlEncodedBody(rawBody), isStandardSep24: true };
+  } catch (error) {
+    if (error instanceof ValidationError) {
+      sendJson(res, 400, { error: 'invalid_request', message: error.message });
+      return null;
+    }
+    throw error;
+  }
+}
+
+async function createStandardSep24Initiation(
+  context: ExpressRouterContext,
+  interactiveDomain: string,
+  account: string,
+  transactionId: string,
+) {
+  const session = await createInteractiveSession(
+    { account, transactionId, actions: ['deposit'] },
+    context.config.get('security').interactiveJwtSecret,
+  );
+  const url = new URL(buildInteractiveUrl(interactiveDomain, transactionId));
+  url.searchParams.set('token', session);
+  return createInteractiveInitiationResponse({
+    id: transactionId,
+    url: url.toString(),
+  });
 }
 
 function sha256(input: string | Buffer | Uint8Array): string {
@@ -1307,7 +1379,7 @@ async function handleDepositInteractive(
     return;
   }
 
-  const parsedBody = await parsePostJsonBody(req, res, context.maxBodyBytes);
+  const parsedBody = await parseDepositRequestBody(req, res, context.maxBodyBytes);
   if (!parsedBody) {
     return;
   }
@@ -1467,6 +1539,33 @@ async function handleDepositInteractive(
         return;
       }
 
+      if (parsedBody.isStandardSep24) {
+        if (typeof responseBody.id !== 'string') {
+          res.setHeader('Retry-After', '1');
+          sendJson(res, 503, {
+            error: 'idempotency_response_unavailable',
+            message: 'The saved response is unavailable; retry this request',
+          });
+          return;
+        }
+        try {
+          const standardResponse = await createStandardSep24Initiation(
+            context,
+            serverConfig.interactiveDomain,
+            auth.account,
+            responseBody.id,
+          );
+          res.setHeader('Cache-Control', 'no-store');
+          sendJson(res, 200, { ...standardResponse });
+        } catch {
+          sendJson(res, 500, {
+            error: 'server_misconfigured',
+            message: 'SEP-24 interactive sessions could not be created',
+          });
+        }
+        return;
+      }
+
       sendJson(res, idempotencyRecord.statusCode, {
         ...responseBody,
         idempotency_replay: true,
@@ -1476,7 +1575,7 @@ async function handleDepositInteractive(
 
     const transactionId = randomUUID();
     const createdAt = new Date().toISOString();
-    const responseBody = {
+    const legacyResponseBody = {
       id: transactionId,
       kind: 'deposit',
       status: 'pending_user_transfer_start',
@@ -1488,8 +1587,19 @@ async function handleDepositInteractive(
       created_at: createdAt,
       updated_at: createdAt,
     };
+    let responseBody: Record<string, unknown> = legacyResponseBody;
 
     try {
+      if (parsedBody.isStandardSep24) {
+        responseBody = {
+          ...(await createStandardSep24Initiation(
+            context,
+            serverConfig.interactiveDomain,
+            auth.account,
+            transactionId,
+          )),
+        };
+      }
       throwIfRequestAborted(req);
       await context.database.createDepositWithIdempotency({
         transaction: {
@@ -1505,7 +1615,7 @@ async function handleDepositInteractive(
           scope,
           idempotencyKey,
           requestHash,
-          statusCode: 201,
+          statusCode: parsedBody.isStandardSep24 ? 200 : 201,
           responseBody: JSON.stringify(responseBody),
         },
       });
@@ -1516,11 +1626,29 @@ async function handleDepositInteractive(
       throw error;
     }
 
-    sendJson(res, 201, responseBody);
+    if (parsedBody.isStandardSep24) res.setHeader('Cache-Control', 'no-store');
+    sendJson(res, parsedBody.isStandardSep24 ? 200 : 201, responseBody);
     return;
   }
 
   const transactionId = randomUUID();
+  let standardResponse: ReturnType<typeof createInteractiveInitiationResponse> | null = null;
+  if (parsedBody.isStandardSep24) {
+    try {
+      standardResponse = await createStandardSep24Initiation(
+        context,
+        serverConfig.interactiveDomain,
+        auth.account,
+        transactionId,
+      );
+    } catch {
+      sendJson(res, 500, {
+        error: 'server_misconfigured',
+        message: 'SEP-24 interactive sessions could not be created',
+      });
+      return;
+    }
+  }
   throwIfRequestAborted(req);
   const created = await context.database.insertInteractiveTransaction({
     id: transactionId,
@@ -1531,7 +1659,7 @@ async function handleDepositInteractive(
     status: 'pending_user_transfer_start',
   });
 
-  sendJson(res, 201, {
+  const legacyResponseBody = {
     id: created.id,
     kind: created.kind,
     status: created.status,
@@ -1542,7 +1670,13 @@ async function handleDepositInteractive(
     interactive_url: buildInteractiveUrl(serverConfig.interactiveDomain, created.id),
     created_at: created.createdAt,
     updated_at: created.updatedAt,
-  });
+  };
+  if (standardResponse) {
+    res.setHeader('Cache-Control', 'no-store');
+    sendJson(res, 200, { ...standardResponse });
+  } else {
+    sendJson(res, 201, legacyResponseBody);
+  }
 }
 
 async function handleTransaction(
