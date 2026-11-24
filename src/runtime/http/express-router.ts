@@ -21,6 +21,7 @@ export type ExpressLikeMiddleware = (
 interface RouterDependencies {
   config: AnchorConfig;
   database: DatabaseAdapter;
+  isReady?: () => boolean;
   webhookProcessor: WebhookProcessor;
   depositRequestHooks?: NonNullable<AnchorPluginHooks['onDepositRequest']>[];
   sep10ChallengeHooks?: NonNullable<AnchorPluginHooks['onSep10Challenge']>[];
@@ -54,6 +55,7 @@ export class AnchorExpressRouter {
     this.context = {
       config,
       database: dependencies.database,
+      isReady: dependencies.isReady ?? (() => false),
       webhookProcessor: dependencies.webhookProcessor,
       depositRequestHooks: dependencies.depositRequestHooks ?? [],
       sep10ChallengeHooks: dependencies.sep10ChallengeHooks ?? [],

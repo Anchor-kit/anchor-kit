@@ -574,6 +574,18 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
     }
   }
 
+  public async checkReadiness(): Promise<void> {
+    if (this.sqlite) {
+      this.sqlite.prepare('SELECT 1 FROM anchor_kit_migrations LIMIT 1').get();
+      return;
+    }
+    if (this.postgres) {
+      await this.postgres.query('SELECT 1 FROM anchor_kit_migrations LIMIT 1');
+      return;
+    }
+    throw new ConfigError('Database not connected');
+  }
+
   public async disconnect(): Promise<void> {
     if (!this.sqlite && !this.postgres) {
       return;

@@ -188,6 +188,7 @@ function makeTestContext(
   return {
     config,
     database: dbAdapter,
+    isReady: () => false,
     webhookProcessor: new DefaultWebhookProcessor({
       config: config.getConfig(),
       database: dbAdapter,

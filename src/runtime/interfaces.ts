@@ -154,6 +154,8 @@ export interface DatabaseAdapter {
   connect(): Promise<void>;
   disconnect(): Promise<void>;
   migrate(): Promise<void>;
+  /** Check storage connectivity without exposing connection details. */
+  checkReadiness?(): Promise<void>;
 
   insertAuthChallenge(input: {
     id: string;
@@ -308,6 +310,7 @@ export interface QueueDrainStatus {
 }
 
 export interface QueueAdapter {
+  readonly isRunning?: boolean;
   readonly status?: QueueDrainStatus;
   enqueue(job: QueueJob): Promise<void>;
   start(worker: (job: QueueJob) => Promise<void>): Promise<void>;
@@ -315,6 +318,7 @@ export interface QueueAdapter {
 }
 
 export interface Watcher {
+  readonly isRunning?: boolean;
   readonly name: string;
   start(): Promise<void>;
   stop(): Promise<void>;

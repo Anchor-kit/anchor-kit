@@ -29,6 +29,10 @@ export class TransactionWatcher implements Watcher {
     this.retentionDays = options.retentionDays;
   }
 
+  public get isRunning(): boolean {
+    return this.timer !== null && this.stopPromise === null;
+  }
+
   public async start(): Promise<void> {
     if (this.stopPromise) {
       await this.stopPromise;

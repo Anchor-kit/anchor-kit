@@ -147,6 +147,15 @@ export class AnchorInstance {
           depositRequestHooks,
           sep10ChallengeHooks,
           pluginRoutes,
+          isReady: () =>
+            this.initialized &&
+            !this.initPromise &&
+            !this.shutdownPromise &&
+            !this.backgroundJobsPromise &&
+            !this.backgroundJobsStopPromise &&
+            this.backgroundJobsRunning &&
+            this.queue?.isRunning === true &&
+            this.watchers.every((watcher) => watcher.isRunning === true),
         }).getMiddleware();
 
         this.initialized = true;
