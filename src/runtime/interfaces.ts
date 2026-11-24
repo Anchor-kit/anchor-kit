@@ -150,7 +150,36 @@ export interface SettlementJobRecord {
   updatedAt: string;
 }
 
-export interface DatabaseAdapter {
+/** Ownership for one settlement-job attempt. Tokens must not be reused. */
+export interface SettlementJobLease {
+  job: SettlementJobRecord;
+  owner: string;
+  token: string;
+  expiresAt: string;
+  attempt: number;
+}
+
+export interface SettlementLeaseAdapter {
+  /** Lists pending jobs and expired leases; claim remains the ownership gate. */
+  listClaimableSettlementJobs(limit: number): Promise<SettlementJobRecord[]>;
+  claimSettlementJob(input: {
+    operationId: string;
+    owner: string;
+    durationMs: number;
+  }): Promise<SettlementJobLease | null>;
+  heartbeatSettlementJob(input: {
+    operationId: string;
+    token: string;
+    durationMs: number;
+  }): Promise<boolean>;
+  finishSettlementJob(input: {
+    operationId: string;
+    token: string;
+    status: 'pending' | 'completed' | 'failed';
+  }): Promise<boolean>;
+}
+
+export interface DatabaseAdapter extends SettlementLeaseAdapter {
   connect(): Promise<void>;
   disconnect(): Promise<void>;
   migrate(): Promise<void>;
@@ -285,6 +314,7 @@ export interface DatabaseAdapter {
   }): Promise<{ record: SettlementJobRecord; inserted: boolean }>;
   getSettlementJobByOperationId(operationId: string): Promise<SettlementJobRecord | null>;
   listPendingSettlementJobs(limit: number): Promise<SettlementJobRecord[]>;
+  /** @deprecated Status changes require a lease; this method rejects without one. */
   updateSettlementJobStatus(input: {
     operationId: string;
     status: SettlementJobRecord['status'];

@@ -34,6 +34,8 @@ export type {
   QueueDrainStatus,
   QueueAdapter,
   SettlementJobRecord,
+  SettlementJobLease,
+  SettlementLeaseAdapter,
   Watcher,
   WebhookEventRecord,
   WebhookProcessor,
