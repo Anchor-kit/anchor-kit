@@ -340,3 +340,27 @@ export interface WebhookProcessor {
     attemptCount?: number;
   }>;
 }
+
+export interface StellarAccountState {
+  accountId: string;
+  sequence: string;
+}
+
+export interface StellarTransactionState {
+  hash: string;
+  successful: boolean;
+  ledger: number;
+}
+
+export type StellarNetworkResult<T> =
+  | { status: 'found'; value: T }
+  | { status: 'not_found' }
+  | {
+      status: 'unavailable';
+      reason: 'network' | 'timeout' | 'invalid_response' | 'network_mismatch';
+    };
+
+export interface StellarNetworkClient {
+  getAccount(accountId: string): Promise<StellarNetworkResult<StellarAccountState>>;
+  getTransaction(hash: string): Promise<StellarNetworkResult<StellarTransactionState>>;
+}

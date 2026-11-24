@@ -10,6 +10,7 @@ export * from './types';
 export { AnchorInstance, createAnchor, makeSqliteDbUrlForTests } from './core/factory';
 export type { CreateAnchorOptions } from './core/factory';
 export * from './core/errors';
+export { HorizonNetworkClient } from './services/horizon-network-client.ts';
 export { LocalKeypairSigner } from './services/stellar-signer.ts';
 export type { StellarTransactionSigner } from './services/stellar-signer.ts';
 export * as utils from './utils';
@@ -25,6 +26,10 @@ export type { Memo, PaymentParams } from './utils';
 export type {
   AuthChallengeRecord,
   AccountSigner,
+  StellarAccountState,
+  StellarNetworkClient,
+  StellarNetworkResult,
+  StellarTransactionState,
   DatabaseAdapter,
   IdempotencyRecord,
   InteractiveTransactionRecord,

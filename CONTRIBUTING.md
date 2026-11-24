@@ -142,3 +142,9 @@ A task is considered "Done" when:
 ## License
 
 By contributing, you agree that your contributions will be licensed under its MIT License.
+
+## Horizon client check
+
+Run `bun test tests/runtime/horizon-network-client.test.ts` to verify account and
+transaction lookup. The test expects five passing cases, including missing
+accounts, unavailable servers, and a mismatched network passphrase.
