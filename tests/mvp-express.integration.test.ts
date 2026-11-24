@@ -1594,6 +1594,114 @@ describe('MVP Express-mounted integration', () => {
     expect(response.body).not.toHaveProperty('idempotency_replay');
   });
 
+  it('accepts equivalent urlencoded and multipart deposit fields with the same idempotency key', async () => {
+    const headers = {
+      'x-forwarded-for': '10.0.2.1',
+      authorization: `Bearer ${accessToken}`,
+      'idempotency-key': 'deposit-form-equivalent',
+    };
+    const form = await invoke({
+      method: 'POST',
+      path: '/transactions/deposit/interactive',
+      headers: { ...headers, 'content-type': 'application/x-www-form-urlencoded' },
+      rawBody: 'asset_code=USDC&amount=25.500',
+    });
+    expect(form.status).toBe(201);
+    const multipart =
+      '--example-boundary\r\nContent-Disposition: form-data; name="asset_code"\r\n\r\nUSDC\r\n--example-boundary\r\nContent-Disposition: form-data; name="amount"\r\n\r\n25.500\r\n--example-boundary--\r\n';
+    const replay = await invoke({
+      method: 'POST',
+      path: '/transactions/deposit/interactive',
+      headers: { ...headers, 'content-type': 'multipart/form-data; boundary=example-boundary' },
+      rawBody: multipart,
+    });
+    expect(replay.status).toBe(201);
+    expect(replay.body.id).toBe(form.body.id);
+    expect(replay.body.idempotency_replay).toBe(true);
+    expect(replay.body.amount).toBe('25.500');
+  });
+
+  it('rejects duplicate or malformed form fields before storing a deposit', async () => {
+    const db = (anchor as unknown as { database: DatabaseAdapter }).database;
+    const insert = vi.spyOn(db, 'insertInteractiveTransaction');
+    const create = vi.spyOn(db, 'createDepositWithIdempotency');
+    try {
+      const cases = [
+        { type: 'application/x-www-form-urlencoded', body: 'asset_code=USDC&amount=1&amount=2' },
+        { type: 'application/x-www-form-urlencoded', body: 'asset_code=USDC&amount=%GG' },
+        {
+          type: 'application/json',
+          body: ' {"asset_code":"USDC","amount":"1","amou\\u006et":"2"}',
+        },
+        {
+          type: 'multipart/form-data; boundary=x',
+          body: '--x\r\nContent-Disposition: form-data; name="amount"\r\n\r\n1\r\n--x\r\nContent-Disposition: form-data; name="amount"\r\n\r\n2\r\n--x--\r\n',
+        },
+        {
+          type: 'multipart/form-data; boundary=x',
+          body: '--x\r\nContent-Disposition: form-data; name="asset_code"; filename="secret.txt"\r\nContent-Type: text/plain\r\n\r\nUSDC\r\n--x--\r\n',
+        },
+      ];
+      for (const input of cases) {
+        const response = await invoke({
+          method: 'POST',
+          path: '/transactions/deposit/interactive',
+          headers: {
+            authorization: `Bearer ${accessToken}`,
+            'x-forwarded-for': '10.0.2.2',
+            'content-type': input.type,
+          },
+          rawBody: input.body,
+        });
+        expect(response.status).toBe(400);
+      }
+      expect(insert).not.toHaveBeenCalled();
+      expect(create).not.toHaveBeenCalled();
+    } finally {
+      insert.mockRestore();
+      create.mockRestore();
+    }
+  });
+
+  it('rejects oversized form data before storing a deposit', async () => {
+    const db = (anchor as unknown as { database: DatabaseAdapter }).database;
+    const insert = vi.spyOn(db, 'insertInteractiveTransaction');
+    try {
+      const response = await invoke({
+        method: 'POST',
+        path: '/transactions/deposit/interactive',
+        headers: {
+          authorization: `Bearer ${accessToken}`,
+          'x-forwarded-for': '10.0.2.3',
+          'content-type': 'application/x-www-form-urlencoded',
+        },
+        rawBody: `asset_code=USDC&amount=${'1'.repeat(1_048_577)}`,
+      });
+      expect(response.status).toBe(413);
+      expect(insert).not.toHaveBeenCalled();
+    } finally {
+      insert.mockRestore();
+    }
+  });
+
+  it('rejects a framework-parsed form when the raw bytes are unavailable', async () => {
+    const requestStream = Object.assign(Readable.from([]), {
+      body: { asset_code: 'USDC', amount: '5' },
+    });
+    const response = await invoke({
+      method: 'POST',
+      path: '/transactions/deposit/interactive',
+      headers: {
+        authorization: `Bearer ${accessToken}`,
+        'x-forwarded-for': '10.0.2.4',
+        'content-type': 'application/x-www-form-urlencoded',
+      },
+      requestStream,
+    });
+    expect(response.status).toBe(400);
+    expect(response.body.message).toBe('Raw form body is required');
+  });
+
   it('6a) decimal deposit amounts preserve their exact string formatting through create, persist, and lookup', async () => {
     const submittedAmount = '25.5000';
     const createResponse = await invoke({
@@ -3408,7 +3516,10 @@ describe('MVP Express-mounted integration', () => {
       expect(response.status).toBe(400);
       expect(response.body).toEqual({
         error: 'invalid_request',
-        message: 'Content-Type must be application/json',
+        message:
+          request.path === '/transactions/deposit/interactive'
+            ? 'Unsupported deposit Content-Type'
+            : 'Content-Type must be application/json',
       });
     }
   });
