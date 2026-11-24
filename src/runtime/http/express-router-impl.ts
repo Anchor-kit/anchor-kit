@@ -1,7 +1,13 @@
 import type { AnchorConfig } from '@/core/config.ts';
 import { ConfigError, PayloadTooLargeError, ValidationError } from '@/core/errors.ts';
 import { InMemoryRateLimiter, type RateLimitRule } from '@/runtime/http/rate-limiter.ts';
-import type { AccountSigner, DatabaseAdapter, WebhookProcessor } from '@/runtime/interfaces.ts';
+import type {
+  AccountSigner,
+  DatabaseAdapter,
+  Sep10AccountLookup,
+  Sep10AccountSigners,
+  WebhookProcessor,
+} from '@/runtime/interfaces.ts';
 import type { PluginRouteContext, RouteDefinition } from '@/types/foundation.ts';
 import type { AnchorPluginHooks, DepositRequestBody } from '@/types/plugin.ts';
 import { IdempotencyUtils } from '../../utils/idempotency.ts';
@@ -49,6 +55,7 @@ export interface ExpressRouterContext {
   rateRules: Record<'auth_challenge' | 'auth_token' | 'webhook' | 'deposit', RateLimitRule>;
   depositRequestHooks?: NonNullable<AnchorPluginHooks['onDepositRequest']>[];
   sep10ChallengeHooks?: NonNullable<AnchorPluginHooks['onSep10Challenge']>[];
+  sep10AccountLookup?: Sep10AccountLookup;
   pluginRoutes?: Array<{ pluginId: string; route: RouteDefinition }>;
 }
 
@@ -541,6 +548,132 @@ export function hasSufficientSignerWeight(
   }
 
   return false;
+}
+
+function countValidSignatures(transaction: Transaction, publicKey: string): number {
+  const keypair = Keypair.fromPublicKey(publicKey);
+  const hash = transaction.hash();
+  let count = 0;
+
+  for (const signature of transaction.signatures) {
+    try {
+      if (keypair.verify(hash, signature.signature())) {
+        count += 1;
+      }
+    } catch {
+      // Ignore malformed signature entries.
+    }
+  }
+
+  return count;
+}
+
+/**
+ * SEP-10 requires every signature on a challenge to belong to a key the anchor
+ * can account for: the server account, an authorized account signer, or the
+ * configured client-domain signing key. Unaccounted or malformed entries reject.
+ */
+export function hasOnlyAuthorizedSep10Signatures(
+  transaction: Transaction,
+  authorizedKeys: readonly string[],
+): boolean {
+  const hash = transaction.hash();
+  const keypairs: Keypair[] = [];
+  for (const key of authorizedKeys) {
+    if (!StrKey.isValidEd25519PublicKey(key)) continue;
+    try {
+      keypairs.push(Keypair.fromPublicKey(key));
+    } catch {
+      // Ignore malformed signer keys; they cannot produce a valid signature.
+    }
+  }
+
+  for (const signature of transaction.signatures) {
+    const matched = keypairs.some((keypair) => {
+      try {
+        return keypair.verify(hash, signature.signature());
+      } catch {
+        return false;
+      }
+    });
+    if (!matched) return false;
+  }
+
+  return true;
+}
+
+/**
+ * SEP-10 nonexistent-account branch: the signed challenge must carry exactly one
+ * valid master-key signature for the client account, and no signature from a key
+ * outside `authorizedKeys`. Extra, duplicated, or invalid signatures reject.
+ */
+export function hasSingleMasterSignature(
+  transaction: Transaction,
+  account: string,
+  authorizedKeys: readonly string[],
+): boolean {
+  if (!StrKey.isValidEd25519PublicKey(account)) return false;
+  if (countValidSignatures(transaction, account) !== 1) return false;
+  return hasOnlyAuthorizedSep10Signatures(transaction, [account, ...authorizedKeys]);
+}
+
+export type Sep10AccountAuthorization = 'authorized' | 'rejected' | 'lookup_failed';
+
+/**
+ * Resolve the client account's signing requirements and verify the challenge
+ * against them.
+ *
+ * The lookup is optional for backwards compatibility: without one, the anchor
+ * keeps its legacy single-key check. With a lookup, a `null` result selects the
+ * SEP-10 nonexistent-account branch (one master-key signature, using the
+ * protocol's implicit weight and threshold of 1), while a thrown lookup error is
+ * reported as `lookup_failed` so transport outages are never mistaken for a
+ * missing account.
+ */
+export async function authorizeSep10AccountSignatures(
+  transaction: Transaction,
+  input: {
+    account: string;
+    serverPublicKey: string;
+    lookup?: Sep10AccountLookup;
+    additionalSigners?: readonly string[];
+  },
+): Promise<Sep10AccountAuthorization> {
+  const additionalSigners = (input.additionalSigners ?? []).filter((key) =>
+    StrKey.isValidEd25519PublicKey(key),
+  );
+
+  if (!input.lookup) {
+    return hasValidSignature(transaction, input.account) ? 'authorized' : 'rejected';
+  }
+
+  let account: Sep10AccountSigners | null;
+  try {
+    account = await input.lookup.load(input.account);
+  } catch {
+    return 'lookup_failed';
+  }
+
+  if (account === null) {
+    return hasSingleMasterSignature(transaction, input.account, [
+      input.serverPublicKey,
+      ...additionalSigners,
+    ])
+      ? 'authorized'
+      : 'rejected';
+  }
+
+  if (!hasSufficientSignerWeight(transaction, account.signers, account.thresholds.medium)) {
+    return 'rejected';
+  }
+
+  return hasOnlyAuthorizedSep10Signatures(transaction, [
+    input.serverPublicKey,
+    ...additionalSigners,
+    ...account.signers.map((signer) => signer.publicKey),
+  ])
+    ? 'authorized'
+    : 'rejected';
 }
 
 function hasValidClientDomainSignature(
@@ -1045,7 +1178,24 @@ async function handleAuthToken(
     return;
   }
 
-  if (!hasValidSignature(transaction, account)) {
+  const securityConfig = context.config.get('security');
+  const accountAuthorization = await authorizeSep10AccountSignatures(transaction, {
+    account,
+    serverPublicKey: context.sep10ServerKeypair.publicKey(),
+    lookup: context.sep10AccountLookup,
+    additionalSigners:
+      securityConfig.enableClientAttribution && securityConfig.clientDomainSigningKey
+        ? [securityConfig.clientDomainSigningKey]
+        : [],
+  });
+  if (accountAuthorization === 'lookup_failed') {
+    sendJson(res, 502, {
+      error: 'account_lookup_failed',
+      message: 'Client account signer lookup failed',
+    });
+    return;
+  }
+  if (accountAuthorization !== 'authorized') {
     sendJson(res, 401, {
       error: 'invalid_challenge',
       message: 'Challenge is missing account signature',
@@ -1053,7 +1203,6 @@ async function handleAuthToken(
     return;
   }
 
-  const securityConfig = context.config.get('security');
   if (
     securityConfig.enableClientAttribution &&
     (!securityConfig.clientDomain ||
