@@ -10,11 +10,30 @@ lookup is scoped to the exact account ID; there is no unscoped customer lookup i
 The customer tables are created by the existing `migrate()` operation, so records survive
 disconnect and reconnect.
 
+## SEP-12 customer checks
+
+The router exposes authenticated `GET /customer` and `PUT /customer` routes for deposit
+transactions. Both requests require `transaction_id` and `type`; the transaction must belong to the
+account in the bearer token. The transaction's asset code selects the required fields configured
+through `kycRequired`.
+
+`PUT /customer` accepts JSON or URL-encoded scalar fields. It stores supported SEP-9 fields and
+configured custom fields, then sends complete submissions to the optional
+`kycVerificationProvider` passed to `createAnchor`. Without a provider, complete submissions stay
+in `PROCESSING`. The response reports missing fields and field status without returning submitted
+identity values. Binary document uploads are not supported by these minimal routes.
+
+`GET /customer` returns the current status and any missing required fields for the authenticated
+customer. A customer ID from another account returns `404`; a transaction owned by another account
+returns `403`.
+
 Focused verification:
 
 ```bash
 bun test tests/runtime/database/sql-database-adapter.test.ts
+bun test tests/runtime/sep12-customer-endpoints.test.ts
 ```
 
 Expected result: the adapter tests pass, including account isolation, creation replay, and
-reconnect persistence.
+reconnect persistence. The endpoint tests cover missing fields, provider status, PII redaction,
+malformed submissions, and cross-account access.

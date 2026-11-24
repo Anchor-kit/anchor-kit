@@ -3866,7 +3866,9 @@ describe('MVP Express-mounted integration', () => {
 
       expect(allowedResponse.status).toBe(200);
       expect(allowedResponse.headers['access-control-allow-origin']).toBe('https://example.com');
-      expect(allowedResponse.headers['access-control-allow-methods']).toBe('GET, POST, OPTIONS');
+      expect(allowedResponse.headers['access-control-allow-methods']).toBe(
+        'GET, POST, PUT, OPTIONS',
+      );
       expect(allowedResponse.headers['access-control-allow-headers']).toBe(
         'Content-Type, Authorization, Idempotency-Key, X-Anchor-Signature, X-Webhook-Provider',
       );

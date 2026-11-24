@@ -9,6 +9,7 @@ import { validatePluginRoutes } from '../runtime/http/express-router-impl.ts';
 import type {
   DatabaseAdapter,
   InteractiveTransactionRecord,
+  KycVerificationProvider,
   QueueAdapter,
   QueueDrainStatus,
   Watcher,
@@ -27,6 +28,8 @@ export interface CreateAnchorOptions {
    * disconnect during shutdown; do not share it with another active instance.
    */
   databaseAdapter?: DatabaseAdapter;
+  /** KYC provider used by authenticated SEP-12 customer submissions. */
+  kycVerificationProvider?: KycVerificationProvider;
 }
 
 /**
@@ -40,6 +43,7 @@ export class AnchorInstance {
 
   private database: DatabaseAdapter | null = null;
   private readonly injectedDatabaseAdapter?: DatabaseAdapter;
+  private readonly kycVerificationProvider?: KycVerificationProvider;
   private queue: QueueAdapter | null = null;
   private webhookProcessor: WebhookProcessor | null = null;
   private watchers: Watcher[] = [];
@@ -56,6 +60,7 @@ export class AnchorInstance {
     this.config = new AnchorConfig(config);
     this.config.validate();
     this.injectedDatabaseAdapter = options.databaseAdapter;
+    this.kycVerificationProvider = options.kycVerificationProvider;
   }
 
   /**
@@ -144,6 +149,7 @@ export class AnchorInstance {
           config: this.config,
           database: this.database,
           webhookProcessor: this.webhookProcessor,
+          kycVerificationProvider: this.kycVerificationProvider,
           depositRequestHooks,
           sep10ChallengeHooks,
           pluginRoutes,

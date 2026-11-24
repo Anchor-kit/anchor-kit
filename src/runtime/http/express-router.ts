@@ -1,7 +1,11 @@
 import type { AnchorConfig } from '@/core/config.ts';
 import { errorHandler } from '../../utils/error-handler.ts';
 import { InMemoryRateLimiter, type RateLimitRule } from './rate-limiter.ts';
-import type { DatabaseAdapter, WebhookProcessor } from '@/runtime/interfaces.ts';
+import type {
+  DatabaseAdapter,
+  KycVerificationProvider,
+  WebhookProcessor,
+} from '@/runtime/interfaces.ts';
 import type { RouteDefinition } from '@/types/foundation.ts';
 import type { AnchorPluginHooks } from '@/types/plugin.ts';
 import { Keypair } from '@stellar/stellar-sdk';
@@ -22,6 +26,7 @@ interface RouterDependencies {
   config: AnchorConfig;
   database: DatabaseAdapter;
   webhookProcessor: WebhookProcessor;
+  kycVerificationProvider?: KycVerificationProvider;
   depositRequestHooks?: NonNullable<AnchorPluginHooks['onDepositRequest']>[];
   sep10ChallengeHooks?: NonNullable<AnchorPluginHooks['onSep10Challenge']>[];
   pluginRoutes?: Array<{ pluginId: string; route: RouteDefinition }>;
@@ -42,19 +47,21 @@ export class AnchorExpressRouter {
     const rateLimitConfig = config.get('framework').rateLimit;
     const windowMs = rateLimitConfig?.windowMs ?? 60000;
     const rateRules: Record<
-      'auth_challenge' | 'auth_token' | 'webhook' | 'deposit',
+      'auth_challenge' | 'auth_token' | 'webhook' | 'deposit' | 'customer',
       RateLimitRule
     > = {
       auth_challenge: { windowMs, max: rateLimitConfig?.authChallengeMax ?? 30 },
       auth_token: { windowMs, max: rateLimitConfig?.authTokenMax ?? 30 },
       webhook: { windowMs, max: rateLimitConfig?.webhookMax ?? 120 },
       deposit: { windowMs, max: rateLimitConfig?.depositMax ?? 60 },
+      customer: { windowMs, max: rateLimitConfig?.authTokenMax ?? 30 },
     };
 
     this.context = {
       config,
       database: dependencies.database,
       webhookProcessor: dependencies.webhookProcessor,
+      kycVerificationProvider: dependencies.kycVerificationProvider,
       depositRequestHooks: dependencies.depositRequestHooks ?? [],
       sep10ChallengeHooks: dependencies.sep10ChallengeHooks ?? [],
       sep10ServerKeypair,

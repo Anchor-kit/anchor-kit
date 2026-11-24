@@ -1,5 +1,6 @@
 import type { TransactionStatus } from '@/types/transaction-status.ts';
 import type { KycData, KycVerificationDecision } from '@/types/foundation.ts';
+import type { Customer } from '@/types/customer.ts';
 import type {
   NormalizedPaymentRailEvent,
   PaymentRailInitiationRequest,
@@ -185,6 +186,16 @@ export interface DatabaseAdapter {
     status: TransactionStatus,
     expectedStatus?: TransactionStatus,
   ): Promise<boolean>;
+
+  insertOrGetCustomer(input: Omit<Customer, 'created_at'>): Promise<Customer>;
+  getCustomerByAccountId(accountId: string): Promise<Customer | null>;
+  updateCustomer(input: {
+    id: string;
+    account_id: string;
+    email_address?: string;
+    phone_number?: string;
+    kyc_data: KycData;
+  }): Promise<boolean>;
 
   getIdempotencyRecord(scope: string, idempotencyKey: string): Promise<IdempotencyRecord | null>;
   insertOrGetIdempotencyRecord(input: {
