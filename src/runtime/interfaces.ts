@@ -150,6 +150,18 @@ export interface SettlementJobRecord {
   updatedAt: string;
 }
 
+export type ReconciledRailPaymentResult =
+  | {
+      outcome: 'enqueued' | 'replayed';
+      transaction: InteractiveTransactionRecord;
+      job: SettlementJobRecord;
+    }
+  | {
+      outcome: 'conflict';
+      reason: 'not_found' | 'status_mismatch' | 'operation_reused';
+      transaction: InteractiveTransactionRecord | null;
+    };
+
 export interface DatabaseAdapter {
   connect(): Promise<void>;
   disconnect(): Promise<void>;
@@ -289,6 +301,11 @@ export interface DatabaseAdapter {
     operationId: string;
     status: SettlementJobRecord['status'];
   }): Promise<boolean>;
+  recordReconciledRailPayment(input: {
+    transactionId: string;
+    operationId: string;
+    jobId: string;
+  }): Promise<ReconciledRailPaymentResult>;
   cleanupOldRecords(cutoffIso: string): Promise<void>;
 }
 

@@ -150,6 +150,9 @@ class ControllableFakeDatabaseAdapter implements DatabaseAdapter {
   async updateSettlementJobStatus(): Promise<boolean> {
     return false;
   }
+  async recordReconciledRailPayment(): Promise<never> {
+    throw new Error('Unexpected database call');
+  }
   async cleanupOldRecords(): Promise<void> {}
 }
 

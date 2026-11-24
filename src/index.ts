@@ -33,6 +33,7 @@ export type {
   QueueJob,
   QueueDrainStatus,
   QueueAdapter,
+  ReconciledRailPaymentResult,
   SettlementJobRecord,
   Watcher,
   WebhookEventRecord,
