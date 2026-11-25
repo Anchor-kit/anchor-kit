@@ -1,5 +1,13 @@
 # Focused issue acceptance checks
 
+For webhook duplicate delivery and provider-scoped deduplication, run:
+
+```sh
+bun test tests/runtime/webhooks/default-webhook-processor.test.ts tests/runtime/sql-adapter-webhook-dedupe.test.ts
+```
+
+Expected result: all tests pass. Deduplication is scoped to `(provider, event_id)` such that identical event IDs from different providers are treated as independent events, while duplicate deliveries within the same provider return `{ duplicate: true, status: 'processed' }` without re-executing callback side effects. See [docs/webhook-duplicate-delivery.md](./webhook-duplicate-delivery.md) for the operational guide and troubleshooting runbook.
+
 For registered payment rail webhook verification, run:
 
 ```sh
