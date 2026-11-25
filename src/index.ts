@@ -11,6 +11,7 @@ export { AnchorInstance, createAnchor, makeSqliteDbUrlForTests } from './core/fa
 export type { CreateAnchorOptions } from './core/factory';
 export * from './core/errors';
 export { LocalKeypairSigner } from './services/stellar-signer.ts';
+export { signedSettlementHash } from './services/settlement-identity.ts';
 export type { StellarTransactionSigner } from './services/stellar-signer.ts';
 export * as utils from './utils';
 export {
@@ -33,7 +34,11 @@ export type {
   QueueJob,
   QueueDrainStatus,
   QueueAdapter,
+  Sep10AccountLookup,
+  Sep10AccountSigners,
   SettlementJobRecord,
+  SettlementJobLease,
+  SettlementLeaseAdapter,
   Watcher,
   WebhookEventRecord,
   WebhookProcessor,
@@ -42,3 +47,6 @@ export type {
 } from './runtime/interfaces.ts';
 export { MockKycVerificationProvider } from './runtime/kyc/mock-provider.ts';
 export type { ExpressLikeMiddleware } from './runtime/http/express-router.ts';
+
+export { createInteractiveInitiationResponse } from './core/sep24/interactive-response.ts';
+export type { InteractiveInitiationResponse } from './core/sep24/interactive-response.ts';

@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { Account, Keypair, MuxedAccount, Transaction, Networks } from '@stellar/stellar-sdk';
+import type { SettlementPaymentParams } from '@/utils/stellar.ts';
 import { StellarUtils } from '@/utils/stellar.ts';
 
 interface ParsedPaymentOperation {
@@ -125,7 +126,7 @@ describe('StellarUtils', () => {
           fee: '100',
           timeoutSeconds: 30,
           ...invalid,
-        } as import('@/utils/stellar.ts').SettlementPaymentParams),
+        } as SettlementPaymentParams),
       ).rejects.toThrow();
     });
 
