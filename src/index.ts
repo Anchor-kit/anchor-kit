@@ -68,6 +68,8 @@ export {
 } from './runtime/queue/in-memory-queue.ts';
 export type { ExpressLikeMiddleware } from './runtime/http/express-router.ts';
 
+export { matchRailEvent } from './runtime/settlement/match-rail-event.ts';
+export type { RailMatchResult } from './runtime/settlement/match-rail-event.ts';
 export { AnchorClient, AnchorClientError } from './client/anchor-client.ts';
 export type {
   AnchorClientOptions,
