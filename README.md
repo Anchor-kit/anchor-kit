@@ -341,6 +341,7 @@ curl -s \
 
 - [Configuration Reference](./docs/configuration-reference.md) – Complete guide to all configuration options, their status, and usage
 - [Database Migrations and Recovery](./docs/database-migrations.md)
+- [PostgreSQL Connectivity Incident Response](./docs/postgresql-connectivity-incident-response.md)
 - [Architecture Overview](./ARCHITECTURE.md)
 - [Contributing Guide](./CONTRIBUTING.md)
 - [Roadmap](./ROADMAP.md)
