@@ -101,6 +101,9 @@ function makeFakeDb(rejectOnIdempotency = false): {
         updatedAt: now,
       };
     },
+    async listTransactions() {
+      return [];
+    },
     async findInteractiveTransaction() {
       return null;
     },
@@ -120,6 +123,18 @@ function makeFakeDb(rejectOnIdempotency = false): {
       return null;
     },
     async updateCustomer() {
+      return false;
+    },
+    async insertInteractiveSession(): Promise<never> {
+      throw new Error('Not implemented');
+    },
+    async getInteractiveSessionById() {
+      return null;
+    },
+    async revokeInteractiveSession() {
+      return false;
+    },
+    async consumeInteractiveSessionAction() {
       return false;
     },
     async getIdempotencyRecord() {
@@ -214,6 +229,12 @@ function makeFakeDb(rejectOnIdempotency = false): {
       return false;
     },
     async finishSettlementJob() {
+      return false;
+    },
+    async reserveStellarSequence() {
+      return null;
+    },
+    async completeStellarSequenceOperation() {
       return false;
     },
     async updateSettlementJobStatus() {

@@ -2,6 +2,7 @@ import type { AnchorConfig } from '@/core/config.ts';
 import { errorHandler } from '../../utils/error-handler.ts';
 import { InMemoryRateLimiter, type RateLimitRule } from './rate-limiter.ts';
 import type {
+  AccountLookupProvider,
   DatabaseAdapter,
   KycVerificationProvider,
   Sep10AccountLookup,
@@ -33,6 +34,7 @@ interface RouterDependencies {
   sep10ChallengeHooks?: NonNullable<AnchorPluginHooks['onSep10Challenge']>[];
   sep10AccountLookup?: Sep10AccountLookup;
   pluginRoutes?: Array<{ pluginId: string; route: RouteDefinition }>;
+  accountLookup?: AccountLookupProvider;
 }
 
 export class AnchorExpressRouter {
@@ -77,6 +79,7 @@ export class AnchorExpressRouter {
       rateLimiter: new InMemoryRateLimiter(),
       rateRules,
       pluginRoutes,
+      accountLookup: dependencies.accountLookup,
     };
   }
 

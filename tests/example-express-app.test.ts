@@ -188,7 +188,7 @@ describe('example/express-app', () => {
   let harness: ExampleAppHarness;
 
   beforeAll(async () => {
-    harness = await createExampleAppHarness();
+    harness = await createExampleAppHarness({ interactiveDomain: 'https://anchor.example' });
   });
 
   afterAll(async () => {
@@ -213,19 +213,14 @@ describe('example/express-app', () => {
 
   it('loads and completes a session-scoped no-KYC deposit', async () => {
     const token = await fetchAuthToken(harness.runtime.app);
-    const initiated = await invokeExpress(harness.runtime.app, {
-      method: 'POST',
-      path: '/anchor/transactions/deposit/interactive',
-      headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
-      body: { asset_code: 'USDC', amount: '5' },
-    });
-    expect(initiated.status).toBe(201);
+    const initiated = await request(harness.runtime.app)
+      .post('/anchor/transactions/deposit/interactive')
+      .set('authorization', `Bearer ${token}`)
+      .type('form')
+      .send({ asset_code: 'USDC', amount: '5' });
+    expect(initiated.status).toBe(200);
     const id = String(initiated.body.id);
-    const account = String(initiated.body.account);
-    const session = await createInteractiveSession(
-      { account, transactionId: id, actions: ['deposit'] },
-      'example-jwt-secret',
-    );
+    const session = new URL(String(initiated.body.url)).searchParams.get('token') ?? '';
 
     const state = await invokeExpress(harness.runtime.app, {
       path: `/anchor/interactive/deposit/${id}`,
@@ -265,27 +260,48 @@ describe('example/express-app', () => {
     expect(replay.body.idempotency_replay).toBe(true);
   });
 
+  it('rejects a signed interactive token without a persisted session record', async () => {
+    const accessToken = await fetchAuthToken(harness.runtime.app);
+    const initiated = await invokeExpress(harness.runtime.app, {
+      method: 'POST',
+      path: '/anchor/transactions/deposit/interactive',
+      headers: { authorization: `Bearer ${accessToken}`, 'content-type': 'application/json' },
+      body: { asset_code: 'USDC', amount: '1' },
+    });
+    const transactionId = String(initiated.body.id);
+    const token = await createInteractiveSession(
+      {
+        account: String(initiated.body.account),
+        transactionId,
+        actions: ['deposit'],
+      },
+      'example-jwt-secret',
+    );
+
+    const state = await invokeExpress(harness.runtime.app, {
+      path: `/anchor/interactive/deposit/${transactionId}`,
+      headers: { authorization: `Bearer ${token}` },
+    });
+
+    expect(state.status).toBe(401);
+    expect(state.body.error).toBe('interactive_session_invalid');
+  });
+
   it('keeps a KYC-required deposit incomplete until an approval arrives', async () => {
     const kycHarness = await createExampleAppHarness({
       kycRequired: { USDC: ['first_name'] },
+      interactiveDomain: 'https://anchor.example',
     });
     try {
       const accessToken = await fetchAuthToken(kycHarness.runtime.app);
-      const initiated = await invokeExpress(kycHarness.runtime.app, {
-        method: 'POST',
-        path: '/anchor/transactions/deposit/interactive',
-        headers: { authorization: `Bearer ${accessToken}`, 'content-type': 'application/json' },
-        body: { asset_code: 'USDC', amount: '3' },
-      });
+      const initiated = await request(kycHarness.runtime.app)
+        .post('/anchor/transactions/deposit/interactive')
+        .set('authorization', `Bearer ${accessToken}`)
+        .type('form')
+        .send({ asset_code: 'USDC', amount: '3' });
+      expect(initiated.status).toBe(200);
       const transactionId = String(initiated.body.id);
-      const session = await createInteractiveSession(
-        {
-          account: String(initiated.body.account),
-          transactionId,
-          actions: ['deposit'],
-        },
-        'example-jwt-secret',
-      );
+      const session = new URL(String(initiated.body.url)).searchParams.get('token') ?? '';
       const completion = async (fields: Record<string, string>) =>
         invokeExpress(kycHarness.runtime.app, {
           method: 'POST',
@@ -315,6 +331,7 @@ describe('example/express-app', () => {
     let verificationCalls = 0;
     const kycHarness = await createExampleAppHarness({
       kycRequired: { USDC: ['first_name'] },
+      interactiveDomain: 'https://anchor.example',
       kycVerificationProvider: {
         async verify(input) {
           verificationCalls += 1;
@@ -330,21 +347,14 @@ describe('example/express-app', () => {
     });
     try {
       const accessToken = await fetchAuthToken(kycHarness.runtime.app);
-      const initiated = await invokeExpress(kycHarness.runtime.app, {
-        method: 'POST',
-        path: '/anchor/transactions/deposit/interactive',
-        headers: { authorization: `Bearer ${accessToken}`, 'content-type': 'application/json' },
-        body: { asset_code: 'USDC', amount: '4' },
-      });
+      const initiated = await request(kycHarness.runtime.app)
+        .post('/anchor/transactions/deposit/interactive')
+        .set('authorization', `Bearer ${accessToken}`)
+        .type('form')
+        .send({ asset_code: 'USDC', amount: '4' });
+      expect(initiated.status).toBe(200);
       const transactionId = String(initiated.body.id);
-      const session = await createInteractiveSession(
-        {
-          account: String(initiated.body.account),
-          transactionId,
-          actions: ['deposit'],
-        },
-        'example-jwt-secret',
-      );
+      const session = new URL(String(initiated.body.url)).searchParams.get('token') ?? '';
       const submit = (firstName: string) =>
         invokeExpress(kycHarness.runtime.app, {
           method: 'POST',

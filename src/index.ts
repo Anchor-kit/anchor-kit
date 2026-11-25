@@ -19,6 +19,8 @@ export { getPaystackTestStatus } from './services/paystack-status.ts';
 export { emitTransactionTrace } from './services/transaction-trace.ts';
 export type { TransactionTraceEvent, TransactionTraceSink } from './services/transaction-trace.ts';
 export { signedSettlementHash } from './services/settlement-identity.ts';
+export { interactiveSessionState } from './services/interactive-session-state.ts';
+export type { InteractiveSessionState } from './services/interactive-session-state.ts';
 export type { StellarTransactionSigner } from './services/stellar-signer.ts';
 export * as utils from './utils';
 export {
@@ -33,6 +35,9 @@ export type { Memo, PaymentParams, SettlementPaymentParams } from './utils';
 export type {
   AuthChallengeRecord,
   AccountSigner,
+  AccountSignerConfiguration,
+  AccountLookupProvider,
+  AccountLookupResult,
   StellarAccountState,
   StellarNetworkClient,
   StellarNetworkResult,
@@ -42,6 +47,7 @@ export type {
   IdempotencyRecord,
   InteractiveTransactionRecord,
   InteractiveTransactionIdentifier,
+  TransactionHistoryQuery,
   KycVerificationProvider,
   PaymentRailAdapter,
   RefundRecord,
@@ -57,6 +63,8 @@ export type {
   SettlementJobRecord,
   SettlementJobLease,
   SettlementLeaseAdapter,
+  StellarSequenceLease,
+  StellarSequenceLeaseAdapter,
   Watcher,
   WebhookEventRecord,
   WebhookProcessor,

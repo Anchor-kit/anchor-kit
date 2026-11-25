@@ -76,6 +76,20 @@ export interface Sep10AccountLookup {
   load(accountId: string): Promise<Sep10AccountSigners | null>;
 }
 
+/** Signer keys, weights and thresholds for a Stellar account as reported by a lookup provider. */
+export type AccountSignerConfiguration = Sep10AccountSigners;
+
+/** Outcome of an account lookup. Not-found and upstream errors are distinct and must not be conflated. */
+export type AccountLookupResult =
+  | { outcome: 'found'; account: AccountSignerConfiguration }
+  | { outcome: 'not_found' }
+  | { outcome: 'unavailable'; reason?: string };
+
+/** Injectable boundary for loading an account's configured signers and thresholds. */
+export interface AccountLookupProvider {
+  lookupAccount(publicKey: string): Promise<AccountLookupResult>;
+}
+
 export interface AuthChallengeRecord {
   id: string;
   account: string;
@@ -100,6 +114,36 @@ export interface InteractiveTransactionRecord {
   status: TransactionStatus;
   createdAt: string;
   updatedAt: string;
+}
+
+export interface InteractiveSessionRecord {
+  id: string;
+  account: string;
+  transactionId: string;
+  actions: string[];
+  consumedActions: string[];
+  expiresAt: string;
+  revokedAt: string | null;
+  createdAt: string;
+}
+
+export type InteractiveSessionRejection =
+  | 'missing_session'
+  | 'session_not_found'
+  | 'wrong_account'
+  | 'wrong_transaction'
+  | 'session_revoked'
+  | 'session_expired'
+  | 'action_not_permitted'
+  | 'action_already_consumed';
+
+export interface TransactionHistoryQuery {
+  account: string;
+  assetCode: string;
+  limit?: number;
+  kind?: 'deposit' | 'withdrawal';
+  noOlderThan?: string;
+  pagingId?: string;
 }
 
 export type InteractiveTransactionIdentifier =
@@ -224,6 +268,18 @@ export interface SettlementJobLease {
   attempt: number;
 }
 
+/** A fenced reservation for one Stellar account sequence and payment intent. */
+export interface StellarSequenceLease {
+  accountId: string;
+  sequence: string;
+  operationId: string;
+  payloadHash: string;
+  owner: string;
+  token: string;
+  expiresAt: string;
+  attempt: number;
+}
+
 export interface SettlementLeaseAdapter {
   /** Lists pending jobs and expired leases; claim remains the ownership gate. */
   listClaimableSettlementJobs(limit: number): Promise<SettlementJobRecord[]>;
@@ -244,7 +300,29 @@ export interface SettlementLeaseAdapter {
   }): Promise<boolean>;
 }
 
-export interface DatabaseAdapter extends SettlementLeaseAdapter {
+export interface StellarSequenceLeaseAdapter {
+  /**
+   * Reserves one sequence for one immutable operation. Expired leases may only be
+   * reclaimed by the same operation with the same payload hash; other operations
+   * remain blocked until the reserved transaction is confirmed.
+   */
+  reserveStellarSequence(input: {
+    accountId: string;
+    networkSequence: string;
+    operationId: string;
+    payloadHash: string;
+    owner: string;
+    durationMs: number;
+  }): Promise<StellarSequenceLease | null>;
+  /** Release a reservation only after Horizon confirms its transaction. */
+  completeStellarSequenceOperation(input: {
+    accountId: string;
+    operationId: string;
+    token: string;
+  }): Promise<boolean>;
+}
+
+export interface DatabaseAdapter extends SettlementLeaseAdapter, StellarSequenceLeaseAdapter {
   connect(): Promise<void>;
   disconnect(): Promise<void>;
   migrate(): Promise<void>;
@@ -282,7 +360,32 @@ export interface DatabaseAdapter extends SettlementLeaseAdapter {
     account: string;
     identifier: InteractiveTransactionIdentifier;
   }): Promise<InteractiveTransactionRecord | null>;
+  listTransactions(input: TransactionHistoryQuery): Promise<InteractiveTransactionRecord[]>;
   listPendingTransactionsBefore(cutoffIso: string): Promise<InteractiveTransactionRecord[]>;
+
+  insertInteractiveSession(input: {
+    id: string;
+    account: string;
+    transactionId: string;
+    actions: string[];
+    expiresAt: string;
+  }): Promise<InteractiveSessionRecord>;
+  getInteractiveSessionById(id: string): Promise<InteractiveSessionRecord | null>;
+  /**
+   * Revokes a session. Returns `true` only when this call performed the
+   * revocation, so a second call observes the session was already revoked.
+   */
+  revokeInteractiveSession(id: string): Promise<boolean>;
+  /**
+   * Atomically consumes `action` for `id`.
+   *
+   * Returns `true` exactly once per (session, action) pair: the record is only
+   * updated while it is unrevoked, unexpired, the action is still permitted,
+   * and the stored consumption list is unchanged since it was read. Every
+   * other outcome - unknown session, revoked, expired, unpermitted action, or
+   * a replay/concurrent caller - returns `false` and leaves the record alone.
+   */
+  consumeInteractiveSessionAction(id: string, action: string): Promise<boolean>;
   updateTransactionStatus(
     id: string,
     status: TransactionStatus,
@@ -343,6 +446,10 @@ export interface DatabaseAdapter extends SettlementLeaseAdapter {
       statusCode: number;
       responseBody: string;
     };
+    interactiveSession?: Pick<
+      InteractiveSessionRecord,
+      'id' | 'account' | 'transactionId' | 'actions' | 'expiresAt'
+    >;
   }): Promise<InteractiveTransactionRecord>;
   deletePendingIdempotencyRecord(
     scope: string,

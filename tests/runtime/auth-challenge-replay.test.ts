@@ -41,6 +41,12 @@ class ControllableFakeDatabaseAdapter implements DatabaseAdapter {
   async connect(): Promise<void> {}
   async disconnect(): Promise<void> {}
   async migrate(): Promise<void> {}
+  async reserveStellarSequence(): Promise<null> {
+    return null;
+  }
+  async completeStellarSequenceOperation(): Promise<boolean> {
+    return false;
+  }
 
   async insertAuthChallenge(input: {
     id: string;
@@ -97,6 +103,9 @@ class ControllableFakeDatabaseAdapter implements DatabaseAdapter {
   async insertInteractiveTransaction(): Promise<never> {
     throw new Error('Not implemented');
   }
+  async listTransactions() {
+    return [];
+  }
   async findInteractiveTransaction() {
     return null;
   }
@@ -109,7 +118,6 @@ class ControllableFakeDatabaseAdapter implements DatabaseAdapter {
   async updateTransactionStatus(_id: string, _status: string): Promise<boolean> {
     return true;
   }
-
   async insertOrGetCustomer(): Promise<never> {
     throw new Error('Unexpected customer database call');
   }
@@ -119,6 +127,19 @@ class ControllableFakeDatabaseAdapter implements DatabaseAdapter {
   }
 
   async updateCustomer(): Promise<boolean> {
+    return false;
+  }
+
+  async insertInteractiveSession(): Promise<never> {
+    throw new Error('Not implemented');
+  }
+  async getInteractiveSessionById(): Promise<null> {
+    return null;
+  }
+  async revokeInteractiveSession(): Promise<boolean> {
+    return false;
+  }
+  async consumeInteractiveSessionAction(): Promise<boolean> {
     return false;
   }
   async getIdempotencyRecord(): Promise<null> {

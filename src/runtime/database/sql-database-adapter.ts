@@ -1,16 +1,20 @@
-import { ConfigError, MalformedPersistedDataError } from '../../core/errors.ts';
+import { validateTransactionHistory } from './transaction-history.ts';
+import { ConfigError, MalformedPersistedDataError, ValidationError } from '../../core/errors.ts';
 import type {
   AuthChallengeRecord,
   ConfirmSettlementResult,
   DatabaseAdapter,
   IdempotencyRecord,
+  InteractiveSessionRecord,
   InteractiveTransactionRecord,
   InteractiveTransactionIdentifier,
+  TransactionHistoryQuery,
   ReconciledRailPaymentResult,
   RefundRecord,
   TransactionTransitionResult,
   SettlementJobRecord,
   SettlementJobLease,
+  StellarSequenceLease,
   WatcherTaskRecord,
   WebhookEventRecord,
 } from '@/runtime/interfaces.ts';
@@ -99,7 +103,8 @@ export const SQLITE_JOURNAL_MODE = 'WAL';
 export const SQLITE_BUSY_TIMEOUT_MS = 5000;
 
 /**
- * Indexes supporting watcher polling and retention cleanup.
+ * Indexes supporting watcher polling, retention cleanup, and interactive
+ * session lookups.
  *
  * Watcher polling filters `watcher_tasks` by `status` and orders by
  * `created_at`, while retention deletes rows by `created_at` combined with a
@@ -107,6 +112,10 @@ export const SQLITE_BUSY_TIMEOUT_MS = 5000;
  * are pruned by `expires_at`, and idempotency keys by `created_at`. Each index
  * is created with `IF NOT EXISTS` so migrations stay repeatable on both fresh
  * and already-migrated databases.
+ *
+ * Interactive sessions are loaded by id on every gated request, and are also
+ * looked up by transaction when a hosted flow is resumed, so both columns are
+ * indexed.
  */
 export const SQLITE_INDEX_STATEMENTS: readonly string[] = [
   'CREATE INDEX IF NOT EXISTS idx_watcher_tasks_status_created_at ON watcher_tasks (status, created_at)',
@@ -115,6 +124,8 @@ export const SQLITE_INDEX_STATEMENTS: readonly string[] = [
   'CREATE INDEX IF NOT EXISTS idx_auth_challenges_expires_at ON auth_challenges (expires_at)',
   'CREATE INDEX IF NOT EXISTS idx_idempotency_keys_created_at ON idempotency_keys (created_at)',
   'CREATE INDEX IF NOT EXISTS idx_settlement_jobs_status_created_at ON settlement_jobs (status, created_at)',
+  'CREATE INDEX IF NOT EXISTS idx_interactive_sessions_transaction_id ON interactive_sessions (transaction_id)',
+  'CREATE INDEX IF NOT EXISTS idx_interactive_sessions_expires_at ON interactive_sessions (expires_at)',
 ];
 
 export const POSTGRES_INDEX_STATEMENTS: readonly string[] = [
@@ -124,6 +135,8 @@ export const POSTGRES_INDEX_STATEMENTS: readonly string[] = [
   'CREATE INDEX IF NOT EXISTS idx_auth_challenges_expires_at ON auth_challenges (expires_at)',
   'CREATE INDEX IF NOT EXISTS idx_idempotency_keys_created_at ON idempotency_keys (created_at)',
   'CREATE INDEX IF NOT EXISTS idx_settlement_jobs_status_created_at ON settlement_jobs (status, created_at)',
+  'CREATE INDEX IF NOT EXISTS idx_interactive_sessions_transaction_id ON interactive_sessions (transaction_id)',
+  'CREATE INDEX IF NOT EXISTS idx_interactive_sessions_expires_at ON interactive_sessions (expires_at)',
 ];
 
 const CORE_MIGRATIONS: readonly SchemaMigration[] = [
@@ -212,6 +225,16 @@ const CORE_MIGRATIONS: readonly SchemaMigration[] = [
               created_at TEXT NOT NULL,
               updated_at TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS interactive_sessions (
+              id TEXT PRIMARY KEY,
+              account TEXT NOT NULL,
+              transaction_id TEXT NOT NULL REFERENCES interactive_transactions(id),
+              actions TEXT NOT NULL,
+              consumed_actions TEXT NOT NULL DEFAULT '[]',
+              expires_at TEXT NOT NULL,
+              revoked_at TEXT,
+              created_at TEXT NOT NULL
+            );
           `
           : `
             CREATE TABLE IF NOT EXISTS auth_challenges (
@@ -292,6 +315,16 @@ const CORE_MIGRATIONS: readonly SchemaMigration[] = [
               status TEXT NOT NULL CHECK (status IN ('pending', 'processing', 'completed', 'failed')),
               created_at TIMESTAMPTZ NOT NULL,
               updated_at TIMESTAMPTZ NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS interactive_sessions (
+              id TEXT PRIMARY KEY,
+              account TEXT NOT NULL,
+              transaction_id TEXT NOT NULL REFERENCES interactive_transactions(id),
+              actions JSONB NOT NULL,
+              consumed_actions JSONB NOT NULL DEFAULT '[]'::jsonb,
+              expires_at TIMESTAMPTZ NOT NULL,
+              revoked_at TIMESTAMPTZ,
+              created_at TIMESTAMPTZ NOT NULL
             );
           `,
       );
@@ -409,6 +442,117 @@ const CORE_MIGRATIONS: readonly SchemaMigration[] = [
       )`);
       await execute(
         'CREATE INDEX IF NOT EXISTS idx_refund_operations_transaction ON refund_operations (transaction_id)',
+      );
+    },
+  },
+  {
+    name: 'core:007-stellar-sequence-leases',
+    async up({ dialect, execute }) {
+      await execute(
+        dialect === 'sqlite'
+          ? `CREATE TABLE IF NOT EXISTS stellar_sequence_leases (
+              account_id TEXT PRIMARY KEY,
+              last_sequence INTEGER NOT NULL CHECK (last_sequence > 0),
+              operation_id TEXT,
+              payload_hash TEXT,
+              lease_owner TEXT,
+              lease_token TEXT,
+              lease_expires_at TEXT,
+              lease_attempt INTEGER NOT NULL DEFAULT 0,
+              CHECK ((operation_id IS NULL AND payload_hash IS NULL AND lease_owner IS NULL AND lease_token IS NULL AND lease_expires_at IS NULL) OR
+                (operation_id IS NOT NULL AND payload_hash IS NOT NULL AND lease_owner IS NOT NULL AND lease_token IS NOT NULL AND lease_expires_at IS NOT NULL))
+            )`
+          : `CREATE TABLE IF NOT EXISTS stellar_sequence_leases (
+              account_id TEXT PRIMARY KEY,
+              last_sequence BIGINT NOT NULL CHECK (last_sequence > 0),
+              operation_id TEXT,
+              payload_hash TEXT,
+              lease_owner TEXT,
+              lease_token TEXT,
+              lease_expires_at TIMESTAMPTZ,
+              lease_attempt INTEGER NOT NULL DEFAULT 0,
+              CHECK ((operation_id IS NULL AND payload_hash IS NULL AND lease_owner IS NULL AND lease_token IS NULL AND lease_expires_at IS NULL) OR
+                (operation_id IS NOT NULL AND payload_hash IS NOT NULL AND lease_owner IS NOT NULL AND lease_token IS NOT NULL AND lease_expires_at IS NOT NULL))
+            )`,
+      );
+      await execute(
+        'CREATE UNIQUE INDEX IF NOT EXISTS idx_stellar_sequence_operation ON stellar_sequence_leases (operation_id) WHERE operation_id IS NOT NULL',
+      );
+    },
+  },
+  {
+    name: 'core:008-stellar-sequence-operations',
+    async up({ dialect, execute }) {
+      await execute(
+        dialect === 'sqlite'
+          ? `CREATE TABLE IF NOT EXISTS stellar_account_sequences (
+              account_id TEXT PRIMARY KEY,
+              last_sequence INTEGER NOT NULL CHECK (last_sequence >= 0),
+              active_operation_id TEXT,
+              lease_owner TEXT,
+              lease_token TEXT,
+              lease_expires_at TEXT
+            );
+            CREATE TABLE IF NOT EXISTS stellar_sequence_operations (
+              operation_id TEXT PRIMARY KEY,
+              account_id TEXT NOT NULL REFERENCES stellar_account_sequences(account_id),
+              payload_hash TEXT NOT NULL,
+              sequence INTEGER NOT NULL,
+              status TEXT NOT NULL CHECK (status IN ('pending', 'completed')),
+              lease_owner TEXT NOT NULL,
+              lease_token TEXT NOT NULL,
+              lease_expires_at TEXT NOT NULL,
+              lease_attempt INTEGER NOT NULL DEFAULT 1
+            );
+            CREATE INDEX IF NOT EXISTS idx_stellar_sequence_operations_account ON stellar_sequence_operations (account_id, sequence);`
+          : `CREATE TABLE IF NOT EXISTS stellar_account_sequences (
+              account_id TEXT PRIMARY KEY,
+              last_sequence BIGINT NOT NULL CHECK (last_sequence >= 0),
+              active_operation_id TEXT,
+              lease_owner TEXT,
+              lease_token TEXT,
+              lease_expires_at TIMESTAMPTZ
+            );
+            CREATE TABLE IF NOT EXISTS stellar_sequence_operations (
+              operation_id TEXT PRIMARY KEY,
+              account_id TEXT NOT NULL REFERENCES stellar_account_sequences(account_id),
+              payload_hash TEXT NOT NULL,
+              sequence BIGINT NOT NULL,
+              status TEXT NOT NULL CHECK (status IN ('pending', 'completed')),
+              lease_owner TEXT NOT NULL,
+              lease_token TEXT NOT NULL,
+              lease_expires_at TIMESTAMPTZ NOT NULL,
+              lease_attempt INTEGER NOT NULL DEFAULT 1
+            );
+            CREATE INDEX IF NOT EXISTS idx_stellar_sequence_operations_account ON stellar_sequence_operations (account_id, sequence);`,
+      );
+    },
+  },
+  {
+    name: 'core:009-interactive-sessions',
+    async up({ dialect, execute }) {
+      await execute(
+        dialect === 'sqlite'
+          ? `CREATE TABLE IF NOT EXISTS interactive_sessions (
+              id TEXT PRIMARY KEY,
+              account TEXT NOT NULL,
+              transaction_id TEXT NOT NULL REFERENCES interactive_transactions(id),
+              actions TEXT NOT NULL,
+              consumed_actions TEXT NOT NULL DEFAULT '[]',
+              expires_at TEXT NOT NULL,
+              revoked_at TEXT,
+              created_at TEXT NOT NULL
+            )`
+          : `CREATE TABLE IF NOT EXISTS interactive_sessions (
+              id TEXT PRIMARY KEY,
+              account TEXT NOT NULL,
+              transaction_id TEXT NOT NULL REFERENCES interactive_transactions(id),
+              actions JSONB NOT NULL,
+              consumed_actions JSONB NOT NULL DEFAULT '[]'::jsonb,
+              expires_at TIMESTAMPTZ NOT NULL,
+              revoked_at TIMESTAMPTZ,
+              created_at TIMESTAMPTZ NOT NULL
+            )`,
       );
     },
   },
@@ -549,6 +693,24 @@ function parseJsonObject(value: unknown, parseSerializedText: boolean): Record<s
   }
 
   return parsed as Record<string, unknown>;
+}
+
+function parseJsonStringArray(value: unknown, parseSerializedText: boolean): string[] {
+  let parsed = value;
+  if (parseSerializedText && typeof value === 'string') {
+    try {
+      parsed = JSON.parse(value);
+    } catch (error) {
+      throw new MalformedPersistedDataError(
+        `Malformed persisted JSON array: ${error instanceof Error ? error.message : String(error)}`,
+        { value: value.slice(0, 200) },
+      );
+    }
+  }
+  if (!Array.isArray(parsed) || !parsed.every((entry) => typeof entry === 'string')) {
+    throw new MalformedPersistedDataError('Persisted session actions must be an array of strings');
+  }
+  return parsed;
 }
 
 function validateSchemaIdentifier(schema: string): string {
@@ -1251,6 +1413,122 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
     return (response.rowCount ?? 0) > 0;
   }
 
+  public async insertInteractiveSession(input: {
+    id: string;
+    account: string;
+    transactionId: string;
+    actions: string[];
+    expiresAt: string;
+  }): Promise<InteractiveSessionRecord> {
+    if (
+      !input.id.trim() ||
+      !input.account.trim() ||
+      !input.transactionId.trim() ||
+      input.actions.length === 0 ||
+      !input.actions.every((action) => typeof action === 'string' && action.trim().length > 0) ||
+      !Number.isFinite(Date.parse(input.expiresAt))
+    ) {
+      throw new RangeError('Interactive session requires valid identity, actions, and expiry');
+    }
+    const actions = [...new Set(input.actions)];
+    const createdAt = nowIso();
+    if (this.sqlite) {
+      this.sqlite
+        .prepare(
+          'INSERT INTO interactive_sessions (id, account, transaction_id, actions, consumed_actions, expires_at, revoked_at, created_at) VALUES (?, ?, ?, ?, ?, ?, NULL, ?)',
+        )
+        .run(
+          input.id,
+          input.account,
+          input.transactionId,
+          JSON.stringify(actions),
+          '[]',
+          input.expiresAt,
+          createdAt,
+        );
+    } else {
+      await this.requirePostgres().query(
+        "INSERT INTO interactive_sessions (id, account, transaction_id, actions, consumed_actions, expires_at, revoked_at, created_at) VALUES ($1, $2, $3, $4::jsonb, '[]'::jsonb, $5, NULL, $6)",
+        [
+          input.id,
+          input.account,
+          input.transactionId,
+          JSON.stringify(actions),
+          input.expiresAt,
+          createdAt,
+        ],
+      );
+    }
+    return {
+      id: input.id,
+      account: input.account,
+      transactionId: input.transactionId,
+      actions,
+      consumedActions: [],
+      expiresAt: input.expiresAt,
+      revokedAt: null,
+      createdAt,
+    };
+  }
+
+  public async getInteractiveSessionById(id: string): Promise<InteractiveSessionRecord | null> {
+    if (this.sqlite) {
+      const row = this.sqlite
+        .prepare('SELECT * FROM interactive_sessions WHERE id = ? LIMIT 1')
+        .get(id) as Record<string, unknown> | null;
+      return row ? this.mapInteractiveSessionRow(row) : null;
+    }
+    const response = await this.requirePostgres().query<Record<string, unknown>>(
+      'SELECT * FROM interactive_sessions WHERE id = $1 LIMIT 1',
+      [id],
+    );
+    const row = response.rows[0];
+    return row ? this.mapInteractiveSessionRow(row) : null;
+  }
+
+  public async revokeInteractiveSession(id: string): Promise<boolean> {
+    if (this.sqlite) {
+      const result = this.sqlite
+        .prepare(
+          'UPDATE interactive_sessions SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL',
+        )
+        .run(nowIso(), id);
+      return result.changes > 0;
+    }
+    const response = await this.requirePostgres().query<{ id: string }>(
+      'UPDATE interactive_sessions SET revoked_at = clock_timestamp() WHERE id = $1 AND revoked_at IS NULL RETURNING id',
+      [id],
+    );
+    return response.rows.length > 0;
+  }
+
+  public async consumeInteractiveSessionAction(id: string, action: string): Promise<boolean> {
+    if (!action.trim()) return false;
+    if (this.sqlite) {
+      const result = this.sqlite
+        .prepare(
+          `UPDATE interactive_sessions
+           SET consumed_actions = json_insert(consumed_actions, '$[#]', json(?))
+           WHERE id = ? AND revoked_at IS NULL
+             AND expires_at > strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+             AND EXISTS (SELECT 1 FROM json_each(actions) WHERE value = ?)
+             AND NOT EXISTS (SELECT 1 FROM json_each(consumed_actions) WHERE value = ?)`,
+        )
+        .run(JSON.stringify(action), id, action, action);
+      return result.changes > 0;
+    }
+    const response = await this.requirePostgres().query<{ id: string }>(
+      `UPDATE interactive_sessions
+       SET consumed_actions = consumed_actions || jsonb_build_array($2::text)
+       WHERE id = $1 AND revoked_at IS NULL AND expires_at > clock_timestamp()
+         AND actions @> jsonb_build_array($2::text)
+         AND NOT consumed_actions @> jsonb_build_array($2::text)
+       RETURNING id`,
+      [id, action],
+    );
+    return response.rows.length > 0;
+  }
+
   public async insertInteractiveTransaction(input: {
     id: string;
     account: string;
@@ -1374,6 +1652,45 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
       [input.account, input.identifier.value],
     );
     return result.rows.length === 1 ? this.mapTransactionRow(result.rows[0]) : null;
+  }
+
+  public async listTransactions(
+    input: TransactionHistoryQuery,
+  ): Promise<InteractiveTransactionRecord[]> {
+    validateTransactionHistory(input);
+    const values: Array<string | number> = [input.account, input.assetCode];
+    const bind = (value: string | number) => {
+      values.push(value);
+      return this.sqlite ? '?' : `$${values.length}`;
+    };
+    const where = [
+      this.sqlite ? 'account = ?' : 'account = $1',
+      this.sqlite ? 'asset_code = ?' : 'asset_code = $2',
+    ];
+    if (input.kind !== undefined) where.push(`kind = ${bind(input.kind)}`);
+    if (input.noOlderThan !== undefined)
+      where.push(`created_at >= ${bind(new Date(input.noOlderThan).toISOString())}`);
+    if (input.pagingId !== undefined) {
+      const cursor = await this.findInteractiveTransaction({
+        account: input.account,
+        identifier: { kind: 'id', value: input.pagingId },
+      });
+      if (
+        !cursor ||
+        cursor.assetCode !== input.assetCode ||
+        (input.kind !== undefined && cursor.kind !== input.kind)
+      ) {
+        throw new ValidationError('Invalid transaction history cursor');
+      }
+      where.push(
+        `(created_at < ${bind(cursor.createdAt)} OR (created_at = ${bind(cursor.createdAt)} AND id < ${bind(cursor.id)}))`,
+      );
+    }
+    const sql = `SELECT * FROM interactive_transactions WHERE ${where.join(' AND ')} ORDER BY created_at DESC, id DESC LIMIT ${bind(input.limit ?? 10)}`;
+    const rows = this.sqlite
+      ? (this.sqlite.prepare(sql).all(...values) as Record<string, unknown>[])
+      : (await this.requirePostgres().query<Record<string, unknown>>(sql, values)).rows;
+    return rows.map((row) => this.mapTransactionRow(row));
   }
 
   public async listPendingTransactionsBefore(
@@ -1961,6 +2278,10 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
       statusCode: number;
       responseBody: string;
     };
+    interactiveSession?: Pick<
+      InteractiveSessionRecord,
+      'id' | 'account' | 'transactionId' | 'actions' | 'expiresAt'
+    >;
   }): Promise<InteractiveTransactionRecord> {
     const transaction = input.transaction;
     const updatedAt = nowIso();
@@ -1982,6 +2303,21 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
             transaction.createdAt,
             updatedAt,
           );
+        if (input.interactiveSession) {
+          const session = input.interactiveSession;
+          sqlite
+            .prepare(
+              "INSERT INTO interactive_sessions (id, account, transaction_id, actions, consumed_actions, expires_at, revoked_at, created_at) VALUES (?, ?, ?, ?, '[]', ?, NULL, ?)",
+            )
+            .run(
+              session.id,
+              session.account,
+              session.transactionId,
+              JSON.stringify([...new Set(session.actions)]),
+              session.expiresAt,
+              nowIso(),
+            );
+        }
         const completed = sqlite
           .prepare(
             "UPDATE idempotency_keys SET status = 'completed', status_code = ?, response_body = ? WHERE scope = ? AND idempotency_key = ? AND request_hash = ? AND status = 'pending'",
@@ -2025,6 +2361,20 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
             updatedAt,
           ],
         );
+        if (input.interactiveSession) {
+          const session = input.interactiveSession;
+          await postgres.query(
+            "INSERT INTO interactive_sessions (id, account, transaction_id, actions, consumed_actions, expires_at, revoked_at, created_at) VALUES ($1, $2, $3, $4::jsonb, '[]'::jsonb, $5, NULL, $6)",
+            [
+              session.id,
+              session.account,
+              session.transactionId,
+              JSON.stringify([...new Set(session.actions)]),
+              session.expiresAt,
+              nowIso(),
+            ],
+          );
+        }
         const completed = await postgres.query<{ id: string }>(
           "UPDATE idempotency_keys SET status = 'completed', status_code = $1, response_body = $2 WHERE scope = $3 AND idempotency_key = $4 AND request_hash = $5 AND status = 'pending' RETURNING id",
           [
@@ -2866,6 +3216,342 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
     return result.rows.length > 0;
   }
 
+  public async reserveStellarSequence(input: {
+    accountId: string;
+    networkSequence: string;
+    operationId: string;
+    payloadHash: string;
+    owner: string;
+    durationMs: number;
+  }): Promise<StellarSequenceLease | null> {
+    const networkSequence = this.validateStellarSequenceInput(input);
+    const payloadHash = input.payloadHash.toLowerCase();
+    const token = randomUUID();
+    if (this.sqlite) {
+      const database = this.sqlite;
+      const reserve = database.transaction((): StellarSequenceLease | null => {
+        database
+          .prepare(
+            'INSERT INTO stellar_account_sequences (account_id, last_sequence) VALUES (?, ?) ON CONFLICT(account_id) DO NOTHING',
+          )
+          .run(input.accountId, input.networkSequence);
+        const account = database
+          .prepare('SELECT * FROM stellar_account_sequences WHERE account_id = ? LIMIT 1')
+          .get(input.accountId) as Record<string, unknown> | null;
+        if (!account) throw new ConfigError('Failed to reserve Stellar account sequence');
+
+        const activeOperationId = account.active_operation_id;
+        if (typeof activeOperationId === 'string') {
+          if (activeOperationId !== input.operationId) return null;
+          const operation = database
+            .prepare('SELECT * FROM stellar_sequence_operations WHERE operation_id = ? LIMIT 1')
+            .get(input.operationId) as Record<string, unknown> | null;
+          if (
+            !operation ||
+            operation.status !== 'pending' ||
+            operation.account_id !== input.accountId ||
+            operation.payload_hash !== payloadHash
+          ) {
+            throw new ConfigError('Stellar sequence operation identity was reused');
+          }
+          const updated = database
+            .prepare(
+              `UPDATE stellar_sequence_operations SET lease_owner = ?, lease_token = ?,
+                lease_expires_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '+' || (? / 1000.0) || ' seconds'),
+                lease_attempt = lease_attempt + 1 WHERE operation_id = ? AND status = 'pending'
+                AND lease_expires_at <= strftime('%Y-%m-%dT%H:%M:%fZ', 'now') RETURNING *`,
+            )
+            .get(input.owner, token, input.durationMs, input.operationId) as Record<
+            string,
+            unknown
+          > | null;
+          if (!updated) return null;
+          database
+            .prepare(
+              `UPDATE stellar_account_sequences SET lease_owner = ?, lease_token = ?,
+                lease_expires_at = ? WHERE account_id = ? AND active_operation_id = ?`,
+            )
+            .run(
+              input.owner,
+              token,
+              String(updated.lease_expires_at),
+              input.accountId,
+              input.operationId,
+            );
+          return this.mapStellarSequenceLease(updated);
+        }
+
+        const existingOperation = database
+          .prepare('SELECT * FROM stellar_sequence_operations WHERE operation_id = ? LIMIT 1')
+          .get(input.operationId) as Record<string, unknown> | null;
+        if (existingOperation) {
+          if (
+            existingOperation.account_id !== input.accountId ||
+            existingOperation.payload_hash !== payloadHash
+          ) {
+            throw new ConfigError('Stellar sequence operation identity was reused');
+          }
+          return null;
+        }
+
+        const lastSequence = BigInt(String(account.last_sequence));
+        const sequence = (networkSequence > lastSequence ? networkSequence : lastSequence) + 1n;
+        this.validateStellarSequence(sequence);
+        const operation = database
+          .prepare(
+            `INSERT INTO stellar_sequence_operations
+              (operation_id, account_id, payload_hash, sequence, status, lease_owner, lease_token, lease_expires_at, lease_attempt)
+              VALUES (?, ?, ?, ?, 'pending', ?, ?, strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '+' || (? / 1000.0) || ' seconds'), 1)
+              RETURNING *`,
+          )
+          .get(
+            input.operationId,
+            input.accountId,
+            payloadHash,
+            sequence.toString(),
+            input.owner,
+            token,
+            input.durationMs,
+          ) as Record<string, unknown> | null;
+        if (!operation) throw new ConfigError('Failed to create Stellar sequence operation');
+        database
+          .prepare(
+            `UPDATE stellar_account_sequences SET last_sequence = ?, active_operation_id = ?,
+              lease_owner = ?, lease_token = ?, lease_expires_at = ? WHERE account_id = ? AND active_operation_id IS NULL`,
+          )
+          .run(
+            sequence.toString(),
+            input.operationId,
+            input.owner,
+            token,
+            String(operation.lease_expires_at),
+            input.accountId,
+          );
+        return this.mapStellarSequenceLease(operation);
+      });
+      return reserve();
+    }
+
+    const postgres = this.requirePostgres();
+    await postgres.query('BEGIN');
+    try {
+      await postgres.query(
+        'INSERT INTO stellar_account_sequences (account_id, last_sequence) VALUES ($1, $2) ON CONFLICT(account_id) DO NOTHING',
+        [input.accountId, input.networkSequence],
+      );
+      const accountResult = await postgres.query<Record<string, unknown>>(
+        'SELECT * FROM stellar_account_sequences WHERE account_id = $1 FOR UPDATE',
+        [input.accountId],
+      );
+      const account = accountResult.rows[0];
+      if (!account) throw new ConfigError('Failed to reserve Stellar account sequence');
+
+      if (typeof account.active_operation_id === 'string') {
+        if (account.active_operation_id !== input.operationId) {
+          await postgres.query('ROLLBACK');
+          return null;
+        }
+        const updated = await postgres.query<Record<string, unknown>>(
+          `UPDATE stellar_sequence_operations SET lease_owner = $1, lease_token = $2,
+            lease_expires_at = clock_timestamp() + ($3 * interval '1 millisecond'), lease_attempt = lease_attempt + 1
+            WHERE operation_id = $4 AND account_id = $5 AND payload_hash = $6 AND status = 'pending'
+              AND lease_expires_at <= clock_timestamp() RETURNING *`,
+          [input.owner, token, input.durationMs, input.operationId, input.accountId, payloadHash],
+        );
+        const operation = updated.rows[0];
+        if (!operation) {
+          const existing = await postgres.query<Record<string, unknown>>(
+            'SELECT account_id, payload_hash, status FROM stellar_sequence_operations WHERE operation_id = $1',
+            [input.operationId],
+          );
+          const existingOperation = existing.rows[0];
+          await postgres.query('ROLLBACK');
+          if (
+            existingOperation &&
+            (existingOperation.account_id !== input.accountId ||
+              existingOperation.payload_hash !== payloadHash)
+          ) {
+            throw new ConfigError('Stellar sequence operation identity was reused');
+          }
+          return null;
+        }
+        await postgres.query(
+          'UPDATE stellar_account_sequences SET lease_owner = $1, lease_token = $2, lease_expires_at = $3 WHERE account_id = $4 AND active_operation_id = $5',
+          [input.owner, token, operation.lease_expires_at, input.accountId, input.operationId],
+        );
+        await postgres.query('COMMIT');
+        return this.mapStellarSequenceLease(operation);
+      }
+
+      const existing = await postgres.query<Record<string, unknown>>(
+        'SELECT account_id, payload_hash FROM stellar_sequence_operations WHERE operation_id = $1',
+        [input.operationId],
+      );
+      const existingOperation = existing.rows[0];
+      if (existingOperation) {
+        await postgres.query('ROLLBACK');
+        if (
+          existingOperation.account_id !== input.accountId ||
+          existingOperation.payload_hash !== payloadHash
+        ) {
+          throw new ConfigError('Stellar sequence operation identity was reused');
+        }
+        return null;
+      }
+
+      const lastSequence = BigInt(String(account.last_sequence));
+      const sequence = (networkSequence > lastSequence ? networkSequence : lastSequence) + 1n;
+      this.validateStellarSequence(sequence);
+      const inserted = await postgres.query<Record<string, unknown>>(
+        `INSERT INTO stellar_sequence_operations
+          (operation_id, account_id, payload_hash, sequence, status, lease_owner, lease_token, lease_expires_at, lease_attempt)
+          VALUES ($1, $2, $3, $4, 'pending', $5, $6, clock_timestamp() + ($7 * interval '1 millisecond'), 1)
+          RETURNING *`,
+        [
+          input.operationId,
+          input.accountId,
+          payloadHash,
+          sequence.toString(),
+          input.owner,
+          token,
+          input.durationMs,
+        ],
+      );
+      const operation = inserted.rows[0];
+      if (!operation) throw new ConfigError('Failed to create Stellar sequence operation');
+      await postgres.query(
+        `UPDATE stellar_account_sequences SET last_sequence = $1, active_operation_id = $2,
+          lease_owner = $3, lease_token = $4, lease_expires_at = $5 WHERE account_id = $6 AND active_operation_id IS NULL`,
+        [
+          sequence.toString(),
+          input.operationId,
+          input.owner,
+          token,
+          operation.lease_expires_at,
+          input.accountId,
+        ],
+      );
+      await postgres.query('COMMIT');
+      return this.mapStellarSequenceLease(operation);
+    } catch (error) {
+      await postgres.query('ROLLBACK').catch(() => undefined);
+      throw error;
+    }
+  }
+
+  public async completeStellarSequenceOperation(input: {
+    accountId: string;
+    operationId: string;
+    token: string;
+  }): Promise<boolean> {
+    if (!input.accountId.trim() || !input.operationId.trim() || !input.token.trim()) {
+      throw new RangeError('Invalid Stellar sequence completion');
+    }
+    if (this.sqlite) {
+      const database = this.sqlite;
+      const complete = database.transaction((): boolean => {
+        const updated = database
+          .prepare(
+            `UPDATE stellar_sequence_operations SET status = 'completed'
+              WHERE operation_id = ? AND account_id = ? AND lease_token = ? AND status = 'pending'
+                AND lease_expires_at > strftime('%Y-%m-%dT%H:%M:%fZ', 'now')`,
+          )
+          .run(input.operationId, input.accountId, input.token);
+        if (updated.changes === 0) return false;
+        const cleared = database
+          .prepare(
+            `UPDATE stellar_account_sequences SET active_operation_id = NULL, lease_owner = NULL,
+              lease_token = NULL, lease_expires_at = NULL WHERE account_id = ? AND active_operation_id = ? AND lease_token = ?`,
+          )
+          .run(input.accountId, input.operationId, input.token);
+        if (cleared.changes === 0)
+          throw new ConfigError('Stellar sequence lease ownership changed');
+        return true;
+      });
+      return complete();
+    }
+
+    const postgres = this.requirePostgres();
+    await postgres.query('BEGIN');
+    try {
+      await postgres.query(
+        'SELECT account_id FROM stellar_account_sequences WHERE account_id = $1 FOR UPDATE',
+        [input.accountId],
+      );
+      const updated = await postgres.query<Record<string, unknown>>(
+        `UPDATE stellar_sequence_operations SET status = 'completed'
+          WHERE operation_id = $1 AND account_id = $2 AND lease_token = $3 AND status = 'pending'
+            AND lease_expires_at > clock_timestamp() RETURNING operation_id`,
+        [input.operationId, input.accountId, input.token],
+      );
+      if (updated.rows.length === 0) {
+        await postgres.query('ROLLBACK');
+        return false;
+      }
+      const cleared = await postgres.query<Record<string, unknown>>(
+        `UPDATE stellar_account_sequences SET active_operation_id = NULL, lease_owner = NULL,
+          lease_token = NULL, lease_expires_at = NULL WHERE account_id = $1 AND active_operation_id = $2 AND lease_token = $3 RETURNING account_id`,
+        [input.accountId, input.operationId, input.token],
+      );
+      if (cleared.rows.length === 0)
+        throw new ConfigError('Stellar sequence lease ownership changed');
+      await postgres.query('COMMIT');
+      return true;
+    } catch (error) {
+      await postgres.query('ROLLBACK').catch(() => undefined);
+      throw error;
+    }
+  }
+
+  private validateStellarSequenceInput(input: {
+    accountId: string;
+    networkSequence: string;
+    operationId: string;
+    payloadHash: string;
+    owner: string;
+    durationMs: number;
+  }): bigint {
+    if (
+      !input.accountId.trim() ||
+      input.accountId.length > 128 ||
+      !input.operationId.trim() ||
+      input.operationId.length > 255 ||
+      !input.owner.trim() ||
+      input.owner.length > 255 ||
+      !/^[a-fA-F0-9]{64}$/.test(input.payloadHash) ||
+      !/^(0|[1-9]\d*)$/.test(input.networkSequence) ||
+      input.networkSequence.length > 19 ||
+      !Number.isSafeInteger(input.durationMs) ||
+      input.durationMs < 1 ||
+      input.durationMs > 86400000
+    ) {
+      throw new RangeError('Invalid Stellar sequence lease parameters');
+    }
+    const sequence = BigInt(input.networkSequence);
+    this.validateStellarSequence(sequence);
+    return sequence;
+  }
+
+  private validateStellarSequence(sequence: bigint): void {
+    if (sequence < 0n || sequence >= 9223372036854775807n) {
+      throw new RangeError('Stellar sequence must be below INT64_MAX');
+    }
+  }
+
+  private mapStellarSequenceLease(row: Record<string, unknown>): StellarSequenceLease {
+    const expiresAt = row.lease_expires_at;
+    return {
+      accountId: String(row.account_id),
+      sequence: String(row.sequence),
+      operationId: String(row.operation_id),
+      payloadHash: String(row.payload_hash),
+      owner: String(row.lease_owner),
+      token: String(row.lease_token),
+      expiresAt: expiresAt instanceof Date ? expiresAt.toISOString() : String(expiresAt),
+      attempt: Number(row.lease_attempt),
+    };
+  }
+
   private validateSettlementLeaseInput(
     operationId: string,
     identity: string,
@@ -3111,6 +3797,7 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
     // while only entries strictly older than the cutoff are removed.
     if (this.sqlite) {
       this.sqlite.prepare('DELETE FROM auth_challenges WHERE expires_at < ?').run(cutoffIso);
+      this.sqlite.prepare('DELETE FROM interactive_sessions WHERE expires_at < ?').run(cutoffIso);
       this.sqlite.prepare('DELETE FROM idempotency_keys WHERE created_at < ?').run(cutoffIso);
       this.sqlite
         .prepare(
@@ -3126,6 +3813,9 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
     }
 
     await this.requirePostgres().query('DELETE FROM auth_challenges WHERE expires_at < $1', [
+      cutoffIso,
+    ]);
+    await this.requirePostgres().query('DELETE FROM interactive_sessions WHERE expires_at < $1', [
       cutoffIso,
     ]);
     await this.requirePostgres().query('DELETE FROM idempotency_keys WHERE created_at < $1', [
@@ -3173,6 +3863,26 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
         row.created_at instanceof Date ? row.created_at.toISOString() : String(row.created_at),
       updatedAt:
         row.updated_at instanceof Date ? row.updated_at.toISOString() : String(row.updated_at),
+    };
+  }
+
+  private mapInteractiveSessionRow(row: Record<string, unknown>): InteractiveSessionRecord {
+    return {
+      id: String(row.id),
+      account: String(row.account),
+      transactionId: String(row.transaction_id),
+      actions: parseJsonStringArray(row.actions, this.provider === 'sqlite'),
+      consumedActions: parseJsonStringArray(row.consumed_actions, this.provider === 'sqlite'),
+      expiresAt:
+        row.expires_at instanceof Date ? row.expires_at.toISOString() : String(row.expires_at),
+      revokedAt:
+        row.revoked_at === null || row.revoked_at === undefined
+          ? null
+          : row.revoked_at instanceof Date
+            ? row.revoked_at.toISOString()
+            : String(row.revoked_at),
+      createdAt:
+        row.created_at instanceof Date ? row.created_at.toISOString() : String(row.created_at),
     };
   }
 
