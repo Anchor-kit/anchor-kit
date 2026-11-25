@@ -39,31 +39,32 @@ Deduplication in Anchor Kit is strictly scoped to the tuple of `(provider, event
 
 ### Why deduplication is provider-scoped
 
-External payment rails operate independently. Two distinct rails (for example, a SEPA rail and a mobile money rail) can conceivably assign the same event ID format or numerical sequence (such as `1001` or `evt_test_01`). 
+External payment rails operate independently. Two distinct rails (for example, a SEPA rail and a mobile money rail) can conceivably assign the same event ID format or numerical sequence (such as `1001` or `evt_test_01`).
 
-Global deduplication by `event_id` alone would cause a collision: the second provider's legitimate transaction event would be incorrectly flagged as a duplicate and silently ignored. 
+Global deduplication by `event_id` alone would cause a collision: the second provider's legitimate transaction event would be incorrectly flagged as a duplicate and silently ignored.
 
 By binding event identity to the provider:
+
 - `mock-rail-eu:evt_sim_982341` and `mock-pay-ng:evt_sim_982341` are distinct operations.
 - Each provider maintains an isolated namespace in the `webhook_events` table.
 
 ### Storage schema (`webhook_events`)
 
-| Column | Type | Description |
-| :--- | :--- | :--- |
-| `id` | `TEXT` (UUID) | Internal primary key for the record. |
-| `event_id` | `TEXT` | Provider's external event identifier. |
-| `provider` | `TEXT` | Rail/partner identifier (e.g. `mock-rail-eu`). |
-| `operation_key` | `TEXT` | Deterministic composite key (`${provider}:${eventId}`). |
-| `status` | `TEXT` | Lifecycle state: `'pending'`, `'processed'`, `'failed'`, or `'unresolved'`. |
-| `payload` | `TEXT` / `JSONB` | JSON serialized payload received with the webhook. |
-| `attempt_id` | `TEXT` (UUID) | Unique identifier of the current execution attempt. |
-| `attempt_number` | `INTEGER` | Monotonically incrementing attempt counter (starts at 0, 1 on first claim). |
-| `lease_owner` | `TEXT` (UUID) | Worker instance token holding the execution lease. |
-| `lease_expires_at` | `TEXT` / `TIMESTAMPTZ`| Expiry timestamp of the active execution lease (60s default). |
-| `processed_at` | `TEXT` / `TIMESTAMPTZ`| Timestamp when processing reached completion. |
-| `error_message` | `TEXT` | Error description if the attempt failed or timed out. |
-| `recovery_result` | `TEXT` / `JSONB` | Persisted outcome from payment rail recovery lookups. |
+| Column             | Type                   | Description                                                                 |
+| :----------------- | :--------------------- | :-------------------------------------------------------------------------- |
+| `id`               | `TEXT` (UUID)          | Internal primary key for the record.                                        |
+| `event_id`         | `TEXT`                 | Provider's external event identifier.                                       |
+| `provider`         | `TEXT`                 | Rail/partner identifier (e.g. `mock-rail-eu`).                              |
+| `operation_key`    | `TEXT`                 | Deterministic composite key (`${provider}:${eventId}`).                     |
+| `status`           | `TEXT`                 | Lifecycle state: `'pending'`, `'processed'`, `'failed'`, or `'unresolved'`. |
+| `payload`          | `TEXT` / `JSONB`       | JSON serialized payload received with the webhook.                          |
+| `attempt_id`       | `TEXT` (UUID)          | Unique identifier of the current execution attempt.                         |
+| `attempt_number`   | `INTEGER`              | Monotonically incrementing attempt counter (starts at 0, 1 on first claim). |
+| `lease_owner`      | `TEXT` (UUID)          | Worker instance token holding the execution lease.                          |
+| `lease_expires_at` | `TEXT` / `TIMESTAMPTZ` | Expiry timestamp of the active execution lease (60s default).               |
+| `processed_at`     | `TEXT` / `TIMESTAMPTZ` | Timestamp when processing reached completion.                               |
+| `error_message`    | `TEXT`                 | Error description if the attempt failed or timed out.                       |
+| `recovery_result`  | `TEXT` / `JSONB`       | Persisted outcome from payment rail recovery lookups.                       |
 
 ---
 
@@ -71,14 +72,14 @@ By binding event identity to the provider:
 
 The table below summarizes system behavior for the possible delivery combinations:
 
-| Scenario | Condition | System Action | HTTP Status | Response `duplicate` | Response `status` | Callback Invocation |
-| :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| **New Event** | `(provider, event_id)` not present | Inserts row as `pending`, claims lease, calls `onEvent`, updates to `processed`. | `200 OK` | `false` | *(Omitted)* | Executed (1 time) |
-| **Duplicate Delivery (Processed)** | `(provider, event_id)` exists with `status = 'processed'` | Record found in storage; returns duplicate record immediately. | `200 OK` | `true` | `"processed"` | **Skipped** (0 times) |
-| **Concurrent Duplicate (In-flight)** | `(provider, event_id)` exists with `status = 'pending'` & active lease | Claim fails due to active lease lock held by another process; returns duplicate record. | `200 OK` | `true` | `"pending"` / omitted | **Skipped** |
-| **Duplicate Delivery (Unresolved)** | `(provider, event_id)` exists with `status = 'unresolved'` | Reconciled through `reconcilePreviousAttempt` or recovery hooks without side-effects. | `200 OK` | `true` | `"unresolved"` / recovered | **Skipped** |
-| **Retry of Failed Event** | `(provider, event_id)` exists with `status = 'failed'` | CAS update resets record to `pending` with new payload; allows single retry execution. | `200 OK` (or `400` on repeat error) | `false` | *(Omitted)* | Executed (retry) |
-| **Different Providers, Same Event ID** | Provider A and Provider B send identical `event_id` | Keys `A:ID` and `B:ID` are independent. Both insert and process separately. | `200 OK` (each) | `false` (each) | *(Omitted)* | Executed for both |
+| Scenario                               | Condition                                                              | System Action                                                                           | HTTP Status                         | Response `duplicate` | Response `status`          | Callback Invocation   |
+| :------------------------------------- | :--------------------------------------------------------------------- | :-------------------------------------------------------------------------------------- | :---------------------------------- | :------------------- | :------------------------- | :-------------------- |
+| **New Event**                          | `(provider, event_id)` not present                                     | Inserts row as `pending`, claims lease, calls `onEvent`, updates to `processed`.        | `200 OK`                            | `false`              | _(Omitted)_                | Executed (1 time)     |
+| **Duplicate Delivery (Processed)**     | `(provider, event_id)` exists with `status = 'processed'`              | Record found in storage; returns duplicate record immediately.                          | `200 OK`                            | `true`               | `"processed"`              | **Skipped** (0 times) |
+| **Concurrent Duplicate (In-flight)**   | `(provider, event_id)` exists with `status = 'pending'` & active lease | Claim fails due to active lease lock held by another process; returns duplicate record. | `200 OK`                            | `true`               | `"pending"` / omitted      | **Skipped**           |
+| **Duplicate Delivery (Unresolved)**    | `(provider, event_id)` exists with `status = 'unresolved'`             | Reconciled through `reconcilePreviousAttempt` or recovery hooks without side-effects.   | `200 OK`                            | `true`               | `"unresolved"` / recovered | **Skipped**           |
+| **Retry of Failed Event**              | `(provider, event_id)` exists with `status = 'failed'`                 | CAS update resets record to `pending` with new payload; allows single retry execution.  | `200 OK` (or `400` on repeat error) | `false`              | _(Omitted)_                | Executed (retry)      |
+| **Different Providers, Same Event ID** | Provider A and Provider B send identical `event_id`                    | Keys `A:ID` and `B:ID` are independent. Both insert and process separately.             | `200 OK` (each)                     | `false` (each)       | _(Omitted)_                | Executed for both     |
 
 ---
 
@@ -93,6 +94,7 @@ Anchor Kit returns HTTP `200 OK` for duplicate deliveries to **acknowledge recei
 ### Response structures
 
 #### 1. Initial successful delivery
+
 ```json
 {
   "received": true,
@@ -104,7 +106,9 @@ Anchor Kit returns HTTP `200 OK` for duplicate deliveries to **acknowledge recei
 ```
 
 #### 2. Duplicate delivery (already processed)
+
 When an identical `(provider, event_id)` has already completed processing, the existing status is appended to the response:
+
 ```json
 {
   "received": true,
@@ -117,7 +121,9 @@ When an identical `(provider, event_id)` has already completed processing, the e
 ```
 
 #### 3. Processing failure
+
 If the cooperative callback fails or throws an unhandled error:
+
 ```json
 {
   "error": "webhook_error",
@@ -128,7 +134,9 @@ If the cooperative callback fails or throws an unhandled error:
 ```
 
 #### 4. Invalid provider identifier
+
 If the provider name contains invalid characters:
+
 ```json
 {
   "error": "invalid_request",
@@ -137,7 +145,9 @@ If the provider name contains invalid characters:
 ```
 
 #### 5. Webhooks disabled
+
 When `operational.webhooksEnabled: false`:
+
 ```json
 {
   "error": "webhooks_disabled",
@@ -150,6 +160,7 @@ When `operational.webhooksEnabled: false`:
 ## Safe troubleshooting runbook
 
 All examples below use safe, fictional identifiers and placeholders:
+
 - Primary rail: `mock-rail-eu`
 - Secondary rail: `mock-pay-ng`
 - Event ID: `evt_sim_982341`
@@ -160,6 +171,7 @@ All examples below use safe, fictional identifiers and placeholders:
 Simulate an initial delivery followed by a re-delivery from the same provider.
 
 1. **Calculate the HMAC signature for the payload**:
+
    ```bash
    WEBHOOK_SECRET="<configured-webhook-secret>"
    BODY='{"id":"evt_sim_982341","provider":"mock-rail-eu","type":"deposit.settled","amount":"100.00"}'
@@ -167,6 +179,7 @@ Simulate an initial delivery followed by a re-delivery from the same provider.
    ```
 
 2. **Send initial delivery**:
+
    ```bash
    curl -s -X POST "http://localhost:3000/anchor/webhooks/events" \
      -H "Content-Type: application/json" \
@@ -174,7 +187,9 @@ Simulate an initial delivery followed by a re-delivery from the same provider.
      -H "x-anchor-signature: ${SIGNATURE}" \
      -d "${BODY}"
    ```
-   *Expected response:*
+
+   _Expected response:_
+
    ```json
    {
      "received": true,
@@ -193,7 +208,7 @@ Simulate an initial delivery followed by a re-delivery from the same provider.
      -H "x-anchor-signature: ${SIGNATURE}" \
      -d "${BODY}"
    ```
-   *Expected response:*
+   _Expected response:_
    ```json
    {
      "received": true,
@@ -204,7 +219,7 @@ Simulate an initial delivery followed by a re-delivery from the same provider.
      "status": "processed"
    }
    ```
-   *Verification:*
+   _Verification:_
    - HTTP response code is `200`.
    - `"duplicate": true` confirms the re-delivery was recognized.
    - The registered `onEvent` callback was **not** invoked a second time.
@@ -216,6 +231,7 @@ Simulate an initial delivery followed by a re-delivery from the same provider.
 Demonstrate that when a different provider sends an event with the exact same `event_id`, it is accepted and processed independently.
 
 1. **Prepare payload for the second provider (`mock-pay-ng`)**:
+
    ```bash
    BODY_B='{"id":"evt_sim_982341","provider":"mock-pay-ng","type":"charge.successful","amount":"50.00"}'
    SIGNATURE_B=$(printf '%s' "${BODY_B}" | openssl dgst -sha256 -hmac "${WEBHOOK_SECRET}" -hex | awk '{print $NF}')
@@ -229,7 +245,7 @@ Demonstrate that when a different provider sends an event with the exact same `e
      -H "x-anchor-signature: ${SIGNATURE_B}" \
      -d "${BODY_B}"
    ```
-   *Expected response:*
+   _Expected response:_
    ```json
    {
      "received": true,
@@ -239,7 +255,7 @@ Demonstrate that when a different provider sends an event with the exact same `e
      "provider": "mock-pay-ng"
    }
    ```
-   *Verification:*
+   _Verification:_
    - The request succeeds with `"duplicate": false`.
    - The operation is registered under `mock-pay-ng:evt_sim_982341`, completely isolated from `mock-rail-eu:evt_sim_982341`.
 
@@ -250,8 +266,9 @@ Demonstrate that when a different provider sends an event with the exact same `e
 When investigating delivery state or diagnosing hung webhooks, run safe read-only queries against the database.
 
 #### Check event lifecycle status and lease state (PostgreSQL)
+
 ```sql
-SELECT 
+SELECT
     id,
     event_id,
     provider,
@@ -263,40 +280,42 @@ SELECT
     error_message,
     created_at,
     processed_at
-FROM webhook_events 
+FROM webhook_events
 WHERE provider = 'mock-rail-eu' AND event_id = 'evt_sim_982341';
 ```
 
 #### Identify hung or expired webhook leases
+
 ```sql
 -- Events stuck in 'pending' whose processing lease has expired
-SELECT 
-    id, 
-    provider, 
-    event_id, 
-    attempt_number, 
-    lease_owner, 
-    lease_expires_at 
-FROM webhook_events 
-WHERE status = 'pending' 
+SELECT
+    id,
+    provider,
+    event_id,
+    attempt_number,
+    lease_owner,
+    lease_expires_at
+FROM webhook_events
+WHERE status = 'pending'
   AND lease_expires_at < NOW()
-ORDER BY created_at ASC 
+ORDER BY created_at ASC
 LIMIT 20;
 ```
 
 #### Check retry history for failed events
+
 ```sql
-SELECT 
-    id, 
-    provider, 
-    event_id, 
-    status, 
-    attempt_number, 
-    error_message, 
-    created_at 
-FROM webhook_events 
+SELECT
+    id,
+    provider,
+    event_id,
+    status,
+    attempt_number,
+    error_message,
+    created_at
+FROM webhook_events
 WHERE status IN ('failed', 'unresolved')
-ORDER BY created_at DESC 
+ORDER BY created_at DESC
 LIMIT 20;
 ```
 
