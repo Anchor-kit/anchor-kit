@@ -145,6 +145,47 @@ function validateFrameworkNumbers(framework: AnchorKitConfig['framework']): bool
     throw new Error('framework.queue.onError must be a function');
   }
 
+  const retry = framework.queue?.retry;
+  if (retry !== undefined) {
+    if (typeof retry !== 'object' || retry === null || Array.isArray(retry)) {
+      throw new Error('framework.queue.retry must be an object');
+    }
+
+    if (retry.maxAttempts !== undefined && !isPositiveSafeInteger(retry.maxAttempts)) {
+      throw new Error('framework.queue.retry.maxAttempts must be a positive safe integer');
+    }
+
+    for (const key of ['baseDelayMs', 'maxDelayMs'] as const) {
+      const value = retry[key];
+      if (value === undefined) continue;
+      if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0) {
+        throw new Error(`framework.queue.retry.${key} must be a non-negative safe integer`);
+      }
+    }
+
+    if (
+      retry.baseDelayMs !== undefined &&
+      retry.maxDelayMs !== undefined &&
+      retry.baseDelayMs > retry.maxDelayMs
+    ) {
+      throw new Error('framework.queue.retry.baseDelayMs must be <= maxDelayMs');
+    }
+  }
+
+  if (
+    framework.queue?.classifyError !== undefined &&
+    typeof framework.queue.classifyError !== 'function'
+  ) {
+    throw new Error('framework.queue.classifyError must be a function');
+  }
+
+  if (
+    framework.queue?.onFailedJob !== undefined &&
+    typeof framework.queue.onFailedJob !== 'function'
+  ) {
+    throw new Error('framework.queue.onFailedJob must be a function');
+  }
+
   const watchersEnabled = framework.watchers?.enabled;
   if (watchersEnabled !== undefined && typeof watchersEnabled !== 'boolean') {
     throw new Error('framework.watchers.enabled must be a boolean');

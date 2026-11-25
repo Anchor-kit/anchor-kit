@@ -8,6 +8,46 @@ bun test tests/services/refund-serialization.test.ts tests/runtime/database/refu
 
 Expected result: all three files pass. The checks cover transaction linkage, SQLite persistence across reconnect, guarded status changes, and exact refund totals in an authorized transaction response. The tests do not send refunds. PostgreSQL coverage runs when `DATABASE_URL` points to a disposable database.
 
+For Paystack input conversion, run:
+
+```sh
+bun test tests/services/paystack-inputs.test.ts tests/services/paystack-status.test.ts
+```
+
+Expected result: 5 tests pass. The checks cover exact minor-unit conversion, reference validation, and test-mode status lookup using recorded responses; they make no provider requests. Callers must compare the returned amount and currency with the expected operation before acting on a payment status.
+
+For transaction trace event filtering, run:
+
+```sh
+bun test tests/services/transaction-trace.test.ts
+```
+
+Expected result: 2 tests pass. The helper forwards only named correlation fields to a host sink. It does not provide storage or a trace query.
+
+For settlement payment XDR, run:
+
+```sh
+bun test tests/utils/stellar.test.ts
+```
+
+Expected result: 48 tests pass. The settlement check verifies the account sequence, fee, expiry, recipient, asset, and amount. The caller must load and safely allocate the account sequence before building a transaction; this helper does not submit it.
+
+For signed settlement identity, run:
+
+```sh
+bun test tests/services/settlement-identity.test.ts
+```
+
+Expected result: 2 tests pass. Hashing uses the supplied network passphrase and rejects unsigned or malformed envelopes. Signature verification and protected persistence are separate requirements.
+
+For the example deposit placeholder, run:
+
+```sh
+bun test tests/example-express-app.test.ts
+```
+
+Expected result: 18 tests pass. The deposit URL returns a non-cacheable unavailable page. It does not yet collect fields or complete a deposit.
+
 Run the focused tests from the repository root:
 
 ```sh

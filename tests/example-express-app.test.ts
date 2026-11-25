@@ -6,6 +6,7 @@ import { Readable } from 'node:stream';
 import { unlinkSync } from 'node:fs';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { Keypair, Transaction } from '@stellar/stellar-sdk';
+import request from 'supertest';
 import { createExampleApp, isSqliteDatabaseUrl } from '../example/express-app.ts';
 import { version } from '../package.json';
 
@@ -173,6 +174,15 @@ describe('example/express-app', () => {
 
   afterAll(async () => {
     await harness.cleanup();
+  });
+
+  it('shows a non-cacheable unavailable page without reflecting the transaction ID', async () => {
+    const response = await request(harness.runtime.app).get('/deposit/example-id');
+    expect(response.status).toBe(503);
+    expect(response.headers['cache-control']).toBe('no-store');
+    expect(response.headers['content-security-policy']).toContain("default-src 'none'");
+    expect(response.text).toContain('Deposit unavailable');
+    expect(response.text).not.toContain('example-id');
   });
 
   it.each([
