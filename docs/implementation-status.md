@@ -24,7 +24,7 @@ The current product scope and runtime decisions are defined in [`anchor-kit-trd.
 - Transaction watcher lifecycle for polling pending transactions, persisting watcher tasks, and dispatching work through the queue.
 - Plugin route registration and active deposit-request, SEP-10 challenge, and transaction-status hooks. The withdrawal-request hook is typed but is not invoked.
 - Typed KYC verification contract and deterministic in-memory mock provider for local development and tests. Customer persistence is available; asset-policy enforcement is not connected.
-- SEP-10 signer-weight verification primitive; account signer lookup and endpoint integration remain separate work.
+- SEP-10 account authentication uses an injectable account signer lookup: existing accounts must meet their medium threshold, genuine missing accounts use the protocol's single-master-signature branch, and lookup outages fail closed instead of being read as account absence.
 - Provider-neutral payment rail adapter contract for initiation, event verification, status lookup, and recovery. No provider implementation is bundled.
 
 ## Protocol Conformance (Not Yet Implemented)

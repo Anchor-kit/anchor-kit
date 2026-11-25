@@ -1,14 +1,28 @@
 import type { AnchorConfig } from '@/core/config.ts';
 import { ConfigError, PayloadTooLargeError, ValidationError } from '@/core/errors.ts';
 import { InMemoryRateLimiter, type RateLimitRule } from '@/runtime/http/rate-limiter.ts';
-import type { AccountSigner, DatabaseAdapter, WebhookProcessor } from '@/runtime/interfaces.ts';
+import type {
+  AccountSigner,
+  DatabaseAdapter,
+  InteractiveTransactionIdentifier,
+  InteractiveTransactionRecord,
+  KycVerificationProvider,
+  Sep10AccountLookup,
+  Sep10AccountSigners,
+  WebhookProcessor,
+} from '@/runtime/interfaces.ts';
+import type { Customer } from '@/types/customer.ts';
+import type { KycData } from '@/types/foundation.ts';
 import type { PluginRouteContext, RouteDefinition } from '@/types/foundation.ts';
 import type { AnchorPluginHooks, DepositRequestBody } from '@/types/plugin.ts';
 import { IdempotencyUtils } from '../../utils/idempotency.ts';
+import { createInteractiveInitiationResponse } from '@/core/sep24/interactive-response.ts';
+import { createInteractiveSession } from '@/utils/interactive-session.ts';
 import Big from 'big.js';
 import {
   Account,
   Keypair,
+  Memo,
   Operation,
   StrKey,
   Transaction,
@@ -19,6 +33,7 @@ import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { version } from '../../../package.json';
 import { extractClientIdentifier } from './client-identifier.ts';
+import { serializeRefunds } from '@/services/refund-serialization.ts';
 
 const SEP10_AUTH_OPERATION_SUFFIX = ' auth';
 
@@ -39,21 +54,34 @@ export const ACCESS_TOKEN_AUDIENCE = 'anchor-api';
 export interface ExpressRouterContext {
   config: AnchorConfig;
   database: DatabaseAdapter;
+  isReady: () => boolean;
   webhookProcessor: WebhookProcessor;
+  kycVerificationProvider?: KycVerificationProvider;
   sep10ServerKeypair: Keypair;
   networkPassphrase: string;
   maxBodyBytes: number;
   corsOrigins: string[] | undefined;
   requestTimeout: number;
   rateLimiter: InMemoryRateLimiter;
-  rateRules: Record<'auth_challenge' | 'auth_token' | 'webhook' | 'deposit', RateLimitRule>;
+  rateRules: Record<
+    'auth_challenge' | 'auth_token' | 'webhook' | 'deposit' | 'customer',
+    RateLimitRule
+  >;
   depositRequestHooks?: NonNullable<AnchorPluginHooks['onDepositRequest']>[];
   sep10ChallengeHooks?: NonNullable<AnchorPluginHooks['onSep10Challenge']>[];
+  sep10AccountLookup?: Sep10AccountLookup;
   pluginRoutes?: Array<{ pluginId: string; route: RouteDefinition }>;
 }
 
 interface AuthenticatedRequestData {
   account: string;
+}
+
+interface Sep10AccountIdentity {
+  address: string;
+  signer: string;
+  subject: string;
+  memo?: string;
 }
 
 type RawBodyValue = string | Buffer | Uint8Array;
@@ -146,7 +174,7 @@ function setCorsHeaders(
     }
     if (origin && corsOrigins && corsOrigins.includes(origin)) {
       res.setHeader('Access-Control-Allow-Origin', origin);
-      res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+      res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, OPTIONS');
       res.setHeader(
         'Access-Control-Allow-Headers',
         'Content-Type, Authorization, Idempotency-Key, X-Anchor-Signature, X-Webhook-Provider',
@@ -281,6 +309,68 @@ function jsonParseObject(rawBody: RawBodyValue): Record<string, unknown> {
   return parsed as Record<string, unknown>;
 }
 
+async function parseCustomerBody(
+  req: IncomingMessage,
+  res: ServerResponse,
+  maxBodyBytes: number,
+): Promise<Record<string, unknown> | null> {
+  const contentType = firstNonEmptyString(req.headers['content-type']);
+  const mediaType = contentType?.split(';', 1)[0]?.trim().toLowerCase();
+  const request = req as IncomingRequestWithRawBody;
+  if (request.body !== undefined && request.body !== null && request.rawBody === undefined) {
+    sendJson(res, 400, {
+      error: 'invalid_request',
+      message: 'Raw request body is required for customer submissions',
+    });
+    return null;
+  }
+
+  if (mediaType !== 'application/json' && mediaType !== 'application/x-www-form-urlencoded') {
+    sendJson(res, 400, {
+      error: 'invalid_request',
+      message: 'Content-Type must be application/json or application/x-www-form-urlencoded',
+    });
+    return null;
+  }
+
+  let rawBody: RawBodyValue;
+  try {
+    rawBody = await readRawBody(req, maxBodyBytes);
+  } catch (error) {
+    if (error instanceof PayloadTooLargeError) {
+      sendJson(res, 413, { error: 'payload_too_large', message: error.message });
+      return null;
+    }
+    throw error;
+  }
+
+  if (mediaType === 'application/json') {
+    try {
+      return jsonParseObject(rawBody);
+    } catch (error) {
+      if (error instanceof ValidationError) {
+        sendJson(res, 400, { error: 'invalid_request', message: error.message });
+        return null;
+      }
+      throw error;
+    }
+  }
+
+  const params = new URLSearchParams(toUtf8String(rawBody));
+  const body: Record<string, unknown> = {};
+  for (const [key, value] of params) {
+    if (Object.hasOwn(body, key)) {
+      sendJson(res, 400, {
+        error: 'invalid_request',
+        message: `Duplicate customer field: ${key}`,
+      });
+      return null;
+    }
+    body[key] = value;
+  }
+  return body;
+}
+
 async function parsePostJsonBody(
   req: IncomingMessage,
   res: ServerResponse,
@@ -324,6 +414,160 @@ async function parsePostJsonBody(
   }
 }
 
+/** JSON.parse accepts duplicate object keys, so check the top-level deposit fields too. */
+function hasDuplicateDepositJsonKeys(rawBody: RawBodyValue): boolean {
+  const text = toUtf8String(rawBody);
+  let index = text.indexOf('{') + 1;
+  const seen = new Set<string>();
+  const whitespace = () => {
+    while (/\s/.test(text[index] ?? '') && index < text.length) index++;
+  };
+  const skipString = () => {
+    const start = index++;
+    while (index < text.length) {
+      if (text[index] === '\\') {
+        index += 2;
+        continue;
+      }
+      if (text[index++] === '"') return text.slice(start, index);
+    }
+    throw new Error('invalid JSON string');
+  };
+  while (index < text.length) {
+    whitespace();
+    if (text[index] === '}') break;
+    const key = JSON.parse(skipString()) as string;
+    if (seen.has(key)) return true;
+    seen.add(key);
+    whitespace();
+    index++; // colon; syntax has already been validated by JSON.parse
+    let depth = 0;
+    while (index < text.length) {
+      const char = text[index];
+      if (char === '"') {
+        skipString();
+        continue;
+      }
+      if (char === '{' || char === '[') depth++;
+      else if (char === '}' || char === ']') {
+        if (depth === 0) break;
+        depth--;
+      } else if (char === ',' && depth === 0) break;
+      index++;
+    }
+    if (text[index] === ',') index++;
+  }
+  return false;
+}
+
+/** Parse deposit fields only after enforcing the raw byte limit and duplicate checks. */
+async function parseDepositRequestBody(
+  req: IncomingMessage,
+  res: ServerResponse,
+  maxBodyBytes: number,
+): Promise<{
+  rawBody: RawBodyValue;
+  body: Record<string, unknown>;
+  isStandardSep24: boolean;
+} | null> {
+  const contentType = firstNonEmptyString(req.headers['content-type']);
+  const mediaType = contentType?.split(';', 1)[0]?.trim().toLowerCase();
+  if (mediaType === 'application/json') {
+    const request = req as IncomingRequestWithRawBody;
+    if (
+      request.rawBody === undefined &&
+      request.body !== undefined &&
+      typeof request.body !== 'string'
+    ) {
+      sendJson(res, 400, {
+        error: 'invalid_request',
+        message: 'Raw JSON body is required',
+      });
+      return null;
+    }
+    const parsed = await parsePostJsonBody(req, res, maxBodyBytes);
+    if (parsed && hasDuplicateDepositJsonKeys(parsed.rawBody)) {
+      sendJson(res, 400, { error: 'invalid_request', message: 'Duplicate deposit fields' });
+      return null;
+    }
+    return parsed ? { ...parsed, isStandardSep24: false } : null;
+  }
+  if (mediaType !== 'application/x-www-form-urlencoded' && mediaType !== 'multipart/form-data') {
+    sendJson(res, 400, { error: 'invalid_request', message: 'Unsupported deposit Content-Type' });
+    return null;
+  }
+  // Framework-parsed objects have lost duplicate fields and their original byte size.
+  const request = req as IncomingRequestWithRawBody;
+  if (
+    request.rawBody === undefined &&
+    request.body !== undefined &&
+    typeof request.body !== 'string'
+  ) {
+    sendJson(res, 400, { error: 'invalid_request', message: 'Raw form body is required' });
+    return null;
+  }
+  // URL encoded and multipart forms preserve the raw field list for duplicate checks.
+  let rawBody: RawBodyValue;
+  try {
+    rawBody = await readRawBody(req, maxBodyBytes);
+  } catch (error) {
+    if (error instanceof PayloadTooLargeError) {
+      sendJson(res, 413, {
+        error: 'payload_too_large',
+        message: error.message,
+      });
+      return null;
+    }
+    throw error;
+  }
+  try {
+    const bytes = typeof rawBody === 'string' ? Buffer.from(rawBody, 'utf8') : Buffer.from(rawBody);
+    const body: Record<string, unknown> = Object.create(null) as Record<string, unknown>;
+    if (mediaType === 'application/x-www-form-urlencoded') {
+      const text = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+      // URLSearchParams tolerates invalid escapes; reject them before normalization.
+      for (const part of text.split('&')) {
+        for (const field of part.split('=')) decodeURIComponent(field.replace(/\+/g, ' '));
+      }
+      for (const [key, value] of new URLSearchParams(text)) {
+        if (Object.hasOwn(body, key)) throw new Error('duplicate');
+        body[key] = value;
+      }
+    } else {
+      const form = await new Request('http://localhost/', {
+        method: 'POST',
+        headers: { 'content-type': contentType! },
+        body: new Uint8Array(bytes),
+      }).formData();
+      form.forEach((value, key) => {
+        if (Object.hasOwn(body, key) || typeof value !== 'string') throw new Error('invalid field');
+        body[key] = value;
+      });
+    }
+    return { rawBody, body, isStandardSep24: true };
+  } catch {
+    sendJson(res, 400, { error: 'invalid_request', message: 'Invalid or duplicate form fields' });
+    return null;
+  }
+}
+
+async function createStandardSep24Initiation(
+  context: ExpressRouterContext,
+  interactiveDomain: string,
+  account: string,
+  transactionId: string,
+) {
+  const session = await createInteractiveSession(
+    { account, transactionId, actions: ['deposit'] },
+    context.config.get('security').interactiveJwtSecret,
+  );
+  const url = new URL(buildInteractiveUrl(interactiveDomain, transactionId));
+  url.searchParams.set('token', session);
+  return createInteractiveInitiationResponse({
+    id: transactionId,
+    url: url.toString(),
+  });
+}
 function sha256(input: string | Buffer | Uint8Array): string {
   return createHash('sha256').update(input).digest('hex');
 }
@@ -379,11 +623,14 @@ function endpointPath(req: IncomingMessage): string {
 
 const BUILT_IN_PATHS = new Set([
   '/health',
+  '/ready',
   '/info',
   '/auth',
   '/auth/challenge',
   '/auth/token',
+  '/customer',
   '/transactions/deposit/interactive',
+  '/transaction',
   '/webhooks/events',
 ]);
 const BUILT_IN_TRANSACTION_PATH = /^\/transactions\/[^/]+$/;
@@ -543,6 +790,132 @@ export function hasSufficientSignerWeight(
   return false;
 }
 
+function countValidSignatures(transaction: Transaction, publicKey: string): number {
+  const keypair = Keypair.fromPublicKey(publicKey);
+  const hash = transaction.hash();
+  let count = 0;
+
+  for (const signature of transaction.signatures) {
+    try {
+      if (keypair.verify(hash, signature.signature())) {
+        count += 1;
+      }
+    } catch {
+      // Ignore malformed signature entries.
+    }
+  }
+
+  return count;
+}
+
+/**
+ * SEP-10 requires every signature on a challenge to belong to a key the anchor
+ * can account for: the server account, an authorized account signer, or the
+ * configured client-domain signing key. Unaccounted or malformed entries reject.
+ */
+export function hasOnlyAuthorizedSep10Signatures(
+  transaction: Transaction,
+  authorizedKeys: readonly string[],
+): boolean {
+  const hash = transaction.hash();
+  const keypairs: Keypair[] = [];
+  for (const key of authorizedKeys) {
+    if (!StrKey.isValidEd25519PublicKey(key)) continue;
+    try {
+      keypairs.push(Keypair.fromPublicKey(key));
+    } catch {
+      // Ignore malformed signer keys; they cannot produce a valid signature.
+    }
+  }
+
+  for (const signature of transaction.signatures) {
+    const matched = keypairs.some((keypair) => {
+      try {
+        return keypair.verify(hash, signature.signature());
+      } catch {
+        return false;
+      }
+    });
+    if (!matched) return false;
+  }
+
+  return true;
+}
+
+/**
+ * SEP-10 nonexistent-account branch: the signed challenge must carry exactly one
+ * valid master-key signature for the client account, and no signature from a key
+ * outside `authorizedKeys`. Extra, duplicated, or invalid signatures reject.
+ */
+export function hasSingleMasterSignature(
+  transaction: Transaction,
+  account: string,
+  authorizedKeys: readonly string[],
+): boolean {
+  if (!StrKey.isValidEd25519PublicKey(account)) return false;
+  if (countValidSignatures(transaction, account) !== 1) return false;
+  return hasOnlyAuthorizedSep10Signatures(transaction, [account, ...authorizedKeys]);
+}
+
+export type Sep10AccountAuthorization = 'authorized' | 'rejected' | 'lookup_failed';
+
+/**
+ * Resolve the client account's signing requirements and verify the challenge
+ * against them.
+ *
+ * The lookup is optional for backwards compatibility: without one, the anchor
+ * keeps its legacy single-key check. With a lookup, a `null` result selects the
+ * SEP-10 nonexistent-account branch (one master-key signature, using the
+ * protocol's implicit weight and threshold of 1), while a thrown lookup error is
+ * reported as `lookup_failed` so transport outages are never mistaken for a
+ * missing account.
+ */
+export async function authorizeSep10AccountSignatures(
+  transaction: Transaction,
+  input: {
+    account: string;
+    serverPublicKey: string;
+    lookup?: Sep10AccountLookup;
+    additionalSigners?: readonly string[];
+  },
+): Promise<Sep10AccountAuthorization> {
+  const additionalSigners = (input.additionalSigners ?? []).filter((key) =>
+    StrKey.isValidEd25519PublicKey(key),
+  );
+
+  if (!input.lookup) {
+    return hasValidSignature(transaction, input.account) ? 'authorized' : 'rejected';
+  }
+
+  let account: Sep10AccountSigners | null;
+  try {
+    account = await input.lookup.load(input.account);
+  } catch {
+    return 'lookup_failed';
+  }
+
+  if (account === null) {
+    return hasSingleMasterSignature(transaction, input.account, [
+      input.serverPublicKey,
+      ...additionalSigners,
+    ])
+      ? 'authorized'
+      : 'rejected';
+  }
+
+  if (!hasSufficientSignerWeight(transaction, account.signers, account.thresholds.medium)) {
+    return 'rejected';
+  }
+
+  return hasOnlyAuthorizedSep10Signatures(transaction, [
+    input.serverPublicKey,
+    ...additionalSigners,
+    ...account.signers.map((signer) => signer.publicKey),
+  ])
+    ? 'authorized'
+    : 'rejected';
+}
+
 function hasValidClientDomainSignature(
   transaction: Transaction,
   clientDomain: string,
@@ -583,6 +956,36 @@ function extractNonceFromChallenge(transaction: Transaction, homeDomain: string)
   return null;
 }
 
+function sep10Identity(address: string, memo?: string): Sep10AccountIdentity | null {
+  if (StrKey.isValidMed25519PublicKey(address)) {
+    if (memo !== undefined) return null;
+    const muxed = StrKey.decodeMed25519PublicKey(address);
+    return {
+      address,
+      signer: StrKey.encodeEd25519PublicKey(muxed.subarray(0, 32)),
+      subject: address,
+    };
+  }
+  if (!StrKey.isValidEd25519PublicKey(address)) return null;
+  if (memo === undefined) return { address, signer: address, subject: address };
+  if (!/^(0|[1-9][0-9]*)$/.test(memo)) return null;
+  try {
+    if (BigInt(memo) > 0xffff_ffff_ffff_ffffn) return null;
+  } catch {
+    return null;
+  }
+  return { address, signer: address, subject: `${address}:${memo}`, memo };
+}
+
+function sep10Subject(subject: string): Sep10AccountIdentity | null {
+  const separator = subject.indexOf(':');
+  const address = separator === -1 ? subject : subject.slice(0, separator);
+  const memo = separator === -1 ? undefined : subject.slice(separator + 1);
+  if (memo === '') return null;
+  const identity = sep10Identity(address, memo);
+  return identity?.subject === subject ? identity : null;
+}
+
 function authenticate(
   context: ExpressRouterContext,
   req: IncomingMessage,
@@ -601,7 +1004,7 @@ function authenticate(
     const audience = typeof decoded.aud === 'string' ? decoded.aud : null;
     if (
       !account ||
-      !StrKey.isValidEd25519PublicKey(account) ||
+      !sep10Subject(account) ||
       scope !== 'anchor_api' ||
       typ !== 'access_token' ||
       issuer !== ACCESS_TOKEN_ISSUER ||
@@ -650,6 +1053,47 @@ function checkRateLimit(
 
 async function handleHealth(res: ServerResponse, method = 'GET'): Promise<void> {
   sendJson(res, 200, { status: 'ok', version }, method);
+}
+
+const READINESS_TIMEOUT_MS = 1000;
+const readinessProbes = new WeakMap<DatabaseAdapter, Promise<boolean>>();
+
+async function handleReadiness(
+  context: ExpressRouterContext,
+  res: ServerResponse,
+  method: string,
+): Promise<void> {
+  let ready = false;
+  if (context.isReady() && context.database.checkReadiness) {
+    let probe = readinessProbes.get(context.database);
+    if (!probe) {
+      probe = Promise.resolve()
+        .then(() => context.database.checkReadiness!())
+        .then(
+          () => true,
+          () => false,
+        );
+      readinessProbes.set(context.database, probe);
+      void probe.then(() => {
+        if (readinessProbes.get(context.database) === probe)
+          readinessProbes.delete(context.database);
+      });
+    }
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      ready = await Promise.race([
+        probe,
+        new Promise<boolean>((resolve) => {
+          timer = setTimeout(() => resolve(false), READINESS_TIMEOUT_MS);
+        }),
+      ]);
+      ready = ready && context.isReady();
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
+  res.setHeader('cache-control', 'no-store');
+  sendJson(res, ready ? 200 : 503, { status: ready ? 'ready' : 'not_ready' }, method);
 }
 
 async function handleInfo(context: ExpressRouterContext, res: ServerResponse): Promise<void> {
@@ -739,7 +1183,15 @@ async function handleInfo(context: ExpressRouterContext, res: ServerResponse): P
 
 function allowedMethodsForPath(path: string): readonly string[] | undefined {
   if (path === '/auth') return ['GET', 'POST'];
-  if (path === '/health' || path === '/info' || path === '/auth/challenge') return ['GET'];
+  if (
+    path === '/health' ||
+    path === '/ready' ||
+    path === '/info' ||
+    path === '/auth/challenge' ||
+    path === '/transaction'
+  )
+    return ['GET'];
+  if (path === '/customer') return ['GET', 'PUT'];
   if (
     path === '/auth/token' ||
     path === '/transactions/deposit/interactive' ||
@@ -827,8 +1279,9 @@ async function handleAuthChallenge(
     return;
   }
 
-  // Accept canonical Stellar public keys and treat surrounding whitespace as non-semantic.
+  // Accept canonical Stellar account addresses and treat surrounding whitespace as non-semantic.
   const accountParams = parseUrl(req).searchParams.getAll('account');
+  const memoParams = parseUrl(req).searchParams.getAll('memo');
   if (accountParams.length === 0) {
     sendJson(res, 400, {
       error: 'invalid_request',
@@ -854,10 +1307,20 @@ async function handleAuthChallenge(
     return;
   }
 
-  if (!StrKey.isValidEd25519PublicKey(account)) {
+  if (memoParams.length > 1) {
     sendJson(res, 400, {
       error: 'invalid_request',
-      message: 'account must be a valid Stellar public key',
+      message: 'Query param memo must be provided at most once',
+    });
+    return;
+  }
+  const memo = memoParams.length === 1 ? memoParams[0] : undefined;
+  const identity = sep10Identity(account, memo);
+  if (!identity) {
+    sendJson(res, 400, {
+      error: 'invalid_request',
+      message:
+        'account must be a valid Stellar public or muxed account; memo must be a uint64 ID for classic accounts',
     });
     return;
   }
@@ -878,10 +1341,11 @@ async function handleAuthChallenge(
       Operation.manageData({
         name: `${context.config.get('server').homeDomain}${SEP10_AUTH_OPERATION_SUFFIX}`,
         value: nonce,
-        source: account,
+        source: identity.address,
       }),
     )
     .setTimebounds(now, expiresAtUnix);
+  if (identity.memo !== undefined) challengeBuilder.addMemo(Memo.id(identity.memo));
 
   const securityConfig = context.config.get('security');
   if (securityConfig.enableClientAttribution) {
@@ -926,7 +1390,7 @@ async function handleAuthChallenge(
   throwIfRequestAborted(req);
   await context.database.insertAuthChallenge({
     id: randomUUID(),
-    account,
+    account: identity.subject,
     challenge: nonce,
     expiresAt,
   });
@@ -989,10 +1453,10 @@ async function handleAuthToken(
     return;
   }
 
-  if (!standardRequest && !StrKey.isValidEd25519PublicKey(account)) {
+  if (!standardRequest && !sep10Identity(account)) {
     sendJson(res, 400, {
       error: 'invalid_request',
-      message: 'account must be a valid Stellar public key',
+      message: 'account must be a valid Stellar public or muxed account',
     });
     return;
   }
@@ -1008,17 +1472,33 @@ async function handleAuthToken(
     return;
   }
 
-  if (standardRequest) {
-    account =
-      extractAccountFromChallenge(transaction, context.config.get('server').homeDomain) ?? '';
-    if (!StrKey.isValidEd25519PublicKey(account)) {
-      sendJson(res, 401, {
-        error: 'invalid_challenge',
-        message: 'Challenge account is invalid',
-      });
-      return;
-    }
+  const challengeAccount =
+    extractAccountFromChallenge(transaction, context.config.get('server').homeDomain) ?? '';
+  const challengeMemo =
+    transaction.memo.type === 'id' && typeof transaction.memo.value === 'string'
+      ? transaction.memo.value
+      : undefined;
+  const identity = sep10Identity(challengeAccount, challengeMemo);
+  if (!identity || (transaction.memo.type !== 'none' && transaction.memo.type !== 'id')) {
+    sendJson(res, 401, {
+      error: 'invalid_challenge',
+      message: 'Challenge account or memo is invalid',
+    });
+    return;
   }
+  const requestIdentity = standardRequest ? identity : sep10Identity(account);
+  if (!requestIdentity) {
+    sendJson(res, 400, {
+      error: 'invalid_request',
+      message: 'account must be a valid Stellar public or muxed account',
+    });
+    return;
+  }
+  if (!standardRequest && requestIdentity.address !== identity.address) {
+    sendJson(res, 401, { error: 'invalid_challenge', message: 'Challenge not found' });
+    return;
+  }
+  account = identity.subject;
 
   if (transaction.source !== context.sep10ServerKeypair.publicKey()) {
     sendJson(res, 401, {
@@ -1045,7 +1525,24 @@ async function handleAuthToken(
     return;
   }
 
-  if (!hasValidSignature(transaction, account)) {
+  const securityConfig = context.config.get('security');
+  const accountAuthorization = await authorizeSep10AccountSignatures(transaction, {
+    account: identity.signer,
+    serverPublicKey: context.sep10ServerKeypair.publicKey(),
+    lookup: context.sep10AccountLookup,
+    additionalSigners:
+      securityConfig.enableClientAttribution && securityConfig.clientDomainSigningKey
+        ? [securityConfig.clientDomainSigningKey]
+        : [],
+  });
+  if (accountAuthorization === 'lookup_failed') {
+    sendJson(res, 502, {
+      error: 'account_lookup_failed',
+      message: 'Client account signer lookup failed',
+    });
+    return;
+  }
+  if (accountAuthorization !== 'authorized') {
     sendJson(res, 401, {
       error: 'invalid_challenge',
       message: 'Challenge is missing account signature',
@@ -1053,7 +1550,6 @@ async function handleAuthToken(
     return;
   }
 
-  const securityConfig = context.config.get('security');
   if (
     securityConfig.enableClientAttribution &&
     (!securityConfig.clientDomain ||
@@ -1072,7 +1568,7 @@ async function handleAuthToken(
   }
 
   const stored = await context.database.getAuthChallengeByChallenge(nonce);
-  if (!stored || stored.account !== account) {
+  if (!stored || stored.account !== identity.subject) {
     sendJson(res, 401, { error: 'invalid_challenge', message: 'Challenge not found' });
     return;
   }
@@ -1158,7 +1654,7 @@ async function handleDepositInteractive(
     return;
   }
 
-  const parsedBody = await parsePostJsonBody(req, res, context.maxBodyBytes);
+  const parsedBody = await parseDepositRequestBody(req, res, context.maxBodyBytes);
   if (!parsedBody) {
     return;
   }
@@ -1318,6 +1814,33 @@ async function handleDepositInteractive(
         return;
       }
 
+      if (parsedBody.isStandardSep24) {
+        if (typeof responseBody.id !== 'string') {
+          res.setHeader('Retry-After', '1');
+          sendJson(res, 503, {
+            error: 'idempotency_response_unavailable',
+            message: 'The saved response is unavailable; retry this request',
+          });
+          return;
+        }
+        try {
+          const standardResponse = await createStandardSep24Initiation(
+            context,
+            serverConfig.interactiveDomain,
+            auth.account,
+            responseBody.id,
+          );
+          res.setHeader('Cache-Control', 'no-store');
+          sendJson(res, 200, { ...standardResponse });
+        } catch {
+          sendJson(res, 500, {
+            error: 'server_misconfigured',
+            message: 'SEP-24 interactive sessions could not be created',
+          });
+        }
+        return;
+      }
+
       sendJson(res, idempotencyRecord.statusCode, {
         ...responseBody,
         idempotency_replay: true,
@@ -1327,10 +1850,10 @@ async function handleDepositInteractive(
 
     const transactionId = randomUUID();
     const createdAt = new Date().toISOString();
-    const responseBody = {
+    const legacyResponseBody = {
       id: transactionId,
       kind: 'deposit',
-      status: 'pending_user_transfer_start',
+      status: 'incomplete',
       amount,
       asset_code: assetCode,
       asset_issuer: selectedAsset.issuer,
@@ -1339,8 +1862,19 @@ async function handleDepositInteractive(
       created_at: createdAt,
       updated_at: createdAt,
     };
+    let responseBody: Record<string, unknown> = legacyResponseBody;
 
     try {
+      if (parsedBody.isStandardSep24) {
+        responseBody = {
+          ...(await createStandardSep24Initiation(
+            context,
+            serverConfig.interactiveDomain,
+            auth.account,
+            transactionId,
+          )),
+        };
+      }
       throwIfRequestAborted(req);
       await context.database.createDepositWithIdempotency({
         transaction: {
@@ -1349,14 +1883,14 @@ async function handleDepositInteractive(
           kind: 'deposit',
           assetCode,
           amount,
-          status: 'pending_user_transfer_start',
+          status: 'incomplete',
           createdAt,
         },
         idempotency: {
           scope,
           idempotencyKey,
           requestHash,
-          statusCode: 201,
+          statusCode: parsedBody.isStandardSep24 ? 200 : 201,
           responseBody: JSON.stringify(responseBody),
         },
       });
@@ -1367,11 +1901,29 @@ async function handleDepositInteractive(
       throw error;
     }
 
-    sendJson(res, 201, responseBody);
+    if (parsedBody.isStandardSep24) res.setHeader('Cache-Control', 'no-store');
+    sendJson(res, parsedBody.isStandardSep24 ? 200 : 201, responseBody);
     return;
   }
 
   const transactionId = randomUUID();
+  let standardResponse: ReturnType<typeof createInteractiveInitiationResponse> | null = null;
+  if (parsedBody.isStandardSep24) {
+    try {
+      standardResponse = await createStandardSep24Initiation(
+        context,
+        serverConfig.interactiveDomain,
+        auth.account,
+        transactionId,
+      );
+    } catch {
+      sendJson(res, 500, {
+        error: 'server_misconfigured',
+        message: 'SEP-24 interactive sessions could not be created',
+      });
+      return;
+    }
+  }
   throwIfRequestAborted(req);
   const created = await context.database.insertInteractiveTransaction({
     id: transactionId,
@@ -1379,10 +1931,10 @@ async function handleDepositInteractive(
     kind: 'deposit',
     assetCode,
     amount,
-    status: 'pending_user_transfer_start',
+    status: 'incomplete',
   });
 
-  sendJson(res, 201, {
+  const legacyResponseBody = {
     id: created.id,
     kind: created.kind,
     status: created.status,
@@ -1393,7 +1945,13 @@ async function handleDepositInteractive(
     interactive_url: buildInteractiveUrl(serverConfig.interactiveDomain, created.id),
     created_at: created.createdAt,
     updated_at: created.updatedAt,
-  });
+  };
+  if (standardResponse) {
+    res.setHeader('Cache-Control', 'no-store');
+    sendJson(res, 200, { ...standardResponse });
+  } else {
+    sendJson(res, 201, legacyResponseBody);
+  }
 }
 
 async function handleTransaction(
@@ -1443,6 +2001,10 @@ async function handleTransaction(
     updated_at: transaction.updatedAt,
   };
 
+  const refunds = await context.database.listRefundOperations?.(transaction.id);
+  if (refunds && refunds.length > 0)
+    responseData.refunds = serializeRefunds(transaction.id, refunds);
+
   if (serverConfig.interactiveDomain) {
     responseData.interactive_url = buildInteractiveUrl(
       serverConfig.interactiveDomain,
@@ -1456,6 +2018,400 @@ async function handleTransaction(
 
   res.setHeader('Cache-Control', 'no-store');
   sendJson(res, 200, responseData);
+}
+
+const SEP12_CONTROL_FIELDS = new Set([
+  'account',
+  'id',
+  'memo',
+  'memo_type',
+  'transaction_id',
+  'type',
+  'fields',
+]);
+const SEP12_KNOWN_FIELDS = new Set([
+  'birth_date',
+  'email_address',
+  'first_name',
+  'id_number',
+  'id_type',
+  'last_name',
+  'nationality',
+  'phone_number',
+]);
+
+function asNonEmptyString(value: unknown): string | undefined {
+  return typeof value === 'string' && value.trim().length > 0 ? value.trim() : undefined;
+}
+
+function kycFieldValue(data: KycData | undefined, field: string): string | undefined {
+  if (!data) return undefined;
+  if (field === 'birth_date') return data.birth_date;
+  if (field === 'email_address') return data.email_address;
+  if (field === 'first_name') return data.first_name;
+  if (field === 'id_number') return data.id_number;
+  if (field === 'id_type') return data.id_type;
+  if (field === 'last_name') return data.last_name;
+  if (field === 'nationality') return data.nationality;
+  if (field === 'phone_number') return data.phone_number;
+  return data.additional_fields?.[field];
+}
+
+function customerResponse(
+  customer: Customer | null,
+  requiredFields: string[],
+): Record<string, unknown> {
+  const kycData = customer?.kyc_data;
+  const missingFields = requiredFields.filter(
+    (field) => !asNonEmptyString(kycFieldValue(kycData, field)),
+  );
+  const providedFields: Record<string, { type: 'string'; status: string }> = {};
+  if (kycData) {
+    const storedFields = [
+      'birth_date',
+      'email_address',
+      'first_name',
+      'id_number',
+      'id_type',
+      'last_name',
+      'nationality',
+      'phone_number',
+      ...Object.keys(kycData.additional_fields ?? {}),
+    ];
+    const fieldStatus =
+      kycData.status === 'approved'
+        ? 'ACCEPTED'
+        : kycData.status === 'rejected'
+          ? 'REJECTED'
+          : 'PROCESSING';
+    for (const field of storedFields) {
+      if (asNonEmptyString(kycFieldValue(kycData, field))) {
+        providedFields[field] = { type: 'string', status: fieldStatus };
+      }
+    }
+  }
+
+  const status = missingFields.length
+    ? 'NEEDS_INFO'
+    : kycData?.status === 'approved'
+      ? 'ACCEPTED'
+      : kycData?.status === 'rejected'
+        ? 'REJECTED'
+        : 'PROCESSING';
+  return {
+    ...(customer ? { id: customer.id } : {}),
+    status,
+    ...(missingFields.length
+      ? { fields: Object.fromEntries(missingFields.map((field) => [field, { type: 'string' }])) }
+      : {}),
+    ...(Object.keys(providedFields).length ? { provided_fields: providedFields } : {}),
+    ...(status === 'REJECTED' ? { message: 'Customer verification was rejected' } : {}),
+  };
+}
+
+async function loadSep12Transaction(
+  context: ExpressRouterContext,
+  res: ServerResponse,
+  account: string,
+  transactionId: string,
+): Promise<InteractiveTransactionRecord | null> {
+  const transaction = await context.database.getInteractiveTransactionById(transactionId);
+  if (!transaction) {
+    sendJson(res, 404, { error: 'not_found', message: 'Transaction not found' });
+    return null;
+  }
+  if (transaction.account !== account) {
+    sendJson(res, 403, { error: 'forbidden', message: 'Transaction belongs to another account' });
+    return null;
+  }
+  return transaction;
+}
+
+async function handleCustomerGet(
+  context: ExpressRouterContext,
+  req: IncomingMessage,
+  res: ServerResponse,
+): Promise<void> {
+  if (!checkRateLimit(context, req, res, 'customer')) return;
+  const auth = authenticate(context, req);
+  if (!auth) {
+    sendJsonUnauthorized(res, {
+      error: 'unauthorized',
+      message: 'Missing or invalid bearer token',
+    });
+    return;
+  }
+  const url = parseUrl(req);
+  const transactionId = asNonEmptyString(url.searchParams.get('transaction_id'));
+  const type = asNonEmptyString(url.searchParams.get('type'));
+  const customerId = asNonEmptyString(url.searchParams.get('id'));
+  if (!transactionId || !type) {
+    sendJson(res, 400, {
+      error: 'invalid_request',
+      message: 'transaction_id and type are required for customer status lookup',
+    });
+    return;
+  }
+
+  const transaction = await loadSep12Transaction(context, res, auth.account, transactionId);
+  if (!transaction) return;
+  const requiredFields = context.config.getKycRequiredFields(transaction.assetCode);
+  const customer = await context.database.getCustomerByAccountId(auth.account);
+  if (customerId && customer?.id !== customerId) {
+    sendJson(res, 404, { error: 'not_found', message: 'Customer not found' });
+    return;
+  }
+
+  res.setHeader('Cache-Control', 'no-store');
+  sendJson(res, 200, customerResponse(customer, requiredFields));
+}
+
+async function handleCustomerPut(
+  context: ExpressRouterContext,
+  req: IncomingMessage,
+  res: ServerResponse,
+): Promise<void> {
+  if (!checkRateLimit(context, req, res, 'customer')) return;
+  const auth = authenticate(context, req);
+  if (!auth) {
+    sendJsonUnauthorized(res, {
+      error: 'unauthorized',
+      message: 'Missing or invalid bearer token',
+    });
+    return;
+  }
+
+  const body = await parseCustomerBody(req, res, context.maxBodyBytes);
+  if (!body) return;
+  const transactionId = asNonEmptyString(body.transaction_id);
+  const type = asNonEmptyString(body.type);
+  const requestedId = asNonEmptyString(body.id);
+  if (!transactionId || !type) {
+    sendJson(res, 400, {
+      error: 'invalid_request',
+      message: 'transaction_id and type are required for customer submission',
+    });
+    return;
+  }
+  if (body.account !== undefined && body.account !== auth.account) {
+    sendJson(res, 403, {
+      error: 'forbidden',
+      message: 'account must match the authenticated account',
+    });
+    return;
+  }
+  if (body.id !== undefined && !requestedId) {
+    sendJson(res, 400, { error: 'invalid_request', message: 'id must be a non-empty string' });
+    return;
+  }
+
+  const transaction = await loadSep12Transaction(context, res, auth.account, transactionId);
+  if (!transaction) return;
+  const requiredFields = context.config.getKycRequiredFields(transaction.assetCode);
+
+  const submitted: Record<string, string> = {};
+  const nestedFields = body.fields;
+  if (nestedFields !== undefined) {
+    if (!nestedFields || typeof nestedFields !== 'object' || Array.isArray(nestedFields)) {
+      sendJson(res, 400, { error: 'invalid_request', message: 'fields must be an object' });
+      return;
+    }
+    for (const [field, value] of Object.entries(nestedFields)) {
+      if (typeof value !== 'string' || value.length > 4096) {
+        sendJson(res, 400, {
+          error: 'invalid_request',
+          message: `Invalid customer field: ${field}`,
+        });
+        return;
+      }
+      submitted[field] = value;
+    }
+  }
+  for (const [field, value] of Object.entries(body)) {
+    if (SEP12_CONTROL_FIELDS.has(field)) continue;
+    if (typeof value !== 'string' || value.length > 4096 || Object.hasOwn(submitted, field)) {
+      sendJson(res, 400, { error: 'invalid_request', message: `Invalid customer field: ${field}` });
+      return;
+    }
+    submitted[field] = value;
+  }
+  for (const field of Object.keys(submitted)) {
+    if (
+      !/^[a-z][a-z0-9_.]{0,127}$/.test(field) ||
+      (!SEP12_KNOWN_FIELDS.has(field) && !requiredFields.includes(field))
+    ) {
+      sendJson(res, 400, {
+        error: 'invalid_request',
+        message: `Unsupported customer field: ${field}`,
+      });
+      return;
+    }
+  }
+
+  const existing = await context.database.getCustomerByAccountId(auth.account);
+  if (requestedId && (!existing || existing.id !== requestedId)) {
+    sendJson(res, 404, { error: 'not_found', message: 'Customer not found' });
+    return;
+  }
+
+  const customer =
+    existing ??
+    (await context.database.insertOrGetCustomer({
+      id: randomUUID(),
+      account_id: auth.account,
+      kyc_data: { status: 'pending' },
+    }));
+
+  const previous = customer.kyc_data;
+  const kycData: KycData = {
+    ...(previous ?? { status: 'pending' as const }),
+    status: 'pending',
+    additional_fields: { ...(previous?.additional_fields ?? {}) },
+  };
+  for (const [field, value] of Object.entries(submitted)) {
+    if (SEP12_KNOWN_FIELDS.has(field)) {
+      if (field === 'birth_date') kycData.birth_date = value;
+      else if (field === 'email_address') kycData.email_address = value;
+      else if (field === 'first_name') kycData.first_name = value;
+      else if (field === 'id_number') kycData.id_number = value;
+      else if (field === 'id_type') kycData.id_type = value;
+      else if (field === 'last_name') kycData.last_name = value;
+      else if (field === 'nationality') kycData.nationality = value;
+      else if (field === 'phone_number') kycData.phone_number = value;
+    } else {
+      kycData.additional_fields![field] = value;
+    }
+  }
+
+  const missingFields = requiredFields.filter(
+    (field) => !asNonEmptyString(kycFieldValue(kycData, field)),
+  );
+  const saved = await context.database.updateCustomer({
+    id: customer.id,
+    account_id: auth.account,
+    email_address: kycData.email_address,
+    phone_number: kycData.phone_number,
+    kyc_data: kycData,
+  });
+  if (!saved) {
+    sendJson(res, 404, { error: 'not_found', message: 'Customer not found' });
+    return;
+  }
+
+  if (missingFields.length === 0 && context.kycVerificationProvider) {
+    const operationKey = sha256(
+      JSON.stringify({
+        account: auth.account,
+        customerId: customer.id,
+        transactionId,
+        type,
+        fields: Object.fromEntries(
+          Object.entries(submitted).sort(([left], [right]) => left.localeCompare(right)),
+        ),
+      }),
+    );
+    let decision;
+    try {
+      decision = await context.kycVerificationProvider.verify({
+        customerId: customer.id,
+        operationKey,
+        data: kycData,
+      });
+    } catch {
+      sendJson(res, 502, { error: 'verification_unavailable', message: 'KYC verification failed' });
+      return;
+    }
+    if (
+      decision.customerId !== customer.id ||
+      decision.operationKey !== operationKey ||
+      !['pending', 'approved', 'rejected'].includes(decision.status)
+    ) {
+      sendJson(res, 502, {
+        error: 'verification_unavailable',
+        message: 'KYC provider returned an invalid decision',
+      });
+      return;
+    }
+    kycData.status = decision.status;
+    await context.database.updateCustomer({
+      id: customer.id,
+      account_id: auth.account,
+      email_address: kycData.email_address,
+      phone_number: kycData.phone_number,
+      kyc_data: kycData,
+    });
+  }
+
+  const updatedCustomer = await context.database.getCustomerByAccountId(auth.account);
+  res.setHeader('Cache-Control', 'no-store');
+  sendJson(res, 200, customerResponse(updatedCustomer, requiredFields));
+}
+
+async function handleSep24Transaction(
+  context: ExpressRouterContext,
+  req: IncomingMessage,
+  res: ServerResponse,
+): Promise<void> {
+  res.setHeader('Cache-Control', 'no-store');
+  const auth = authenticate(context, req);
+  if (!auth) {
+    sendJsonUnauthorized(res, {
+      error: 'unauthorized',
+      message: 'Missing or invalid bearer token',
+    });
+    return;
+  }
+  const params = parseUrl(req).searchParams;
+  const identifiers = ['id', 'stellar_transaction_id', 'external_transaction_id'] as const;
+  const supplied = identifiers.flatMap((kind) =>
+    params.getAll(kind).map((value) => ({ kind, value })),
+  );
+  if (
+    supplied.length !== 1 ||
+    !supplied[0].value.trim() ||
+    Buffer.byteLength(supplied[0].value, 'utf8') > 256 ||
+    Array.from(supplied[0].value).some((character) => {
+      const code = character.charCodeAt(0);
+      return code < 32 || code === 127;
+    }) ||
+    supplied[0].value !== supplied[0].value.trim()
+  ) {
+    sendJson(res, 400, {
+      error: 'invalid_request',
+      message: 'Provide exactly one non-empty transaction identifier',
+    });
+    return;
+  }
+  const identifier: InteractiveTransactionIdentifier = supplied[0];
+  const transaction = await context.database.findInteractiveTransaction({
+    account: auth.account,
+    identifier,
+  });
+  if (!transaction || transaction.account !== auth.account) {
+    sendJson(res, 404, { error: 'not_found', message: 'Transaction not found' });
+    return;
+  }
+  const interactiveDomain = context.config.get('server').interactiveDomain;
+  sendJson(res, 200, {
+    transaction: {
+      id: transaction.id,
+      kind: transaction.kind,
+      status: transaction.status,
+      started_at: transaction.createdAt,
+      ...(transaction.amountIn == null ? {} : { amount_in: transaction.amountIn }),
+      ...(transaction.amountOut == null ? {} : { amount_out: transaction.amountOut }),
+      ...(transaction.amountFee == null ? {} : { amount_fee: transaction.amountFee }),
+      ...(transaction.stellarTransactionHash == null
+        ? {}
+        : { stellar_transaction_id: transaction.stellarTransactionHash }),
+      ...(transaction.railReference == null
+        ? {}
+        : { external_transaction_id: transaction.railReference }),
+      ...(interactiveDomain
+        ? { more_info_url: buildInteractiveUrl(interactiveDomain, transaction.id) }
+        : {}),
+    },
+  });
 }
 
 const MAX_PROVIDER_IDENTIFIER_LENGTH = 64;
@@ -1562,7 +2518,10 @@ const TRANSACTION_PATH_RE = /^\/transactions\/([^/]*)$/;
 
 const KNOWN_ROUTES: Record<string, string[]> = {
   '/health': ['GET'],
+  '/ready': ['GET'],
   '/info': ['GET'],
+  '/transaction': ['GET'],
+  '/customer': ['GET', 'PUT'],
   '/auth': ['GET', 'POST'],
   '/auth/challenge': ['GET'],
   '/auth/token': ['POST'],
@@ -1605,6 +2564,11 @@ export async function handleExpressRouterRequest(
     return;
   }
 
+  if ((method === 'GET' || method === 'HEAD') && path === '/ready') {
+    await handleReadiness(context, res, method);
+    return;
+  }
+
   if ((method === 'GET' || method === 'HEAD') && path === '/.well-known/stellar.toml') {
     sendStellarToml(context, res, method);
     return;
@@ -1641,6 +2605,21 @@ export async function handleExpressRouterRequest(
 
       if (method === 'POST' && path === '/transactions/deposit/interactive') {
         await handleDepositInteractive(context, req, res);
+        return;
+      }
+
+      if (method === 'GET' && path === '/transaction') {
+        await handleSep24Transaction(context, req, res);
+        return;
+      }
+
+      if (path === '/customer' && method === 'GET') {
+        await handleCustomerGet(context, req, res);
+        return;
+      }
+
+      if (path === '/customer' && method === 'PUT') {
+        await handleCustomerPut(context, req, res);
         return;
       }
 

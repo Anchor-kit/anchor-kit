@@ -88,6 +88,37 @@ describe('DefaultWebhookProcessor', () => {
         eventRecords.set(id, claimed);
         return claimed;
       },
+      claimWebhookRecovery: async ({ id, leaseOwner, leaseDurationMs }) => {
+        const record = eventRecords.get(id);
+        if (!record || record.leaseOwner) return null;
+        const claimed: WebhookEventRecord = {
+          ...record,
+          status: 'unresolved',
+          attemptId: `attempt-${record.attemptCount + 1}`,
+          attemptCount: record.attemptCount + 1,
+          leaseOwner,
+          leaseExpiresAt: new Date(Date.now() + leaseDurationMs).toISOString(),
+        };
+        eventRecords.set(id, claimed);
+        return claimed;
+      },
+      completeWebhookRecovery: async (input) => {
+        const record = eventRecords.get(input.id);
+        if (
+          !record ||
+          record.attemptId !== input.attemptId ||
+          record.leaseOwner !== input.leaseOwner
+        )
+          return false;
+        eventRecords.set(input.id, {
+          ...record,
+          status: input.status,
+          recoveryResult: input.result,
+          leaseOwner: null,
+          leaseExpiresAt: null,
+        });
+        return true;
+      },
       completeWebhookAttempt: async (input) => {
         const record = eventRecords.get(input.id);
         if (
@@ -270,7 +301,7 @@ describe('DefaultWebhookProcessor', () => {
     expect(result.attemptId).toBe((capturedContext as { attemptId?: string })?.attemptId);
   });
 
-  test('retries reuse the operation key but get a new attempt identity', async () => {
+  test('retries reconcile the operation without invoking the callback again', async () => {
     const attemptIds = new Set<string>();
     const operationKeys = new Set<string>();
     const config: AnchorKitConfig = {
@@ -319,8 +350,8 @@ describe('DefaultWebhookProcessor', () => {
       retry: true,
     });
 
-    expect(callbackInvokedCount).toBe(2);
-    expect(attemptIds.size).toBe(2);
+    expect(callbackInvokedCount).toBe(1);
+    expect(attemptIds.size).toBe(1);
     expect(operationKeys.size).toBe(1);
   });
 
