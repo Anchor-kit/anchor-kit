@@ -36,6 +36,13 @@ for (const requiredText of [
   'Testnet settlement',
   'Open and deferred work',
   'next gate',
+  'Production readiness review checklist',
+  'Protocol interoperability assessment',
+  'Settlement assessment',
+  'Security review assessment',
+  'Recovery assessment',
+  'Release evidence assessment',
+  'Do not declare production ready',
 ]) {
   assert.ok(roadmap.includes(requiredText), `Roadmap must include: ${requiredText}`);
 }
