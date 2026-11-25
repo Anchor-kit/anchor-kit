@@ -1,8 +1,10 @@
 import { CryptoUtils } from './crypto.ts';
+import { randomUUID } from 'node:crypto';
 
 const INTERACTIVE_SESSION_ISSUER = 'anchor-kit';
 const INTERACTIVE_SESSION_AUDIENCE = 'anchor-interactive';
 const INTERACTIVE_SESSION_PURPOSE = 'deposit-session';
+export const INTERACTIVE_SESSION_TTL_SECONDS = 300;
 
 export interface InteractiveSessionClaims {
   account: string;
@@ -10,11 +12,24 @@ export interface InteractiveSessionClaims {
   actions: string[];
 }
 
+/**
+ * Returns true once a persisted interactive session has passed its expiry.
+ *
+ * A missing or unparseable expiry counts as expired, so a session whose
+ * lifetime cannot be established never authorizes an action. The boundary is
+ * inclusive - a session is expired at, not merely after, `expiresAt` - which
+ * matches `isAuthChallengeExpired` for SEP-10 challenges.
+ */
+export function isInteractiveSessionExpired(expiresAt: string, nowMs = Date.now()): boolean {
+  const expirationMs = Date.parse(expiresAt);
+  return !Number.isFinite(expirationMs) || nowMs >= expirationMs;
+}
+
 /** Create a short-lived JWT scoped to one account, deposit, and action set. */
 export async function createInteractiveSession(
   claims: InteractiveSessionClaims,
   secret: string,
-  expiresInSeconds = 300,
+  expiresInSeconds = INTERACTIVE_SESSION_TTL_SECONDS,
 ): Promise<string> {
   if (!Number.isSafeInteger(expiresInSeconds) || expiresInSeconds <= 0) {
     throw new TypeError('expiresInSeconds must be a positive safe integer');
@@ -28,6 +43,7 @@ export async function createInteractiveSession(
       iss: INTERACTIVE_SESSION_ISSUER,
       aud: INTERACTIVE_SESSION_AUDIENCE,
       purpose: INTERACTIVE_SESSION_PURPOSE,
+      jti: randomUUID(),
       sub: claims.account,
       transaction_id: claims.transactionId,
       actions: [...new Set(claims.actions)],
