@@ -344,6 +344,7 @@ curl -s \
 ## Docs
 
 - [Configuration Reference](./docs/configuration-reference.md) – Complete guide to all configuration options, their status, and usage
+- [Staging-to-production Network Isolation Check](./docs/network-isolation-check.md) – Pre-deploy gate for network, passphrase, signer, issuer, and Horizon values
 - [Webhook Duplicate Delivery Guide](./docs/webhook-duplicate-delivery.md) – Operational guide for provider-scoped deduplication, replay responses, and troubleshooting
 - [Database Migrations and Recovery](./docs/database-migrations.md)
 - [PostgreSQL Connectivity Incident Response](./docs/postgresql-connectivity-incident-response.md)
