@@ -24,7 +24,13 @@ import {
   createInteractiveSession,
   INTERACTIVE_SESSION_TTL_SECONDS,
 } from '@/utils/interactive-session.ts';
-import { gateInteractiveSession, interactiveSessionRejection } from './interactive-session-gate.ts';
+import {
+  evaluateInteractiveSession,
+  gateInteractiveSession,
+  interactiveSessionRejection,
+  readInteractiveSessionId,
+} from './interactive-session-gate.ts';
+import { interactiveSessionState } from '@/services/interactive-session-state.ts';
 import Big from 'big.js';
 import {
   Account,
@@ -654,6 +660,7 @@ const BUILT_IN_PATHS = new Set([
 ]);
 const BUILT_IN_TRANSACTION_PATH = /^\/transactions\/[^/]+$/;
 const BUILT_IN_TRANSACTION_COMPLETE_PATH = /^\/transactions\/[^/]+\/complete$/;
+const BUILT_IN_TRANSACTION_STATE_PATH = /^\/transactions\/[^/]+\/state$/;
 
 /**
  * Action names accepted by the shared interactive session gate.
@@ -690,7 +697,8 @@ export function validatePluginRoutes(
     if (
       BUILT_IN_PATHS.has(route.path) ||
       BUILT_IN_TRANSACTION_PATH.test(route.path) ||
-      BUILT_IN_TRANSACTION_COMPLETE_PATH.test(route.path)
+      BUILT_IN_TRANSACTION_COMPLETE_PATH.test(route.path) ||
+      BUILT_IN_TRANSACTION_STATE_PATH.test(route.path)
     ) {
       throw new ConfigError(
         `Plugin "${pluginId}" route "${route.method} ${route.path}" conflicts with a built-in endpoint`,
@@ -1274,6 +1282,7 @@ function allowedMethodsForPath(path: string): readonly string[] | undefined {
     return ['POST'];
   }
   if (TRANSACTION_COMPLETE_PATH_RE.test(path)) return ['POST'];
+  if (TRANSACTION_STATE_PATH_RE.test(path)) return ['GET'];
   if (/^\/transactions\/[^/]+$/.test(path)) return ['GET'];
   return undefined;
 }
@@ -2224,6 +2233,57 @@ async function handleTransaction(
   sendJson(res, 200, responseData);
 }
 
+async function handleInteractiveSessionState(
+  context: ExpressRouterContext,
+  req: IncomingMessage,
+  res: ServerResponse,
+  transactionId: string,
+): Promise<void> {
+  res.setHeader('Cache-Control', 'no-store');
+
+  const sessionId = readInteractiveSessionId(req);
+  if (sessionId === null) {
+    const rejection = interactiveSessionRejection('missing_session');
+    sendJson(res, rejection.status, { error: rejection.error, message: rejection.message });
+    return;
+  }
+
+  const session = await context.database.getInteractiveSessionById(sessionId);
+  const gate = evaluateInteractiveSession({
+    session,
+    account: session?.account ?? '',
+    transactionId,
+    action: INTERACTIVE_VIEW_ACTION,
+  });
+  if (!gate.ok) {
+    const rejection = interactiveSessionRejection(gate.reason);
+    sendJson(res, rejection.status, { error: rejection.error, message: rejection.message });
+    return;
+  }
+  if (!session) {
+    const rejection = interactiveSessionRejection('session_not_found');
+    sendJson(res, rejection.status, { error: rejection.error, message: rejection.message });
+    return;
+  }
+
+  const transaction = await context.database.getInteractiveTransactionById(transactionId);
+  if (!transaction || transaction.account !== session.account) {
+    sendJson(res, 404, { error: 'not_found', message: 'Transaction not found' });
+    return;
+  }
+
+  const state = interactiveSessionState(
+    transaction,
+    {
+      account: session.account,
+      transactionId: session.transactionId,
+      actions: session.actions.filter((action) => !session.consumedActions.includes(action)),
+    },
+    context.config.getKycRequiredFields(transaction.assetCode),
+  );
+  sendJson(res, 200, { ...state });
+}
+
 const SEP12_CONTROL_FIELDS = new Set([
   'account',
   'id',
@@ -2821,6 +2881,7 @@ const TRANSACTION_PATH_RE = /^\/transactions\/([^/]*)$/;
  * completion request is never mistaken for a transaction read.
  */
 const TRANSACTION_COMPLETE_PATH_RE = /^\/transactions\/([^/]+)\/complete$/;
+const TRANSACTION_STATE_PATH_RE = /^\/transactions\/([^/]+)\/state$/;
 
 const KNOWN_ROUTES: Record<string, string[]> = {
   '/health': ['GET'],
@@ -2840,6 +2901,7 @@ function getAllowedMethods(path: string): string[] | null {
   const exactMatch = KNOWN_ROUTES[path];
   if (exactMatch) return exactMatch;
   if (TRANSACTION_COMPLETE_PATH_RE.test(path)) return ['POST'];
+  if (TRANSACTION_STATE_PATH_RE.test(path)) return ['GET'];
   if (TRANSACTION_PATH_RE.test(path)) return ['GET'];
   return null;
 }
@@ -2941,6 +3003,14 @@ export async function handleExpressRouterRequest(
         const completeTransactionId = readTransactionIdFromPath(completeMatch[1], res);
         if (completeTransactionId === null) return;
         await handleCompleteInteractive(context, req, res, completeTransactionId);
+        return;
+      }
+
+      const stateMatch = TRANSACTION_STATE_PATH_RE.exec(path);
+      if (method === 'GET' && stateMatch) {
+        const transactionId = readTransactionIdFromPath(stateMatch[1], res);
+        if (transactionId === null) return;
+        await handleInteractiveSessionState(context, req, res, transactionId);
         return;
       }
 
