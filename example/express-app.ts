@@ -150,6 +150,20 @@ export async function createExampleApp(): Promise<ExampleApp> {
     }),
   );
 
+  app.get('/deposit/:id', (_req, res) => {
+    res.set('Cache-Control', 'no-store');
+    res.set(
+      'Content-Security-Policy',
+      "default-src 'none'; base-uri 'none'; frame-ancestors 'none'",
+    );
+    res
+      .status(503)
+      .type('html')
+      .send(
+        '<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Deposit unavailable</title></head><body><h1>Deposit unavailable</h1><p>This example cannot complete deposits yet. Contact your anchor for help.</p></body></html>',
+      );
+  });
+
   app.use('/anchor', anchor.getExpressRouter());
 
   return {

@@ -167,7 +167,7 @@ describe('TransactionWatcher Unit Tests', () => {
     }
   });
 
-  it('enqueues expiration jobs for stale pending deposits', async () => {
+  it('keeps stale transfers pending when no rail status lookup is available', async () => {
     const staleTransaction = {
       id: 'stale-tx-1',
       account: 'account-1',
@@ -197,20 +197,14 @@ describe('TransactionWatcher Unit Tests', () => {
     // Start the watcher to trigger the tick
     await transactionWatcher.start();
 
-    // Should enqueue expire_transaction jobs for each stale transaction
-    expect(mockQueue.enqueue).toHaveBeenCalledWith({
+    // Age alone cannot prove that an external payment was not made.
+    expect(mockQueue.enqueue).not.toHaveBeenCalledWith({
       type: 'expire_transaction',
-      payload: { transactionId: 'stale-tx-1' },
+      payload: expect.any(Object),
     });
 
-    expect(mockQueue.enqueue).toHaveBeenCalledWith({
-      type: 'expire_transaction',
-      payload: { transactionId: 'stale-tx-2' },
-    });
-
-    // Should have called enqueue at least 4 times:
-    // 2 for expire_transaction, 1 for process_watcher_task, 1 for cleanup_records
-    expect(mockQueue.enqueue).toHaveBeenCalledTimes(4);
+    // Watcher task processing and retention cleanup continue as usual.
+    expect(mockQueue.enqueue).toHaveBeenCalledTimes(2);
 
     // Should have inserted a watcher task record
     expect(mockDatabase.insertWatcherTask).toHaveBeenCalledWith({

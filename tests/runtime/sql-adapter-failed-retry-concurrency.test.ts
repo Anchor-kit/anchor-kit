@@ -266,7 +266,7 @@ describe('AK-040 – failed-event retry compare-and-set ownership', () => {
       expect(retry.record.operationKey).toBe(inserted.record.operationKey);
       expect(retry.record.attemptCount).toBe(1);
 
-      const secondClaim = await db.claimWebhookAttempt({
+      const secondClaim = await db.claimWebhookRecovery({
         id: inserted.record.id,
         leaseOwner: 'owner-2',
         leaseDurationMs: 30_000,
