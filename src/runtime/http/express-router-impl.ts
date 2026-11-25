@@ -4,6 +4,7 @@ import { InMemoryRateLimiter, type RateLimitRule } from '@/runtime/http/rate-lim
 import type {
   AccountSigner,
   DatabaseAdapter,
+  InteractiveTransactionIdentifier,
   InteractiveTransactionRecord,
   KycVerificationProvider,
   Sep10AccountLookup,
@@ -626,7 +627,9 @@ const BUILT_IN_PATHS = new Set([
   '/auth',
   '/auth/challenge',
   '/auth/token',
+  '/customer',
   '/transactions/deposit/interactive',
+  '/transaction',
   '/webhooks/events',
 ]);
 const BUILT_IN_TRANSACTION_PATH = /^\/transactions\/[^/]+$/;
@@ -1211,7 +1214,13 @@ async function handleInfo(context: ExpressRouterContext, res: ServerResponse): P
 
 function allowedMethodsForPath(path: string): readonly string[] | undefined {
   if (path === '/auth') return ['GET', 'POST'];
-  if (path === '/health' || path === '/ready' || path === '/info' || path === '/auth/challenge')
+  if (
+    path === '/health' ||
+    path === '/ready' ||
+    path === '/info' ||
+    path === '/auth/challenge' ||
+    path === '/transaction'
+  )
     return ['GET'];
   if (path === '/customer') return ['GET', 'PUT'];
   if (
@@ -2159,7 +2168,6 @@ async function handleCustomerGet(
     });
     return;
   }
-
   const url = parseUrl(req);
   const transactionId = asNonEmptyString(url.searchParams.get('transaction_id'));
   const type = asNonEmptyString(url.searchParams.get('type'));
@@ -2366,6 +2374,73 @@ async function handleCustomerPut(
   sendJson(res, 200, customerResponse(updatedCustomer, requiredFields));
 }
 
+async function handleSep24Transaction(
+  context: ExpressRouterContext,
+  req: IncomingMessage,
+  res: ServerResponse,
+): Promise<void> {
+  res.setHeader('Cache-Control', 'no-store');
+  const auth = authenticate(context, req);
+  if (!auth) {
+    sendJsonUnauthorized(res, {
+      error: 'unauthorized',
+      message: 'Missing or invalid bearer token',
+    });
+    return;
+  }
+  const params = parseUrl(req).searchParams;
+  const identifiers = ['id', 'stellar_transaction_id', 'external_transaction_id'] as const;
+  const supplied = identifiers.flatMap((kind) =>
+    params.getAll(kind).map((value) => ({ kind, value })),
+  );
+  if (
+    supplied.length !== 1 ||
+    !supplied[0].value.trim() ||
+    Buffer.byteLength(supplied[0].value, 'utf8') > 256 ||
+    Array.from(supplied[0].value).some((character) => {
+      const code = character.charCodeAt(0);
+      return code < 32 || code === 127;
+    }) ||
+    supplied[0].value !== supplied[0].value.trim()
+  ) {
+    sendJson(res, 400, {
+      error: 'invalid_request',
+      message: 'Provide exactly one non-empty transaction identifier',
+    });
+    return;
+  }
+  const identifier: InteractiveTransactionIdentifier = supplied[0];
+  const transaction = await context.database.findInteractiveTransaction({
+    account: auth.account,
+    identifier,
+  });
+  if (!transaction || transaction.account !== auth.account) {
+    sendJson(res, 404, { error: 'not_found', message: 'Transaction not found' });
+    return;
+  }
+  const interactiveDomain = context.config.get('server').interactiveDomain;
+  sendJson(res, 200, {
+    transaction: {
+      id: transaction.id,
+      kind: transaction.kind,
+      status: transaction.status,
+      started_at: transaction.createdAt,
+      ...(transaction.amountIn == null ? {} : { amount_in: transaction.amountIn }),
+      ...(transaction.amountOut == null ? {} : { amount_out: transaction.amountOut }),
+      ...(transaction.amountFee == null ? {} : { amount_fee: transaction.amountFee }),
+      ...(transaction.stellarTransactionHash == null
+        ? {}
+        : { stellar_transaction_id: transaction.stellarTransactionHash }),
+      ...(transaction.railReference == null
+        ? {}
+        : { external_transaction_id: transaction.railReference }),
+      ...(interactiveDomain
+        ? { more_info_url: buildInteractiveUrl(interactiveDomain, transaction.id) }
+        : {}),
+    },
+  });
+}
+
 const MAX_PROVIDER_IDENTIFIER_LENGTH = 64;
 
 function normalizeProviderIdentifier(value: unknown): string | null {
@@ -2472,6 +2547,8 @@ const KNOWN_ROUTES: Record<string, string[]> = {
   '/health': ['GET'],
   '/ready': ['GET'],
   '/info': ['GET'],
+  '/transaction': ['GET'],
+  '/customer': ['GET', 'PUT'],
   '/auth': ['GET', 'POST'],
   '/auth/challenge': ['GET'],
   '/auth/token': ['POST'],
@@ -2555,6 +2632,11 @@ export async function handleExpressRouterRequest(
 
       if (method === 'POST' && path === '/transactions/deposit/interactive') {
         await handleDepositInteractive(context, req, res);
+        return;
+      }
+
+      if (method === 'GET' && path === '/transaction') {
+        await handleSep24Transaction(context, req, res);
         return;
       }
 

@@ -101,6 +101,11 @@ export interface InteractiveTransactionRecord {
   updatedAt: string;
 }
 
+export type InteractiveTransactionIdentifier =
+  | { kind: 'id'; value: string }
+  | { kind: 'stellar_transaction_id'; value: string }
+  | { kind: 'external_transaction_id'; value: string };
+
 export type TransactionTransitionResult =
   | { outcome: 'updated'; transaction: InteractiveTransactionRecord }
   | {
@@ -263,6 +268,10 @@ export interface DatabaseAdapter extends SettlementLeaseAdapter {
     status: TransactionStatus;
   }): Promise<InteractiveTransactionRecord>;
   getInteractiveTransactionById(id: string): Promise<InteractiveTransactionRecord | null>;
+  findInteractiveTransaction(input: {
+    account: string;
+    identifier: InteractiveTransactionIdentifier;
+  }): Promise<InteractiveTransactionRecord | null>;
   listPendingTransactionsBefore(cutoffIso: string): Promise<InteractiveTransactionRecord[]>;
   updateTransactionStatus(
     id: string,

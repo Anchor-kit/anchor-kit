@@ -184,6 +184,12 @@ Run `bun test tests/runtime/sep24-info.test.ts` to check the public capability
 response. The test expects one passing case; deposits and withdrawals remain
 disabled until their payment flows are wired.
 
+## SEP-24 transaction lookup check
+
+Run `DATABASE_URL=<postgres-url> bun test tests/runtime/sep24-transaction-lookup.test.ts`
+against a disposable PostgreSQL database. Both SQLite and PostgreSQL cases
+should pass. Without `DATABASE_URL`, the PostgreSQL case is skipped.
+
 ## Settlement lease check
 
 Run `DATABASE_URL=<postgres-url> bun test tests/runtime/database/settlement-leases.test.ts`
