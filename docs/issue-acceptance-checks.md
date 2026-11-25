@@ -1,5 +1,29 @@
 # Focused issue acceptance checks
 
+For settlement payment XDR, run:
+
+```sh
+bun test tests/utils/stellar.test.ts
+```
+
+Expected result: 48 tests pass. The settlement check verifies the account sequence, fee, expiry, recipient, asset, and amount. The caller must load and safely allocate the account sequence before building a transaction; this helper does not submit it.
+
+For signed settlement identity, run:
+
+```sh
+bun test tests/services/settlement-identity.test.ts
+```
+
+Expected result: 2 tests pass. Hashing uses the supplied network passphrase and rejects unsigned or malformed envelopes. Signature verification and protected persistence are separate requirements.
+
+For the example deposit placeholder, run:
+
+```sh
+bun test tests/example-express-app.test.ts
+```
+
+Expected result: 18 tests pass. The deposit URL returns a non-cacheable unavailable page. It does not yet collect fields or complete a deposit.
+
 Run the focused tests from the repository root:
 
 ```sh

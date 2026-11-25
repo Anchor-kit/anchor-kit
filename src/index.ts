@@ -11,6 +11,7 @@ export { AnchorInstance, createAnchor, makeSqliteDbUrlForTests } from './core/fa
 export type { CreateAnchorOptions } from './core/factory';
 export * from './core/errors';
 export { LocalKeypairSigner } from './services/stellar-signer.ts';
+export { signedSettlementHash } from './services/settlement-identity.ts';
 export type { StellarTransactionSigner } from './services/stellar-signer.ts';
 export * as utils from './utils';
 export {
@@ -21,7 +22,7 @@ export {
   AnchorKitConfigSchema,
   StellarUtils,
 } from './utils';
-export type { Memo, PaymentParams } from './utils';
+export type { Memo, PaymentParams, SettlementPaymentParams } from './utils';
 export type {
   AuthChallengeRecord,
   AccountSigner,
@@ -36,7 +37,12 @@ export type {
   QueueJobRetryOptions,
   QueueDrainStatus,
   QueueAdapter,
+  ReconciledRailPaymentResult,
+  Sep10AccountLookup,
+  Sep10AccountSigners,
   SettlementJobRecord,
+  SettlementJobLease,
+  SettlementLeaseAdapter,
   Watcher,
   WebhookEventRecord,
   WebhookProcessor,
@@ -50,3 +56,16 @@ export {
   RetryableJobError,
 } from './runtime/queue/in-memory-queue.ts';
 export type { ExpressLikeMiddleware } from './runtime/http/express-router.ts';
+
+export { AnchorClient, AnchorClientError } from './client/anchor-client.ts';
+export type {
+  AnchorClientOptions,
+  AuthChallenge,
+  AuthToken,
+  DepositRequest,
+  InteractiveResponse,
+  TransactionResponse,
+} from './client/anchor-client.ts';
+
+export { createInteractiveInitiationResponse } from './core/sep24/interactive-response.ts';
+export type { InteractiveInitiationResponse } from './core/sep24/interactive-response.ts';

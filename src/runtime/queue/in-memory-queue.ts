@@ -164,6 +164,10 @@ export class InMemoryQueueAdapter implements QueueAdapter {
     this.onFailedJob = options.onFailedJob;
   }
 
+  public get isRunning(): boolean {
+    return this.running;
+  }
+
   public get status(): QueueDrainStatus {
     return {
       pending: this.jobs.length + this.waitingRetries.size,
