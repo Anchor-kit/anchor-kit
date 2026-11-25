@@ -12,6 +12,8 @@ export type { CreateAnchorOptions } from './core/factory';
 export * from './core/errors';
 export { HorizonNetworkClient } from './services/horizon-network-client.ts';
 export { LocalKeypairSigner } from './services/stellar-signer.ts';
+export { emitTransactionTrace } from './services/transaction-trace.ts';
+export type { TransactionTraceEvent, TransactionTraceSink } from './services/transaction-trace.ts';
 export { signedSettlementHash } from './services/settlement-identity.ts';
 export type { StellarTransactionSigner } from './services/stellar-signer.ts';
 export * as utils from './utils';

@@ -1,5 +1,13 @@
 # Focused issue acceptance checks
 
+For transaction trace event filtering, run:
+
+```sh
+bun test tests/services/transaction-trace.test.ts
+```
+
+Expected result: 2 tests pass. The helper forwards only named correlation fields to a host sink. It does not provide storage or a trace query.
+
 For settlement payment XDR, run:
 
 ```sh
