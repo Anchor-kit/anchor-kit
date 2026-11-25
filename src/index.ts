@@ -19,6 +19,8 @@ export { getPaystackTestStatus } from './services/paystack-status.ts';
 export { emitTransactionTrace } from './services/transaction-trace.ts';
 export type { TransactionTraceEvent, TransactionTraceSink } from './services/transaction-trace.ts';
 export { signedSettlementHash } from './services/settlement-identity.ts';
+export { recoverStellarSubmission } from './services/stellar-submission-recovery.ts';
+export type { StellarSubmissionRecoveryResult } from './services/stellar-submission-recovery.ts';
 export type { StellarTransactionSigner } from './services/stellar-signer.ts';
 export * as utils from './utils';
 export {
