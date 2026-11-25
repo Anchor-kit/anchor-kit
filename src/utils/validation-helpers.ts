@@ -321,6 +321,33 @@ function validateFrameworkUrls(
     throw new Error('Invalid URL format for server.interactiveDomain');
   }
 
+  if (server.interactiveCallbackOrigins !== undefined) {
+    if (!Array.isArray(server.interactiveCallbackOrigins)) {
+      throw new Error('server.interactiveCallbackOrigins must be an array of HTTPS origins');
+    }
+    for (const origin of server.interactiveCallbackOrigins) {
+      let parsed: URL;
+      try {
+        parsed = new URL(origin);
+      } catch {
+        throw new Error('server.interactiveCallbackOrigins must contain origin URLs');
+      }
+      const isLocalHttp =
+        parsed.protocol === 'http:' &&
+        ['localhost', '127.0.0.1', '[::1]'].includes(parsed.hostname);
+      if (
+        (parsed.protocol !== 'https:' && !isLocalHttp) ||
+        parsed.origin !== origin ||
+        parsed.username ||
+        parsed.password
+      ) {
+        throw new Error(
+          'server.interactiveCallbackOrigins must contain exact HTTPS origins or local HTTP origins',
+        );
+      }
+    }
+  }
+
   if (metadata?.tomlUrl && !isValidUrlString(metadata.tomlUrl)) {
     throw new Error('Invalid URL format for metadata.tomlUrl');
   }
@@ -839,6 +866,24 @@ export const ServerConfigSchema: Record<keyof Required<ServerConfig>, SchemaFiel
         return false;
       }
     },
+  },
+  interactiveCallbackOrigins: {
+    type: 'array',
+    required: false,
+    description: 'Exact HTTPS origins allowed to receive interactive callbacks.',
+    validate: (value) =>
+      Array.isArray(value) &&
+      value.every((origin) => {
+        if (typeof origin !== 'string') return false;
+        try {
+          const url = new URL(origin);
+          const localHttp =
+            url.protocol === 'http:' && ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname);
+          return (url.protocol === 'https:' || localHttp) && url.origin === origin;
+        } catch {
+          return false;
+        }
+      }),
   },
   webAuthEndpoint: {
     type: 'string',

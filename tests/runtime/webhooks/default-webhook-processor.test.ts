@@ -5,6 +5,7 @@ import type {
   WebhookEventRecord,
 } from '../../../src/runtime/interfaces.ts';
 import { DefaultWebhookProcessor } from '../../../src/runtime/webhooks/default-webhook-processor.ts';
+import { PaystackWebhookAdapter } from '../../../src/services/paystack-webhook-adapter.ts';
 import type { AnchorKitConfig } from '../../../src/types/config.ts';
 
 describe('DefaultWebhookProcessor', () => {
@@ -243,6 +244,60 @@ describe('DefaultWebhookProcessor', () => {
     expect(result.operationKey).toBe('mock:verified-id');
     expect(inserted).toBe(1);
     expect(callbackInvokedCount).toBe(1);
+  });
+
+  test('verifies and normalizes an opt-in Paystack test delivery before deduplication', async () => {
+    const rawBody = Buffer.from(
+      JSON.stringify({
+        event: 'charge.success',
+        data: {
+          domain: 'test',
+          id: 712345,
+          status: 'success',
+          reference: 'order-712',
+          amount: 1230,
+          currency: 'NGN',
+          paid_at: '2026-11-25T10:00:00.000Z',
+        },
+      }),
+    );
+    const paystackSecret = 'sk_test_fixture_only';
+    const signature = createHmac('sha512', paystackSecret).update(rawBody).digest('hex');
+    let storedInput:
+      | Parameters<NonNullable<typeof mockDatabase.insertOrGetWebhookEvent>>[0]
+      | null = null;
+    const insert = mockDatabase.insertOrGetWebhookEvent!;
+    mockDatabase.insertOrGetWebhookEvent = async (input) => {
+      storedInput = input;
+      return insert(input);
+    };
+    const verifiedProcessor = new DefaultWebhookProcessor({
+      config: baseConfig,
+      database: mockDatabase as DatabaseAdapter,
+      paymentRailAdapters: [
+        new PaystackWebhookAdapter({ secret: paystackSecret, allowTestMode: true }),
+      ],
+    });
+
+    const result = await verifiedProcessor.process({
+      eventId: 'untrusted-id',
+      provider: 'paystack',
+      payload: {},
+      rawBody,
+      signature,
+    });
+
+    expect(result.eventId).toBe('charge.success:712345');
+    expect(storedInput).toMatchObject({
+      eventId: 'charge.success:712345',
+      provider: 'paystack',
+      payload: {
+        eventId: 'charge.success:712345',
+        reference: 'order-712',
+        amount: { amount: '12.30', currency: 'NGN' },
+        status: 'succeeded',
+      },
+    });
   });
 
   test('first event with new eventId invokes callback and returns duplicate: false', async () => {

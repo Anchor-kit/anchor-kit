@@ -166,6 +166,7 @@ const CORE_MIGRATIONS: readonly SchemaMigration[] = [
               currency TEXT,
               rail_reference TEXT,
               stellar_transaction_hash TEXT,
+              stellar_signed_xdr TEXT,
               status TEXT NOT NULL,
               created_at TEXT NOT NULL,
               updated_at TEXT NOT NULL
@@ -257,6 +258,7 @@ const CORE_MIGRATIONS: readonly SchemaMigration[] = [
               currency TEXT,
               rail_reference TEXT,
               stellar_transaction_hash TEXT,
+              stellar_signed_xdr TEXT,
               status TEXT NOT NULL,
               created_at TIMESTAMPTZ NOT NULL,
               updated_at TIMESTAMPTZ NOT NULL
@@ -1031,6 +1033,7 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
         'currency TEXT',
         'rail_reference TEXT',
         'stellar_transaction_hash TEXT',
+        'stellar_signed_xdr TEXT',
       ]) {
         await this.postgres.query(
           `ALTER TABLE interactive_transactions ADD COLUMN IF NOT EXISTS ${column}`,
@@ -1220,6 +1223,7 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
       ['currency', 'TEXT'],
       ['rail_reference', 'TEXT'],
       ['stellar_transaction_hash', 'TEXT'],
+      ['stellar_signed_xdr', 'TEXT'],
     ] as const;
 
     for (const [column, type] of columnDefinitions) {
@@ -1541,6 +1545,7 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
     currency?: string | null;
     railReference?: string | null;
     stellarTransactionHash?: string | null;
+    stellarSignedXdr?: string | null;
     status: TransactionStatus;
   }): Promise<InteractiveTransactionRecord> {
     const createdAt = nowIso();
@@ -1549,7 +1554,7 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
     if (this.sqlite) {
       this.sqlite
         .prepare(
-          'INSERT INTO interactive_transactions (id, account, kind, asset_code, amount, amount_in, amount_out, amount_fee, currency, rail_reference, stellar_transaction_hash, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+          'INSERT INTO interactive_transactions (id, account, kind, asset_code, amount, amount_in, amount_out, amount_fee, currency, rail_reference, stellar_transaction_hash, stellar_signed_xdr, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
         )
         .run(
           input.id,
@@ -1563,13 +1568,14 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
           input.currency ?? null,
           input.railReference ?? null,
           input.stellarTransactionHash ?? null,
+          input.stellarSignedXdr ?? null,
           input.status,
           createdAt,
           updatedAt,
         );
     } else {
       await this.requirePostgres().query(
-        'INSERT INTO interactive_transactions (id, account, kind, asset_code, amount, amount_in, amount_out, amount_fee, currency, rail_reference, stellar_transaction_hash, status, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)',
+        'INSERT INTO interactive_transactions (id, account, kind, asset_code, amount, amount_in, amount_out, amount_fee, currency, rail_reference, stellar_transaction_hash, stellar_signed_xdr, status, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)',
         [
           input.id,
           input.account,
@@ -1582,6 +1588,7 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
           input.currency ?? null,
           input.railReference ?? null,
           input.stellarTransactionHash ?? null,
+          input.stellarSignedXdr ?? null,
           input.status,
           createdAt,
           updatedAt,
@@ -1601,6 +1608,7 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
       currency: input.currency ?? null,
       railReference: input.railReference ?? null,
       stellarTransactionHash: input.stellarTransactionHash ?? null,
+      stellarSignedXdr: input.stellarSignedXdr ?? null,
       status: input.status,
       createdAt,
       updatedAt,
@@ -1627,6 +1635,40 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
     const row = response.rows[0];
     if (!row) return null;
     return this.mapTransactionRow(row);
+  }
+
+  public async persistSignedStellarTransaction(input: {
+    transactionId: string;
+    signedXdr: string;
+    transactionHash: string;
+  }): Promise<boolean> {
+    if (!input.signedXdr.trim() || !/^[a-fA-F0-9]{64}$/.test(input.transactionHash)) {
+      throw new ConfigError('A signed XDR and 64-character Stellar transaction hash are required');
+    }
+    const hash = input.transactionHash.toLowerCase();
+    const updatedAt = nowIso();
+    if (this.sqlite) {
+      const result = this.sqlite
+        .prepare(
+          `UPDATE interactive_transactions
+           SET stellar_signed_xdr = ?, stellar_transaction_hash = ?, updated_at = ?
+           WHERE id = ? AND status = 'pending_stellar'
+             AND (stellar_signed_xdr IS NULL OR (stellar_signed_xdr = ? AND LOWER(stellar_transaction_hash) = ?))
+             AND (stellar_transaction_hash IS NULL OR LOWER(stellar_transaction_hash) = ?)`,
+        )
+        .run(input.signedXdr, hash, updatedAt, input.transactionId, input.signedXdr, hash, hash);
+      return result.changes === 1;
+    }
+    const result = await this.requirePostgres().query<{ id: string }>(
+      `UPDATE interactive_transactions
+       SET stellar_signed_xdr = $1, stellar_transaction_hash = $2, updated_at = $3
+       WHERE id = $4 AND status = 'pending_stellar'
+         AND (stellar_signed_xdr IS NULL OR (stellar_signed_xdr = $1 AND LOWER(stellar_transaction_hash) = $2))
+         AND (stellar_transaction_hash IS NULL OR LOWER(stellar_transaction_hash) = $2)
+       RETURNING id`,
+      [input.signedXdr, hash, updatedAt, input.transactionId],
+    );
+    return result.rows.length === 1;
   }
 
   public async findInteractiveTransaction(input: {
@@ -3858,6 +3900,10 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
         row.stellar_transaction_hash === null || row.stellar_transaction_hash === undefined
           ? null
           : String(row.stellar_transaction_hash),
+      stellarSignedXdr:
+        row.stellar_signed_xdr === null || row.stellar_signed_xdr === undefined
+          ? null
+          : String(row.stellar_signed_xdr),
       status,
       createdAt:
         row.created_at instanceof Date ? row.created_at.toISOString() : String(row.created_at),

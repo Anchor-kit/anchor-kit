@@ -1,4 +1,6 @@
 import { StrKey } from '@stellar/stellar-sdk';
+import { signedSettlementHash } from './settlement-identity.ts';
+import type { DatabaseAdapter } from '@/runtime/interfaces.ts';
 import type {
   StellarAccountState,
   StellarNetworkClient,
@@ -110,4 +112,106 @@ export class HorizonNetworkClient implements StellarNetworkClient {
       return { status: 'unavailable', reason: 'invalid_response' };
     return { status: 'found', value: { hash: normalized, successful, ledger } };
   }
+
+  /** Submit an already-signed envelope. Unknown outcomes always retain its original hash. */
+  async submitTransaction(signedXdr: string): Promise<StellarSubmissionResult> {
+    const hash = signedSettlementHash(signedXdr, this.networkPassphrase);
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), this.timeoutMs);
+    try {
+      const root = await this.fetchImpl(this.baseUrl, {
+        signal: controller.signal,
+        redirect: 'error',
+      });
+      if (!root.ok) return { outcome: 'unknown', hash, reason: 'network' };
+      const rootBody: unknown = await root.json();
+      if (!isRecord(rootBody) || typeof rootBody.network_passphrase !== 'string')
+        return { outcome: 'unknown', hash, reason: 'invalid_response' };
+      if (rootBody.network_passphrase !== this.networkPassphrase)
+        return { outcome: 'unknown', hash, reason: 'network_mismatch' };
+
+      const response = await this.fetchImpl(new URL('transactions', this.baseUrl), {
+        method: 'POST',
+        headers: { 'content-type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({ tx: signedXdr }),
+        signal: controller.signal,
+        redirect: 'error',
+      });
+      const body: unknown = await response.json().catch(() => null);
+      if (response.status === 400) {
+        const extras = isRecord(body) && isRecord(body.extras) ? body.extras : null;
+        const codes = extras && isRecord(extras.result_codes) ? extras.result_codes : null;
+        const transactionCode =
+          codes && typeof codes.transaction === 'string' ? codes.transaction : 'rejected';
+        return { outcome: 'rejected', hash, code: transactionCode };
+      }
+      if (!response.ok) return { outcome: 'unknown', hash, reason: 'network' };
+      if (!isRecord(body) || body.hash !== hash)
+        return { outcome: 'unknown', hash, reason: 'invalid_response' };
+      if (body.successful === false) return { outcome: 'rejected', hash, code: 'unsuccessful' };
+      if (
+        body.successful === true &&
+        typeof body.ledger === 'number' &&
+        Number.isSafeInteger(body.ledger) &&
+        body.ledger > 0
+      ) {
+        return { outcome: 'confirmed', hash, ledger: body.ledger };
+      }
+      return { outcome: 'unknown', hash, reason: 'not_confirmed' };
+    } catch {
+      return {
+        outcome: 'unknown',
+        hash,
+        reason: controller.signal.aborted ? 'timeout' : 'network',
+      };
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  /** Submit only the envelope durably stored for this transaction, after checking its hash. */
+  async submitPersistedTransaction(
+    database: Pick<DatabaseAdapter, 'getInteractiveTransactionById' | 'updateTransactionStatus'>,
+    transactionId: string,
+  ): Promise<StellarPersistedSubmissionResult> {
+    const transaction = await database.getInteractiveTransactionById(transactionId);
+    if (!transaction) return { outcome: 'not_ready', reason: 'transaction_not_found' };
+    if (!transaction.stellarSignedXdr || !transaction.stellarTransactionHash) {
+      return { outcome: 'not_ready', reason: 'signed_envelope_not_persisted' };
+    }
+    let computedHash: string;
+    try {
+      computedHash = signedSettlementHash(transaction.stellarSignedXdr, this.networkPassphrase);
+    } catch {
+      return { outcome: 'not_ready', reason: 'signed_envelope_invalid' };
+    }
+    if (computedHash !== transaction.stellarTransactionHash.toLowerCase()) {
+      return { outcome: 'not_ready', reason: 'stored_hash_mismatch' };
+    }
+    const result = await this.submitTransaction(transaction.stellarSignedXdr);
+    if (result.outcome === 'rejected') {
+      await database.updateTransactionStatus(transaction.id, 'error', 'pending_stellar');
+    }
+    return result;
+  }
 }
+
+export type StellarSubmissionResult =
+  | { outcome: 'confirmed'; hash: string; ledger: number }
+  | { outcome: 'rejected'; hash: string; code: string }
+  | {
+      outcome: 'unknown';
+      hash: string;
+      reason: 'network' | 'timeout' | 'invalid_response' | 'network_mismatch' | 'not_confirmed';
+    };
+
+export type StellarPersistedSubmissionResult =
+  | {
+      outcome: 'not_ready';
+      reason:
+        | 'transaction_not_found'
+        | 'signed_envelope_not_persisted'
+        | 'signed_envelope_invalid'
+        | 'stored_hash_mismatch';
+    }
+  | StellarSubmissionResult;
