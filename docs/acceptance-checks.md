@@ -45,6 +45,19 @@ Expected: the fake adapter supplied through `createAnchor` receives exactly one
 `connect()`, one `migrate()`, and one `disconnect()` for one init/shutdown
 cycle, including when shutdown is called twice.
 
+## Interactive session validation and revocation (#718)
+
+```sh
+bun test tests/runtime/interactive-session-revocation.test.ts tests/mvp-express.integration.test.ts
+```
+
+Expected: the focused session tests and SEP-24 integration pass. SEP-24 initiation
+persists the returned session, which then authorizes a transaction read and one
+completion request. Expired, revoked, wrong-account and wrong-transaction
+sessions are rejected before any write. Completion consumes its permitted action
+once under replay and a five-way concurrent race. The transaction read endpoint
+uses the same gate, while plain bearer reads remain valid.
+
 Run the following acceptance checks from the repository root:
 
 | Gate                                                  | Command                                                                   | Expected result                                                                                                                                                                           |

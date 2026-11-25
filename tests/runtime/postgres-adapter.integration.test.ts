@@ -41,6 +41,46 @@ postgresTest('SqlDatabaseAdapter – PostgreSQL integration', () => {
     });
   });
 
+  it('persists, revokes, and atomically consumes interactive session actions', async () => {
+    const transactionId = randomUUID();
+    await db.insertInteractiveTransaction({
+      id: transactionId,
+      account: 'GTEST1234',
+      kind: 'deposit',
+      assetCode: 'USDC',
+      amount: '1.00',
+      status: 'incomplete',
+    });
+    const id = randomUUID();
+    const session = await db.insertInteractiveSession({
+      id,
+      account: 'GTEST1234',
+      transactionId,
+      actions: ['view', 'complete'],
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    });
+    expect(session.consumedActions).toEqual([]);
+    await expect(db.getInteractiveSessionById(id)).resolves.toMatchObject({
+      id,
+      account: 'GTEST1234',
+      transactionId,
+      actions: ['view', 'complete'],
+      consumedActions: [],
+      revokedAt: null,
+    });
+
+    const consumption = await Promise.all(
+      Array.from({ length: 5 }, () => db.consumeInteractiveSessionAction(id, 'complete')),
+    );
+    expect(consumption.filter(Boolean)).toHaveLength(1);
+    await expect(db.getInteractiveSessionById(id)).resolves.toMatchObject({
+      consumedActions: ['complete'],
+    });
+    await expect(db.revokeInteractiveSession(id)).resolves.toBe(true);
+    await expect(db.revokeInteractiveSession(id)).resolves.toBe(false);
+    await expect(db.consumeInteractiveSessionAction(id, 'view')).resolves.toBe(false);
+  });
+
   it('completes a matching Stellar settlement once under concurrent replay', async () => {
     const transactionId = randomUUID();
     const transactionHash = 'c'.repeat(64);

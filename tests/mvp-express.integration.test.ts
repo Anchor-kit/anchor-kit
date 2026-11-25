@@ -1767,6 +1767,26 @@ describe('MVP Express-mounted integration', () => {
       utils.verifyInteractiveSession(session ?? '', 'jwt-test-secret', 'other-id', 'deposit'),
     ).rejects.toThrow('Interactive session is not authorized for this action');
 
+    const sessionHeaders = {
+      authorization: `Bearer ${accessToken}`,
+      'x-interactive-session': session ?? '',
+      'x-forwarded-for': '10.0.0.177',
+    };
+    const authorizedRead = await invoke({
+      method: 'GET',
+      path: `/transactions/${encodeURIComponent(id)}`,
+      headers: sessionHeaders,
+    });
+    expect(authorizedRead.status).toBe(200);
+
+    const completion = await invoke({
+      method: 'POST',
+      path: `/transactions/${encodeURIComponent(id)}/complete`,
+      headers: sessionHeaders,
+    });
+    expect(completion.status).toBe(200);
+    expect(completion.body.consumed_action).toBe('complete');
+
     const replay = await invoke(request);
     expect(replay.status).toBe(200);
     expect(replay.body.id).toBe(id);
@@ -4212,7 +4232,7 @@ describe('MVP Express-mounted integration', () => {
         'GET, POST, PUT, OPTIONS',
       );
       expect(allowedResponse.headers['access-control-allow-headers']).toBe(
-        'Content-Type, Authorization, Idempotency-Key, X-Anchor-Signature, X-Webhook-Provider',
+        'Content-Type, Authorization, Idempotency-Key, X-Anchor-Signature, X-Webhook-Provider, X-Interactive-Session',
       );
       expect(allowedResponse.headers.vary).toContain('Origin');
 

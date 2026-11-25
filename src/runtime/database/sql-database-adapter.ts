@@ -4,6 +4,7 @@ import type {
   ConfirmSettlementResult,
   DatabaseAdapter,
   IdempotencyRecord,
+  InteractiveSessionRecord,
   InteractiveTransactionRecord,
   InteractiveTransactionIdentifier,
   ReconciledRailPaymentResult,
@@ -99,7 +100,8 @@ export const SQLITE_JOURNAL_MODE = 'WAL';
 export const SQLITE_BUSY_TIMEOUT_MS = 5000;
 
 /**
- * Indexes supporting watcher polling and retention cleanup.
+ * Indexes supporting watcher polling, retention cleanup, and interactive
+ * session lookups.
  *
  * Watcher polling filters `watcher_tasks` by `status` and orders by
  * `created_at`, while retention deletes rows by `created_at` combined with a
@@ -107,6 +109,10 @@ export const SQLITE_BUSY_TIMEOUT_MS = 5000;
  * are pruned by `expires_at`, and idempotency keys by `created_at`. Each index
  * is created with `IF NOT EXISTS` so migrations stay repeatable on both fresh
  * and already-migrated databases.
+ *
+ * Interactive sessions are loaded by id on every gated request, and are also
+ * looked up by transaction when a hosted flow is resumed, so both columns are
+ * indexed.
  */
 export const SQLITE_INDEX_STATEMENTS: readonly string[] = [
   'CREATE INDEX IF NOT EXISTS idx_watcher_tasks_status_created_at ON watcher_tasks (status, created_at)',
@@ -115,6 +121,8 @@ export const SQLITE_INDEX_STATEMENTS: readonly string[] = [
   'CREATE INDEX IF NOT EXISTS idx_auth_challenges_expires_at ON auth_challenges (expires_at)',
   'CREATE INDEX IF NOT EXISTS idx_idempotency_keys_created_at ON idempotency_keys (created_at)',
   'CREATE INDEX IF NOT EXISTS idx_settlement_jobs_status_created_at ON settlement_jobs (status, created_at)',
+  'CREATE INDEX IF NOT EXISTS idx_interactive_sessions_transaction_id ON interactive_sessions (transaction_id)',
+  'CREATE INDEX IF NOT EXISTS idx_interactive_sessions_expires_at ON interactive_sessions (expires_at)',
 ];
 
 export const POSTGRES_INDEX_STATEMENTS: readonly string[] = [
@@ -124,6 +132,8 @@ export const POSTGRES_INDEX_STATEMENTS: readonly string[] = [
   'CREATE INDEX IF NOT EXISTS idx_auth_challenges_expires_at ON auth_challenges (expires_at)',
   'CREATE INDEX IF NOT EXISTS idx_idempotency_keys_created_at ON idempotency_keys (created_at)',
   'CREATE INDEX IF NOT EXISTS idx_settlement_jobs_status_created_at ON settlement_jobs (status, created_at)',
+  'CREATE INDEX IF NOT EXISTS idx_interactive_sessions_transaction_id ON interactive_sessions (transaction_id)',
+  'CREATE INDEX IF NOT EXISTS idx_interactive_sessions_expires_at ON interactive_sessions (expires_at)',
 ];
 
 const CORE_MIGRATIONS: readonly SchemaMigration[] = [
@@ -212,6 +222,16 @@ const CORE_MIGRATIONS: readonly SchemaMigration[] = [
               created_at TEXT NOT NULL,
               updated_at TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS interactive_sessions (
+              id TEXT PRIMARY KEY,
+              account TEXT NOT NULL,
+              transaction_id TEXT NOT NULL REFERENCES interactive_transactions(id),
+              actions TEXT NOT NULL,
+              consumed_actions TEXT NOT NULL DEFAULT '[]',
+              expires_at TEXT NOT NULL,
+              revoked_at TEXT,
+              created_at TEXT NOT NULL
+            );
           `
           : `
             CREATE TABLE IF NOT EXISTS auth_challenges (
@@ -292,6 +312,16 @@ const CORE_MIGRATIONS: readonly SchemaMigration[] = [
               status TEXT NOT NULL CHECK (status IN ('pending', 'processing', 'completed', 'failed')),
               created_at TIMESTAMPTZ NOT NULL,
               updated_at TIMESTAMPTZ NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS interactive_sessions (
+              id TEXT PRIMARY KEY,
+              account TEXT NOT NULL,
+              transaction_id TEXT NOT NULL REFERENCES interactive_transactions(id),
+              actions JSONB NOT NULL,
+              consumed_actions JSONB NOT NULL DEFAULT '[]'::jsonb,
+              expires_at TIMESTAMPTZ NOT NULL,
+              revoked_at TIMESTAMPTZ,
+              created_at TIMESTAMPTZ NOT NULL
             );
           `,
       );
@@ -409,6 +439,34 @@ const CORE_MIGRATIONS: readonly SchemaMigration[] = [
       )`);
       await execute(
         'CREATE INDEX IF NOT EXISTS idx_refund_operations_transaction ON refund_operations (transaction_id)',
+      );
+    },
+  },
+  {
+    name: 'core:007-interactive-sessions',
+    async up({ dialect, execute }) {
+      await execute(
+        dialect === 'sqlite'
+          ? `CREATE TABLE IF NOT EXISTS interactive_sessions (
+              id TEXT PRIMARY KEY,
+              account TEXT NOT NULL,
+              transaction_id TEXT NOT NULL REFERENCES interactive_transactions(id),
+              actions TEXT NOT NULL,
+              consumed_actions TEXT NOT NULL DEFAULT '[]',
+              expires_at TEXT NOT NULL,
+              revoked_at TEXT,
+              created_at TEXT NOT NULL
+            )`
+          : `CREATE TABLE IF NOT EXISTS interactive_sessions (
+              id TEXT PRIMARY KEY,
+              account TEXT NOT NULL,
+              transaction_id TEXT NOT NULL REFERENCES interactive_transactions(id),
+              actions JSONB NOT NULL,
+              consumed_actions JSONB NOT NULL DEFAULT '[]'::jsonb,
+              expires_at TIMESTAMPTZ NOT NULL,
+              revoked_at TIMESTAMPTZ,
+              created_at TIMESTAMPTZ NOT NULL
+            )`,
       );
     },
   },
@@ -549,6 +607,24 @@ function parseJsonObject(value: unknown, parseSerializedText: boolean): Record<s
   }
 
   return parsed as Record<string, unknown>;
+}
+
+function parseJsonStringArray(value: unknown, parseSerializedText: boolean): string[] {
+  let parsed = value;
+  if (parseSerializedText && typeof value === 'string') {
+    try {
+      parsed = JSON.parse(value);
+    } catch (error) {
+      throw new MalformedPersistedDataError(
+        `Malformed persisted JSON array: ${error instanceof Error ? error.message : String(error)}`,
+        { value: value.slice(0, 200) },
+      );
+    }
+  }
+  if (!Array.isArray(parsed) || !parsed.every((entry) => typeof entry === 'string')) {
+    throw new MalformedPersistedDataError('Persisted session actions must be an array of strings');
+  }
+  return parsed;
 }
 
 function validateSchemaIdentifier(schema: string): string {
@@ -1249,6 +1325,122 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
       [consumedAt, id],
     );
     return (response.rowCount ?? 0) > 0;
+  }
+
+  public async insertInteractiveSession(input: {
+    id: string;
+    account: string;
+    transactionId: string;
+    actions: string[];
+    expiresAt: string;
+  }): Promise<InteractiveSessionRecord> {
+    if (
+      !input.id.trim() ||
+      !input.account.trim() ||
+      !input.transactionId.trim() ||
+      input.actions.length === 0 ||
+      !input.actions.every((action) => typeof action === 'string' && action.trim().length > 0) ||
+      !Number.isFinite(Date.parse(input.expiresAt))
+    ) {
+      throw new RangeError('Interactive session requires valid identity, actions, and expiry');
+    }
+    const actions = [...new Set(input.actions)];
+    const createdAt = nowIso();
+    if (this.sqlite) {
+      this.sqlite
+        .prepare(
+          'INSERT INTO interactive_sessions (id, account, transaction_id, actions, consumed_actions, expires_at, revoked_at, created_at) VALUES (?, ?, ?, ?, ?, ?, NULL, ?)',
+        )
+        .run(
+          input.id,
+          input.account,
+          input.transactionId,
+          JSON.stringify(actions),
+          '[]',
+          input.expiresAt,
+          createdAt,
+        );
+    } else {
+      await this.requirePostgres().query(
+        "INSERT INTO interactive_sessions (id, account, transaction_id, actions, consumed_actions, expires_at, revoked_at, created_at) VALUES ($1, $2, $3, $4::jsonb, '[]'::jsonb, $5, NULL, $6)",
+        [
+          input.id,
+          input.account,
+          input.transactionId,
+          JSON.stringify(actions),
+          input.expiresAt,
+          createdAt,
+        ],
+      );
+    }
+    return {
+      id: input.id,
+      account: input.account,
+      transactionId: input.transactionId,
+      actions,
+      consumedActions: [],
+      expiresAt: input.expiresAt,
+      revokedAt: null,
+      createdAt,
+    };
+  }
+
+  public async getInteractiveSessionById(id: string): Promise<InteractiveSessionRecord | null> {
+    if (this.sqlite) {
+      const row = this.sqlite
+        .prepare('SELECT * FROM interactive_sessions WHERE id = ? LIMIT 1')
+        .get(id) as Record<string, unknown> | null;
+      return row ? this.mapInteractiveSessionRow(row) : null;
+    }
+    const response = await this.requirePostgres().query<Record<string, unknown>>(
+      'SELECT * FROM interactive_sessions WHERE id = $1 LIMIT 1',
+      [id],
+    );
+    const row = response.rows[0];
+    return row ? this.mapInteractiveSessionRow(row) : null;
+  }
+
+  public async revokeInteractiveSession(id: string): Promise<boolean> {
+    if (this.sqlite) {
+      const result = this.sqlite
+        .prepare(
+          'UPDATE interactive_sessions SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL',
+        )
+        .run(nowIso(), id);
+      return result.changes > 0;
+    }
+    const response = await this.requirePostgres().query<{ id: string }>(
+      'UPDATE interactive_sessions SET revoked_at = clock_timestamp() WHERE id = $1 AND revoked_at IS NULL RETURNING id',
+      [id],
+    );
+    return response.rows.length > 0;
+  }
+
+  public async consumeInteractiveSessionAction(id: string, action: string): Promise<boolean> {
+    if (!action.trim()) return false;
+    if (this.sqlite) {
+      const result = this.sqlite
+        .prepare(
+          `UPDATE interactive_sessions
+           SET consumed_actions = json_insert(consumed_actions, '$[#]', json(?))
+           WHERE id = ? AND revoked_at IS NULL
+             AND expires_at > strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+             AND EXISTS (SELECT 1 FROM json_each(actions) WHERE value = ?)
+             AND NOT EXISTS (SELECT 1 FROM json_each(consumed_actions) WHERE value = ?)`,
+        )
+        .run(JSON.stringify(action), id, action, action);
+      return result.changes > 0;
+    }
+    const response = await this.requirePostgres().query<{ id: string }>(
+      `UPDATE interactive_sessions
+       SET consumed_actions = consumed_actions || jsonb_build_array($2::text)
+       WHERE id = $1 AND revoked_at IS NULL AND expires_at > clock_timestamp()
+         AND actions @> jsonb_build_array($2::text)
+         AND NOT consumed_actions @> jsonb_build_array($2::text)
+       RETURNING id`,
+      [id, action],
+    );
+    return response.rows.length > 0;
   }
 
   public async insertInteractiveTransaction(input: {
@@ -1961,6 +2153,10 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
       statusCode: number;
       responseBody: string;
     };
+    interactiveSession?: Pick<
+      InteractiveSessionRecord,
+      'id' | 'account' | 'transactionId' | 'actions' | 'expiresAt'
+    >;
   }): Promise<InteractiveTransactionRecord> {
     const transaction = input.transaction;
     const updatedAt = nowIso();
@@ -1982,6 +2178,21 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
             transaction.createdAt,
             updatedAt,
           );
+        if (input.interactiveSession) {
+          const session = input.interactiveSession;
+          sqlite
+            .prepare(
+              "INSERT INTO interactive_sessions (id, account, transaction_id, actions, consumed_actions, expires_at, revoked_at, created_at) VALUES (?, ?, ?, ?, '[]', ?, NULL, ?)",
+            )
+            .run(
+              session.id,
+              session.account,
+              session.transactionId,
+              JSON.stringify([...new Set(session.actions)]),
+              session.expiresAt,
+              nowIso(),
+            );
+        }
         const completed = sqlite
           .prepare(
             "UPDATE idempotency_keys SET status = 'completed', status_code = ?, response_body = ? WHERE scope = ? AND idempotency_key = ? AND request_hash = ? AND status = 'pending'",
@@ -2025,6 +2236,20 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
             updatedAt,
           ],
         );
+        if (input.interactiveSession) {
+          const session = input.interactiveSession;
+          await postgres.query(
+            "INSERT INTO interactive_sessions (id, account, transaction_id, actions, consumed_actions, expires_at, revoked_at, created_at) VALUES ($1, $2, $3, $4::jsonb, '[]'::jsonb, $5, NULL, $6)",
+            [
+              session.id,
+              session.account,
+              session.transactionId,
+              JSON.stringify([...new Set(session.actions)]),
+              session.expiresAt,
+              nowIso(),
+            ],
+          );
+        }
         const completed = await postgres.query<{ id: string }>(
           "UPDATE idempotency_keys SET status = 'completed', status_code = $1, response_body = $2 WHERE scope = $3 AND idempotency_key = $4 AND request_hash = $5 AND status = 'pending' RETURNING id",
           [
@@ -3111,6 +3336,7 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
     // while only entries strictly older than the cutoff are removed.
     if (this.sqlite) {
       this.sqlite.prepare('DELETE FROM auth_challenges WHERE expires_at < ?').run(cutoffIso);
+      this.sqlite.prepare('DELETE FROM interactive_sessions WHERE expires_at < ?').run(cutoffIso);
       this.sqlite.prepare('DELETE FROM idempotency_keys WHERE created_at < ?').run(cutoffIso);
       this.sqlite
         .prepare(
@@ -3126,6 +3352,9 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
     }
 
     await this.requirePostgres().query('DELETE FROM auth_challenges WHERE expires_at < $1', [
+      cutoffIso,
+    ]);
+    await this.requirePostgres().query('DELETE FROM interactive_sessions WHERE expires_at < $1', [
       cutoffIso,
     ]);
     await this.requirePostgres().query('DELETE FROM idempotency_keys WHERE created_at < $1', [
@@ -3173,6 +3402,26 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
         row.created_at instanceof Date ? row.created_at.toISOString() : String(row.created_at),
       updatedAt:
         row.updated_at instanceof Date ? row.updated_at.toISOString() : String(row.updated_at),
+    };
+  }
+
+  private mapInteractiveSessionRow(row: Record<string, unknown>): InteractiveSessionRecord {
+    return {
+      id: String(row.id),
+      account: String(row.account),
+      transactionId: String(row.transaction_id),
+      actions: parseJsonStringArray(row.actions, this.provider === 'sqlite'),
+      consumedActions: parseJsonStringArray(row.consumed_actions, this.provider === 'sqlite'),
+      expiresAt:
+        row.expires_at instanceof Date ? row.expires_at.toISOString() : String(row.expires_at),
+      revokedAt:
+        row.revoked_at === null || row.revoked_at === undefined
+          ? null
+          : row.revoked_at instanceof Date
+            ? row.revoked_at.toISOString()
+            : String(row.revoked_at),
+      createdAt:
+        row.created_at instanceof Date ? row.created_at.toISOString() : String(row.created_at),
     };
   }
 

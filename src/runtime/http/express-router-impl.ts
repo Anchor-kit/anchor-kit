@@ -17,7 +17,11 @@ import type { PluginRouteContext, RouteDefinition } from '@/types/foundation.ts'
 import type { AnchorPluginHooks, DepositRequestBody } from '@/types/plugin.ts';
 import { IdempotencyUtils } from '../../utils/idempotency.ts';
 import { createInteractiveInitiationResponse } from '@/core/sep24/interactive-response.ts';
-import { createInteractiveSession } from '@/utils/interactive-session.ts';
+import {
+  createInteractiveSession,
+  INTERACTIVE_SESSION_TTL_SECONDS,
+} from '@/utils/interactive-session.ts';
+import { gateInteractiveSession, interactiveSessionRejection } from './interactive-session-gate.ts';
 import Big from 'big.js';
 import {
   Account,
@@ -177,7 +181,7 @@ function setCorsHeaders(
       res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, OPTIONS');
       res.setHeader(
         'Access-Control-Allow-Headers',
-        'Content-Type, Authorization, Idempotency-Key, X-Anchor-Signature, X-Webhook-Provider',
+        'Content-Type, Authorization, Idempotency-Key, X-Anchor-Signature, X-Webhook-Provider, X-Interactive-Session',
       );
     }
   }
@@ -557,16 +561,26 @@ async function createStandardSep24Initiation(
   account: string,
   transactionId: string,
 ) {
+  const expiresAt = new Date(
+    Date.now() + (INTERACTIVE_SESSION_TTL_SECONDS - 1) * 1000,
+  ).toISOString();
   const session = await createInteractiveSession(
     { account, transactionId, actions: ['deposit'] },
     context.config.get('security').interactiveJwtSecret,
+    INTERACTIVE_SESSION_TTL_SECONDS,
   );
   const url = new URL(buildInteractiveUrl(interactiveDomain, transactionId));
   url.searchParams.set('token', session);
-  return createInteractiveInitiationResponse({
-    id: transactionId,
-    url: url.toString(),
-  });
+  return {
+    response: createInteractiveInitiationResponse({ id: transactionId, url: url.toString() }),
+    session: {
+      id: session,
+      account,
+      transactionId,
+      actions: ['deposit', 'view', 'complete'],
+      expiresAt,
+    },
+  };
 }
 function sha256(input: string | Buffer | Uint8Array): string {
   return createHash('sha256').update(input).digest('hex');
@@ -634,6 +648,17 @@ const BUILT_IN_PATHS = new Set([
   '/webhooks/events',
 ]);
 const BUILT_IN_TRANSACTION_PATH = /^\/transactions\/[^/]+$/;
+const BUILT_IN_TRANSACTION_COMPLETE_PATH = /^\/transactions\/[^/]+\/complete$/;
+
+/**
+ * Action names accepted by the shared interactive session gate.
+ *
+ * `view` authorizes reading the interactive transaction, and `complete`
+ * authorizes the state-changing completion of the hosted flow. Completion is a
+ * single-use action, so it is consumed exactly once per session.
+ */
+const INTERACTIVE_VIEW_ACTION = 'view';
+const INTERACTIVE_COMPLETION_ACTION = 'complete';
 
 export function validatePluginRoutes(
   routes: Array<{ pluginId: string; route: RouteDefinition }>,
@@ -657,7 +682,11 @@ export function validatePluginRoutes(
         `Plugin "${pluginId}" route for "${route.path}" has unsupported method "${route.method}"`,
       );
     }
-    if (BUILT_IN_PATHS.has(route.path) || BUILT_IN_TRANSACTION_PATH.test(route.path)) {
+    if (
+      BUILT_IN_PATHS.has(route.path) ||
+      BUILT_IN_TRANSACTION_PATH.test(route.path) ||
+      BUILT_IN_TRANSACTION_COMPLETE_PATH.test(route.path)
+    ) {
       throw new ConfigError(
         `Plugin "${pluginId}" route "${route.method} ${route.path}" conflicts with a built-in endpoint`,
       );
@@ -1231,6 +1260,7 @@ function allowedMethodsForPath(path: string): readonly string[] | undefined {
   ) {
     return ['POST'];
   }
+  if (TRANSACTION_COMPLETE_PATH_RE.test(path)) return ['POST'];
   if (/^\/transactions\/[^/]+$/.test(path)) return ['GET'];
   return undefined;
 }
@@ -1268,6 +1298,7 @@ function handleCorsPreflight(
     ['idempotency-key', 'Idempotency-Key'],
     ['x-anchor-signature', 'X-Anchor-Signature'],
     ['x-webhook-provider', 'X-Webhook-Provider'],
+    ['x-interactive-session', 'X-Interactive-Session'],
   ]);
   const corsOrigins = context.config.get('server').corsOrigins ?? [];
 
@@ -1664,6 +1695,7 @@ async function handleDepositInteractive(
   req: IncomingMessage,
   res: ServerResponse,
 ): Promise<void> {
+  res.setHeader('Cache-Control', 'no-store');
   if (!checkRateLimit(context, req, res, 'deposit')) {
     return;
   }
@@ -1856,14 +1888,15 @@ async function handleDepositInteractive(
           return;
         }
         try {
-          const standardResponse = await createStandardSep24Initiation(
+          const standardInitiation = await createStandardSep24Initiation(
             context,
             serverConfig.interactiveDomain,
             auth.account,
             responseBody.id,
           );
+          await context.database.insertInteractiveSession(standardInitiation.session);
           res.setHeader('Cache-Control', 'no-store');
-          sendJson(res, 200, { ...standardResponse });
+          sendJson(res, 200, { ...standardInitiation.response });
         } catch {
           sendJson(res, 500, {
             error: 'server_misconfigured',
@@ -1895,17 +1928,20 @@ async function handleDepositInteractive(
       updated_at: createdAt,
     };
     let responseBody: Record<string, unknown> = legacyResponseBody;
+    let interactiveSession:
+      | Awaited<ReturnType<typeof createStandardSep24Initiation>>['session']
+      | undefined;
 
     try {
       if (parsedBody.isStandardSep24) {
-        responseBody = {
-          ...(await createStandardSep24Initiation(
-            context,
-            serverConfig.interactiveDomain,
-            auth.account,
-            transactionId,
-          )),
-        };
+        const standardInitiation = await createStandardSep24Initiation(
+          context,
+          serverConfig.interactiveDomain,
+          auth.account,
+          transactionId,
+        );
+        responseBody = { ...standardInitiation.response };
+        interactiveSession = standardInitiation.session;
       }
       throwIfRequestAborted(req);
       await context.database.createDepositWithIdempotency({
@@ -1925,6 +1961,7 @@ async function handleDepositInteractive(
           statusCode: parsedBody.isStandardSep24 ? 200 : 201,
           responseBody: JSON.stringify(responseBody),
         },
+        ...(interactiveSession ? { interactiveSession } : {}),
       });
     } catch (error) {
       await context.database
@@ -1939,10 +1976,10 @@ async function handleDepositInteractive(
   }
 
   const transactionId = randomUUID();
-  let standardResponse: ReturnType<typeof createInteractiveInitiationResponse> | null = null;
+  let standardInitiation: Awaited<ReturnType<typeof createStandardSep24Initiation>> | null = null;
   if (parsedBody.isStandardSep24) {
     try {
-      standardResponse = await createStandardSep24Initiation(
+      standardInitiation = await createStandardSep24Initiation(
         context,
         serverConfig.interactiveDomain,
         auth.account,
@@ -1965,6 +2002,9 @@ async function handleDepositInteractive(
     amount,
     status: 'incomplete',
   });
+  if (standardInitiation) {
+    await context.database.insertInteractiveSession(standardInitiation.session);
+  }
 
   const legacyResponseBody = {
     id: created.id,
@@ -1978,12 +2018,107 @@ async function handleDepositInteractive(
     created_at: created.createdAt,
     updated_at: created.updatedAt,
   };
-  if (standardResponse) {
+  if (standardInitiation) {
     res.setHeader('Cache-Control', 'no-store');
-    sendJson(res, 200, { ...standardResponse });
+    sendJson(res, 200, { ...standardInitiation.response });
   } else {
     sendJson(res, 201, legacyResponseBody);
   }
+}
+
+async function handleCompleteInteractive(
+  context: ExpressRouterContext,
+  req: IncomingMessage,
+  res: ServerResponse,
+  transactionId: string,
+): Promise<void> {
+  res.setHeader('Cache-Control', 'no-store');
+  if (!checkRateLimit(context, req, res, 'deposit')) {
+    return;
+  }
+
+  const auth = authenticate(context, req);
+  if (!auth) {
+    sendJsonUnauthorized(res, {
+      error: 'unauthorized',
+      message: 'Missing or invalid bearer token',
+    });
+    return;
+  }
+
+  throwIfRequestAborted(req);
+
+  // Shared gate first: an expired, revoked, wrong-account or wrong-transaction
+  // session is rejected here, before the transaction is even read, so no write
+  // of any kind can follow a rejected session.
+  const gate = await gateInteractiveSession({
+    database: context.database,
+    req,
+    account: auth.account,
+    transactionId,
+    action: INTERACTIVE_COMPLETION_ACTION,
+    required: true,
+  });
+
+  if (!gate.ok) {
+    const rejection = interactiveSessionRejection(gate.reason);
+    sendJson(res, rejection.status, {
+      error: rejection.error,
+      message: rejection.message,
+    });
+    return;
+  }
+
+  const session = gate.session;
+  if (!session) {
+    // Unreachable: `required: true` guarantees a session when the gate passes.
+    const rejection = interactiveSessionRejection('session_not_found');
+    sendJson(res, rejection.status, { error: rejection.error, message: rejection.message });
+    return;
+  }
+
+  const transaction = await context.database.getInteractiveTransactionById(transactionId);
+  if (!transaction) {
+    res.setHeader('Cache-Control', 'no-store');
+    sendJson(res, 404, { error: 'not_found', message: 'Transaction not found' });
+    return;
+  }
+
+  if (transaction.account !== auth.account) {
+    sendJson(res, 403, {
+      error: 'forbidden',
+      message: 'Transaction belongs to another account',
+    });
+    return;
+  }
+
+  // Consume the permitted action exactly once. The compare-and-set in the
+  // adapter only succeeds while the action is unconsumed, so a replayed
+  // completion observes `false` and is reported as already consumed instead of
+  // performing the action a second time.
+  const consumed = await context.database.consumeInteractiveSessionAction(
+    session.id,
+    INTERACTIVE_COMPLETION_ACTION,
+  );
+
+  if (!consumed) {
+    const rejection = interactiveSessionRejection('action_already_consumed');
+    sendJson(res, rejection.status, { error: rejection.error, message: rejection.message });
+    return;
+  }
+
+  res.setHeader('Cache-Control', 'no-store');
+  sendJson(res, 200, {
+    id: transaction.id,
+    kind: transaction.kind,
+    status: transaction.status,
+    amount: transaction.amount,
+    asset_code: transaction.assetCode,
+    account: transaction.account,
+    created_at: transaction.createdAt,
+    updated_at: transaction.updatedAt,
+    consumed_action: INTERACTIVE_COMPLETION_ACTION,
+  });
 }
 
 async function handleTransaction(
@@ -1992,11 +2127,34 @@ async function handleTransaction(
   res: ServerResponse,
   transactionId: string,
 ): Promise<void> {
+  res.setHeader('Cache-Control', 'no-store');
   const auth = authenticate(context, req);
   if (!auth) {
     sendJsonUnauthorized(res, {
       error: 'unauthorized',
       message: 'Missing or invalid bearer token',
+    });
+    return;
+  }
+
+  // The same gate used by the completion endpoint. Optional here because a
+  // plain bearer read remains valid, but a session that is presented must be
+  // current, owned by this account, bound to this transaction, and permitted
+  // to view it.
+  const gate = await gateInteractiveSession({
+    database: context.database,
+    req,
+    account: auth.account,
+    transactionId,
+    action: INTERACTIVE_VIEW_ACTION,
+    required: false,
+  });
+
+  if (!gate.ok) {
+    const rejection = interactiveSessionRejection(gate.reason);
+    sendJson(res, rejection.status, {
+      error: rejection.error,
+      message: rejection.message,
     });
     return;
   }
@@ -2467,6 +2625,44 @@ function hasPathSeparator(value: string): boolean {
   return value.includes('/') || value.includes('\\');
 }
 
+/**
+ * Decodes and validates a transaction id taken from a URL path segment.
+ *
+ * Shared by every endpoint addressed by transaction id so the read and the
+ * state-changing endpoints apply identical validation and identical 400
+ * responses. Returns `null` after writing the rejection to the response.
+ */
+function readTransactionIdFromPath(rawTransactionId: string, res: ServerResponse): string | null {
+  let transactionId: string;
+  try {
+    transactionId = decodeURIComponent(rawTransactionId);
+  } catch {
+    sendJson(res, 400, {
+      error: 'invalid_request',
+      message: 'Transaction id contains malformed percent-encoding',
+    });
+    return null;
+  }
+
+  if (transactionId.trim().length === 0) {
+    sendJson(res, 400, {
+      error: 'invalid_request',
+      message: 'Transaction id must not be empty',
+    });
+    return null;
+  }
+
+  if (hasPathSeparator(transactionId)) {
+    sendJson(res, 400, {
+      error: 'invalid_request',
+      message: 'Transaction id must not contain path separators',
+    });
+    return null;
+  }
+
+  return transactionId;
+}
+
 async function handleWebhook(
   context: ExpressRouterContext,
   req: IncomingMessage,
@@ -2548,6 +2744,14 @@ async function handleWebhook(
 
 const TRANSACTION_PATH_RE = /^\/transactions\/([^/]*)$/;
 
+/**
+ * Matches the state-changing completion endpoint, `POST /transactions/:id/complete`.
+ *
+ * More specific than `TRANSACTION_PATH_RE`, so dispatch tests it first and a
+ * completion request is never mistaken for a transaction read.
+ */
+const TRANSACTION_COMPLETE_PATH_RE = /^\/transactions\/([^/]+)\/complete$/;
+
 const KNOWN_ROUTES: Record<string, string[]> = {
   '/health': ['GET'],
   '/ready': ['GET'],
@@ -2564,6 +2768,7 @@ const KNOWN_ROUTES: Record<string, string[]> = {
 function getAllowedMethods(path: string): string[] | null {
   const exactMatch = KNOWN_ROUTES[path];
   if (exactMatch) return exactMatch;
+  if (TRANSACTION_COMPLETE_PATH_RE.test(path)) return ['POST'];
   if (TRANSACTION_PATH_RE.test(path)) return ['GET'];
   return null;
 }
@@ -2655,35 +2860,18 @@ export async function handleExpressRouterRequest(
         return;
       }
 
+      const completeMatch = TRANSACTION_COMPLETE_PATH_RE.exec(path);
+      if (method === 'POST' && completeMatch) {
+        const completeTransactionId = readTransactionIdFromPath(completeMatch[1], res);
+        if (completeTransactionId === null) return;
+        await handleCompleteInteractive(context, req, res, completeTransactionId);
+        return;
+      }
+
       const transactionMatch = TRANSACTION_PATH_RE.exec(path);
       if (method === 'GET' && transactionMatch) {
-        const transactionIdRaw = transactionMatch[1];
-        let transactionId: string;
-        try {
-          transactionId = decodeURIComponent(transactionIdRaw);
-        } catch {
-          sendJson(res, 400, {
-            error: 'invalid_request',
-            message: 'Transaction id contains malformed percent-encoding',
-          });
-          return;
-        }
-
-        if (transactionId.trim().length === 0) {
-          sendJson(res, 400, {
-            error: 'invalid_request',
-            message: 'Transaction id must not be empty',
-          });
-          return;
-        }
-
-        if (hasPathSeparator(transactionId)) {
-          sendJson(res, 400, {
-            error: 'invalid_request',
-            message: 'Transaction id must not contain path separators',
-          });
-          return;
-        }
+        const transactionId = readTransactionIdFromPath(transactionMatch[1], res);
+        if (transactionId === null) return;
 
         await handleTransaction(context, req, res, transactionId);
         return;
