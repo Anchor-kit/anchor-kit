@@ -1,5 +1,6 @@
 import type { TransactionStatus } from '@/types/transaction-status.ts';
 import type { KycData, KycVerificationDecision } from '@/types/foundation.ts';
+import type { Customer } from '@/types/customer.ts';
 import type {
   NormalizedPaymentRailEvent,
   PaymentRailInitiationRequest,
@@ -45,6 +46,35 @@ export interface AccountSigner {
   weight: number;
 }
 
+/**
+ * Signer summary for a SEP-10 client account.
+ *
+ * `signers` must be the complete authorization set reported by the network,
+ * including the master key entry (whose public key equals the account ID) when
+ * the master key has non-zero weight. Duplicate keys are rejected.
+ */
+export interface Sep10AccountSigners {
+  signers: readonly AccountSigner[];
+  /** Account thresholds; SEP-10 authentication requires the medium threshold. */
+  thresholds: {
+    low: number;
+    medium: number;
+    high: number;
+  };
+}
+
+/**
+ * Injectable SEP-10 client account lookup.
+ *
+ * Return `null` only when the account genuinely does not exist on the network;
+ * that selects the protocol's nonexistent-account signature branch. Throw for
+ * transport or upstream failures so an outage is never treated as an absent
+ * account.
+ */
+export interface Sep10AccountLookup {
+  load(accountId: string): Promise<Sep10AccountSigners | null>;
+}
+
 export interface AuthChallengeRecord {
   id: string;
   account: string;
@@ -70,6 +100,11 @@ export interface InteractiveTransactionRecord {
   createdAt: string;
   updatedAt: string;
 }
+
+export type InteractiveTransactionIdentifier =
+  | { kind: 'id'; value: string }
+  | { kind: 'stellar_transaction_id'; value: string }
+  | { kind: 'external_transaction_id'; value: string };
 
 export type TransactionTransitionResult =
   | { outcome: 'updated'; transaction: InteractiveTransactionRecord }
@@ -150,10 +185,64 @@ export interface SettlementJobRecord {
   updatedAt: string;
 }
 
-export interface DatabaseAdapter {
+export type ConfirmSettlementResult =
+  | {
+      outcome: 'completed' | 'replayed';
+      transaction: InteractiveTransactionRecord;
+    }
+  | {
+      outcome: 'conflict';
+      reason: 'not_found' | 'status_mismatch' | 'confirmation_mismatch' | 'hash_mismatch';
+      transaction: InteractiveTransactionRecord | null;
+    };
+
+export type ReconciledRailPaymentResult =
+  | {
+      outcome: 'enqueued' | 'replayed';
+      transaction: InteractiveTransactionRecord;
+      job: SettlementJobRecord;
+    }
+  | {
+      outcome: 'conflict';
+      reason: 'not_found' | 'status_mismatch' | 'operation_reused';
+      transaction: InteractiveTransactionRecord | null;
+    };
+
+/** Ownership for one settlement-job attempt. Tokens must not be reused. */
+export interface SettlementJobLease {
+  job: SettlementJobRecord;
+  owner: string;
+  token: string;
+  expiresAt: string;
+  attempt: number;
+}
+
+export interface SettlementLeaseAdapter {
+  /** Lists pending jobs and expired leases; claim remains the ownership gate. */
+  listClaimableSettlementJobs(limit: number): Promise<SettlementJobRecord[]>;
+  claimSettlementJob(input: {
+    operationId: string;
+    owner: string;
+    durationMs: number;
+  }): Promise<SettlementJobLease | null>;
+  heartbeatSettlementJob(input: {
+    operationId: string;
+    token: string;
+    durationMs: number;
+  }): Promise<boolean>;
+  finishSettlementJob(input: {
+    operationId: string;
+    token: string;
+    status: 'pending' | 'completed' | 'failed';
+  }): Promise<boolean>;
+}
+
+export interface DatabaseAdapter extends SettlementLeaseAdapter {
   connect(): Promise<void>;
   disconnect(): Promise<void>;
   migrate(): Promise<void>;
+  /** Check storage connectivity without exposing connection details. */
+  checkReadiness?(): Promise<void>;
 
   insertAuthChallenge(input: {
     id: string;
@@ -179,12 +268,26 @@ export interface DatabaseAdapter {
     status: TransactionStatus;
   }): Promise<InteractiveTransactionRecord>;
   getInteractiveTransactionById(id: string): Promise<InteractiveTransactionRecord | null>;
+  findInteractiveTransaction(input: {
+    account: string;
+    identifier: InteractiveTransactionIdentifier;
+  }): Promise<InteractiveTransactionRecord | null>;
   listPendingTransactionsBefore(cutoffIso: string): Promise<InteractiveTransactionRecord[]>;
   updateTransactionStatus(
     id: string,
     status: TransactionStatus,
     expectedStatus?: TransactionStatus,
   ): Promise<boolean>;
+
+  insertOrGetCustomer(input: Omit<Customer, 'created_at'>): Promise<Customer>;
+  getCustomerByAccountId(accountId: string): Promise<Customer | null>;
+  updateCustomer(input: {
+    id: string;
+    account_id: string;
+    email_address?: string;
+    phone_number?: string;
+    kyc_data: KycData;
+  }): Promise<boolean>;
 
   getIdempotencyRecord(scope: string, idempotencyKey: string): Promise<IdempotencyRecord | null>;
   insertOrGetIdempotencyRecord(input: {
@@ -285,10 +388,22 @@ export interface DatabaseAdapter {
   }): Promise<{ record: SettlementJobRecord; inserted: boolean }>;
   getSettlementJobByOperationId(operationId: string): Promise<SettlementJobRecord | null>;
   listPendingSettlementJobs(limit: number): Promise<SettlementJobRecord[]>;
+  /** @deprecated Status changes require a lease; this method rejects without one. */
   updateSettlementJobStatus(input: {
     operationId: string;
     status: SettlementJobRecord['status'];
   }): Promise<boolean>;
+  confirmSettlement(input: {
+    transactionId: string;
+    transactionHash: string;
+    amount: string;
+    recipient: string;
+  }): Promise<ConfirmSettlementResult>;
+  recordReconciledRailPayment(input: {
+    transactionId: string;
+    operationId: string;
+    jobId: string;
+  }): Promise<ReconciledRailPaymentResult>;
   cleanupOldRecords(cutoffIso: string): Promise<void>;
 }
 
@@ -297,24 +412,58 @@ export type QueueJob =
   | { type: 'process_watcher_task'; payload: { watcherTaskId: string } }
   | { type: 'cleanup_records'; payload: { retentionDays: number } };
 
-export interface QueueDrainStatus {
-  readonly pending: number;
-  readonly active: number;
+/**
+ * Classification of a queue failure. Retryable failures are attempted again until the
+ * configured attempt limit; permanent failures are recorded once and never retried.
+ */
+export type QueueJobErrorClassification = 'retryable' | 'permanent';
+
+/** Bounded retry policy for the in-memory queue. */
+export interface QueueJobRetryOptions {
+  /** Total attempts including the first. Defaults to 3. */
+  maxAttempts?: number;
+  /** First retry delay in milliseconds, doubled per attempt. Defaults to 250. */
+  baseDelayMs?: number;
+  /** Upper bound for any single retry delay. Defaults to 30000. */
+  maxDelayMs?: number;
+}
+
+/**
+ * Terminal failure record retained for operator review. Retries that are still in
+ * progress are not failures; only permanent or attempt-exhausted work is recorded here.
+ */
+export interface QueueJobFailure {
+  /** Stable identity of the original queue job, usable with `requeueFailedJob`. */
+  readonly id: string;
+  readonly job: QueueJob;
+  /** Number of attempts made before the failure became terminal. */
+  readonly attempts: number;
+  /** `permanent` when not retryable; `exhausted` when the attempt limit was reached. */
+  readonly outcome: 'permanent' | 'exhausted';
+  readonly error: unknown;
+  readonly failedAt: string;
 }
 
 export interface QueueDrainStatus {
+  /** Waiting jobs, including jobs currently scheduled for a bounded retry. */
   readonly pending: number;
   readonly active: number;
 }
 
 export interface QueueAdapter {
+  readonly isRunning?: boolean;
   readonly status?: QueueDrainStatus;
   enqueue(job: QueueJob): Promise<void>;
   start(worker: (job: QueueJob) => Promise<void>): Promise<void>;
   stop(): Promise<void>;
+  /** Terminal failures retained for operator review, newest last. */
+  listFailedJobs?(): readonly QueueJobFailure[];
+  /** Re-enqueue a terminal failure with a fresh attempt budget. Returns false if unknown. */
+  requeueFailedJob?(id: string): Promise<boolean>;
 }
 
 export interface Watcher {
+  readonly isRunning?: boolean;
   readonly name: string;
   start(): Promise<void>;
   stop(): Promise<void>;

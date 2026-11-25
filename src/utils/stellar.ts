@@ -44,6 +44,14 @@ export interface PaymentParams {
   network?: 'testnet' | 'public' | 'futurenet' | string;
 }
 
+/** Explicit account state and transaction limits for a settlement payment. */
+export interface SettlementPaymentParams extends Omit<PaymentParams, 'network'> {
+  network: 'testnet' | 'public' | 'futurenet';
+  sequence: string;
+  fee: string;
+  timeoutSeconds: number;
+}
+
 /**
  * StellarUtils helper object providing reusable utilities for common Stellar tasks.
  */
@@ -133,96 +141,36 @@ export const StellarUtils = {
    * @returns Base64-encoded transaction XDR
    */
   async buildPaymentXdr(params: PaymentParams): Promise<string> {
-    const { source, destination, amount, assetCode, issuer, memo, network } = params;
-    const normalizedAssetCode = assetCode.trim().toUpperCase();
+    return buildPaymentXdrWithAccount(params, { sequence: '0', fee: '100', timeoutSeconds: 0 });
+  },
 
-    if (!isPositiveFiniteDecimal(amount)) {
-      throw new Error('amount must be a positive finite decimal string');
-    }
-
-    const fractionalPart = amount.split('.')[1];
-    if (fractionalPart !== undefined && fractionalPart.length > 7) {
-      throw new Error('amount must have at most 7 decimal places');
-    }
-
-    if (!isValidPaymentAccountAddress(source)) {
-      throw new Error('source must be a valid Stellar public or muxed public key');
-    }
-
-    if (!isValidPaymentAccountAddress(destination)) {
-      throw new Error('destination must be a valid Stellar public or muxed public key');
-    }
-
-    const networkPassphrase =
-      network === undefined || network === 'testnet'
-        ? Networks.TESTNET
-        : network === 'public'
-          ? Networks.PUBLIC
-          : network === 'futurenet'
-            ? Networks.FUTURENET
-            : (() => {
-                throw new Error(
-                  'Unsupported network: ' +
-                    network +
-                    '. Must be one of: public, testnet, futurenet',
-                );
-              })();
-
+  /** Build an unsigned payment using the loaded account sequence and bounded limits. */
+  async buildSettlementPaymentXdr(params: SettlementPaymentParams): Promise<string> {
     if (
-      normalizedAssetCode !== 'XLM' &&
-      (!issuer || !ValidationUtils.isValidStellarAddress(issuer))
+      params.sequence.length > 19 ||
+      !/^(0|[1-9]\d*)$/.test(params.sequence) ||
+      BigInt(params.sequence) >= 9223372036854775807n
     ) {
-      throw new Error(
-        'A valid issuer is required for non-native asset payments: ' + normalizedAssetCode,
-      );
+      throw new Error('sequence must be a non-negative account sequence below INT64_MAX');
     }
-
-    const asset =
-      normalizedAssetCode === 'XLM' ? Asset.native() : new Asset(normalizedAssetCode, issuer);
-
-    // We use a dummy sequence number because the actual submission will be handled later
-    // or by a signer that manages sequence numbers.
-    const sourceAccount = StrKey.isValidMed25519PublicKey(source)
-      ? MuxedAccount.fromAddress(source, '0')
-      : new Account(source, '0');
-
-    const builder = new TransactionBuilder(sourceAccount, {
-      fee: '100',
-      networkPassphrase,
-    })
-      .addOperation(
-        Operation.payment({
-          destination,
-          asset,
-          amount,
-        }),
-      )
-      .setTimeout(0); // Added .setTimeout(0)
-
-    if (memo) {
-      let stellarMemo: StellarMemo;
-      switch (memo.type) {
-        case 'text':
-          stellarMemo = StellarMemo.text(memo.value);
-          break;
-        case 'id':
-          stellarMemo = StellarMemo.id(memo.value);
-          break;
-        case 'hash':
-          validateBinaryMemoValue(memo.value, memo.type);
-          stellarMemo = StellarMemo.hash(memo.value);
-          break;
-        case 'return':
-          validateBinaryMemoValue(memo.value, memo.type);
-          stellarMemo = StellarMemo.return(memo.value);
-          break;
-        default:
-          throw new Error(`Unsupported memo type: ${memo.type}`);
-      }
-      builder.addMemo(stellarMemo);
+    if (
+      params.fee.length > 10 ||
+      !/^[1-9]\d*$/.test(params.fee) ||
+      BigInt(params.fee) > 4294967295n
+    ) {
+      throw new Error('fee must be a positive unsigned 32-bit integer');
     }
-
-    return builder.build().toXDR();
+    if (
+      !Number.isInteger(params.timeoutSeconds) ||
+      params.timeoutSeconds < 1 ||
+      params.timeoutSeconds > 4294967295
+    ) {
+      throw new Error('timeoutSeconds must be a positive unsigned 32-bit integer');
+    }
+    if (!['testnet', 'public', 'futurenet'].includes(params.network)) {
+      throw new Error('network must be testnet, public, or futurenet');
+    }
+    return buildPaymentXdrWithAccount(params, params);
   },
 
   /**
@@ -235,6 +183,98 @@ export const StellarUtils = {
     return ValidationUtils.isValidStellarAddress(accountId);
   },
 };
+
+async function buildPaymentXdrWithAccount(
+  params: PaymentParams,
+  options: { sequence: string; fee: string; timeoutSeconds: number },
+): Promise<string> {
+  const { source, destination, amount, assetCode, issuer, memo, network } = params;
+  const normalizedAssetCode = assetCode.trim().toUpperCase();
+
+  if (!isPositiveFiniteDecimal(amount)) {
+    throw new Error('amount must be a positive finite decimal string');
+  }
+
+  const fractionalPart = amount.split('.')[1];
+  if (fractionalPart !== undefined && fractionalPart.length > 7) {
+    throw new Error('amount must have at most 7 decimal places');
+  }
+
+  if (!isValidPaymentAccountAddress(source)) {
+    throw new Error('source must be a valid Stellar public or muxed public key');
+  }
+
+  if (!isValidPaymentAccountAddress(destination)) {
+    throw new Error('destination must be a valid Stellar public or muxed public key');
+  }
+
+  const networkPassphrase =
+    network === undefined || network === 'testnet'
+      ? Networks.TESTNET
+      : network === 'public'
+        ? Networks.PUBLIC
+        : network === 'futurenet'
+          ? Networks.FUTURENET
+          : (() => {
+              throw new Error(
+                'Unsupported network: ' + network + '. Must be one of: public, testnet, futurenet',
+              );
+            })();
+
+  if (
+    normalizedAssetCode !== 'XLM' &&
+    (!issuer || !ValidationUtils.isValidStellarAddress(issuer))
+  ) {
+    throw new Error(
+      'A valid issuer is required for non-native asset payments: ' + normalizedAssetCode,
+    );
+  }
+
+  const asset =
+    normalizedAssetCode === 'XLM' ? Asset.native() : new Asset(normalizedAssetCode, issuer);
+
+  const sourceAccount = StrKey.isValidMed25519PublicKey(source)
+    ? MuxedAccount.fromAddress(source, options.sequence)
+    : new Account(source, options.sequence);
+
+  const builder = new TransactionBuilder(sourceAccount, {
+    fee: options.fee,
+    networkPassphrase,
+  })
+    .addOperation(
+      Operation.payment({
+        destination,
+        asset,
+        amount,
+      }),
+    )
+    .setTimeout(options.timeoutSeconds);
+
+  if (memo) {
+    let stellarMemo: StellarMemo;
+    switch (memo.type) {
+      case 'text':
+        stellarMemo = StellarMemo.text(memo.value);
+        break;
+      case 'id':
+        stellarMemo = StellarMemo.id(memo.value);
+        break;
+      case 'hash':
+        validateBinaryMemoValue(memo.value, memo.type);
+        stellarMemo = StellarMemo.hash(memo.value);
+        break;
+      case 'return':
+        validateBinaryMemoValue(memo.value, memo.type);
+        stellarMemo = StellarMemo.return(memo.value);
+        break;
+      default:
+        throw new Error(`Unsupported memo type: ${memo.type}`);
+    }
+    builder.addMemo(stellarMemo);
+  }
+
+  return builder.build().toXDR();
+}
 
 function isValidPaymentAccountAddress(address: string): boolean {
   return StrKey.isValidEd25519PublicKey(address) || StrKey.isValidMed25519PublicKey(address);
