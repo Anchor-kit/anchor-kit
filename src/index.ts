@@ -16,6 +16,11 @@ export { serializeRefunds } from './services/refund-serialization.ts';
 export type { RefundOperation, Sep24Refunds } from './services/refund-serialization.ts';
 export { paystackSubunits, validatePaystackReference } from './services/paystack-inputs.ts';
 export { getPaystackTestStatus } from './services/paystack-status.ts';
+export {
+  PaystackWebhookAdapter,
+  verifyPaystackWebhook,
+} from './services/paystack-webhook-adapter.ts';
+export type { PaystackWebhookOptions } from './services/paystack-webhook-adapter.ts';
 export { emitTransactionTrace } from './services/transaction-trace.ts';
 export type { TransactionTraceEvent, TransactionTraceSink } from './services/transaction-trace.ts';
 export { signedSettlementHash } from './services/settlement-identity.ts';
@@ -29,6 +34,10 @@ export type {
 } from './services/stellar-submission-recovery.ts';
 export { interactiveSessionState } from './services/interactive-session-state.ts';
 export type { InteractiveSessionState } from './services/interactive-session-state.ts';
+export {
+  initiateRailPayment,
+  RailPaymentInitiationError,
+} from './services/rail-payment-initiation.ts';
 export type { StellarTransactionSigner } from './services/stellar-signer.ts';
 export * as utils from './utils';
 export {
