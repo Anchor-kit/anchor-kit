@@ -975,6 +975,7 @@ USDC_ISSUER=GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5
 - [Auth Token Response Contract](auth-token-response.md) – SEP-10 token response format and expiry semantics
 - [Webhook Event Contract](../README.md#webhook-event-contract) – Webhook request/response format
 - [Trusted Proxy Rate-Limit Guidance](trusted-proxy-rate-limits.md) – Security best practices for `trustForwardedFor`
+- [Production Configuration Review Checklist](production-checklist.md) – Deployment review checklist, operational hardening, and roadmap gates
 - [MVP Express Integration](mvp-express.md) – Quick-start guide and example app
 
 ---
