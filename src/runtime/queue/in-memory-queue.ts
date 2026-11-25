@@ -34,6 +34,10 @@ export class InMemoryQueueAdapter implements QueueAdapter {
     this.onError = options.onError;
   }
 
+  public get isRunning(): boolean {
+    return this.running;
+  }
+
   public get status(): QueueDrainStatus {
     return { pending: this.jobs.length, active: this.activeWorkers };
   }

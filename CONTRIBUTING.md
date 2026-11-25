@@ -139,6 +139,32 @@ A task is considered "Done" when:
 - [ ] Documentation is updated.
 - [ ] PR is approved by a maintainer.
 
+## Readiness check
+
+Run `bun test tests/readiness.integration.test.ts`. Both tests should pass, including
+checks for unavailable storage, stopped workers, and a stalled probe.
+
+`GET /health` is a lightweight liveness check. `GET /ready` returns 200 only after
+initialization and background workers have started and the database probe succeeds;
+it returns 503 otherwise. Start workers with `startBackgroundJobs()` before routing
+traffic. Custom database adapters must implement `checkReadiness()` for readiness
+to succeed. Probes have a one-second response limit and share an in-flight request;
+a probe that never settles keeps readiness unavailable until it settles or the
+process restarts. Responses do not include database errors or connection details.
+
 ## License
 
 By contributing, you agree that your contributions will be licensed under its MIT License.
+
+## Settlement lease check
+
+Run `DATABASE_URL=<postgres-url> bun test tests/runtime/database/settlement-leases.test.ts`
+against a disposable PostgreSQL database. Both the SQLite and PostgreSQL cases
+should pass. Without `DATABASE_URL`, the PostgreSQL case is skipped.
+
+Use `claimSettlementJob` before processing and pass its token to heartbeat and
+finish calls. The legacy `updateSettlementJobStatus` method rejects because it
+cannot verify ownership. Existing processing jobs without lease metadata need
+operator reconciliation before they can be retried. A lease cannot stop a
+worker that continues after expiry; external payment operations also need an
+idempotency or fencing mechanism.
