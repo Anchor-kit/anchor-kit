@@ -110,4 +110,45 @@ describe('initiateRailPayment', () => {
     ).rejects.toMatchObject({ code: 'transaction_conflict' });
     expect(initiate).not.toHaveBeenCalled();
   });
+
+  it('rejects a non-deposit database record before persisting or initiating', async () => {
+    const setInteractiveTransactionRailPayment = vi.fn();
+    const initiate = vi.fn();
+    const adapter: PaymentRailAdapter = {
+      provider: 'mock',
+      capabilities: {
+        initiation: true,
+        eventVerification: false,
+        statusLookup: false,
+        recovery: false,
+      },
+      initiate,
+      async verifyEvent() {
+        return { supported: false, reason: 'unsupported in test' };
+      },
+      async getStatus() {
+        return { supported: false, reason: 'unsupported in test' };
+      },
+      async recover() {
+        return { supported: false, reason: 'unsupported in test' };
+      },
+    };
+
+    await expect(
+      initiateRailPayment({
+        database: {
+          getInteractiveTransactionById: vi
+            .fn()
+            .mockResolvedValue({ ...transaction, kind: 'withdrawal' }),
+          setInteractiveTransactionRailPayment,
+        },
+        adapter,
+        transactionId: transaction.id,
+        amount: '2500',
+        currency: 'NGN',
+      }),
+    ).rejects.toMatchObject({ code: 'transaction_conflict' });
+    expect(setInteractiveTransactionRailPayment).not.toHaveBeenCalled();
+    expect(initiate).not.toHaveBeenCalled();
+  });
 });

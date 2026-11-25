@@ -1641,7 +1641,7 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
         .prepare(
           `UPDATE interactive_transactions
            SET rail_reference = ?, amount_in = ?, currency = ?, updated_at = ?
-           WHERE id = ? AND status = 'incomplete'
+           WHERE id = ? AND kind = 'deposit' AND status = 'incomplete'
              AND (rail_reference IS NULL OR (rail_reference = ? AND amount_in = ? AND currency = ?))`,
         )
         .run(
@@ -1659,7 +1659,7 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
     const result = await this.requirePostgres().query<{ id: string }>(
       `UPDATE interactive_transactions
        SET rail_reference = $1, amount_in = $2, currency = $3, updated_at = $4
-       WHERE id = $5 AND status = 'incomplete'
+       WHERE id = $5 AND kind = 'deposit' AND status = 'incomplete'
          AND (rail_reference IS NULL OR (rail_reference = $1 AND amount_in = $2 AND currency = $3))
        RETURNING id`,
       [input.railReference, input.amountIn, input.currency, updatedAt, input.transactionId],

@@ -47,6 +47,9 @@ export async function initiateRailPayment(input: {
 
   const transaction = await input.database.getInteractiveTransactionById(input.transactionId);
   if (!transaction) throw new RailPaymentInitiationError('missing_transaction');
+  if (transaction.kind !== 'deposit') {
+    throw new RailPaymentInitiationError('transaction_conflict');
+  }
   const operationId = `deposit:${input.adapter.provider}:${transaction.id}`;
   const reference = `${input.adapter.provider}:anchor-${transaction.id}`;
   const prepared = await input.database.setInteractiveTransactionRailPayment({

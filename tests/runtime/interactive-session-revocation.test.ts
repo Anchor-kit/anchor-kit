@@ -61,7 +61,11 @@ function bearerFor(account: string): string {
 function makeRequest(options: { method: string; path: string; headers?: Record<string, string> }): {
   req: IncomingMessage;
   res: ServerResponse;
-  getResult: () => { status: number; body: Record<string, unknown> };
+  getResult: () => {
+    status: number;
+    body: Record<string, unknown>;
+    headers: Record<string, string>;
+  };
 } {
   const payload = JSON.stringify({});
   const req = new EventEmitter() as IncomingMessage & {
@@ -79,9 +83,10 @@ function makeRequest(options: { method: string; path: string; headers?: Record<s
 
   let status = 200;
   let responseBody = '';
+  const responseHeaders: Record<string, string> = {};
   const res = {
-    setHeader(_name: string, _value: string) {
-      // Headers are irrelevant to these assertions; only status and body matter.
+    setHeader(name: string, value: string | number | readonly string[]) {
+      responseHeaders[name.toLowerCase()] = Array.isArray(value) ? value.join(', ') : String(value);
     },
     end(data?: string) {
       if (data) responseBody = data;
@@ -105,6 +110,7 @@ function makeRequest(options: { method: string; path: string; headers?: Record<s
     getResult: () => ({
       status,
       body: responseBody ? (JSON.parse(responseBody) as Record<string, unknown>) : {},
+      headers: responseHeaders,
     }),
   };
 }
@@ -134,13 +140,18 @@ describe('AK-062 interactive session validation, revocation and single-use compl
 
     const config = new AnchorConfig({
       network: { network: 'testnet' },
-      server: { homeDomain: 'anchor.test', interactiveDomain: 'https://anchor.test' },
+      server: {
+        homeDomain: 'anchor.test',
+        interactiveDomain: 'https://anchor.test',
+        corsOrigins: ['https://host.example'],
+      },
       security: {
         sep10SigningKey: serverKeypair.secret(),
         interactiveJwtSecret: JWT_SECRET,
         distributionAccountSecret: Keypair.random().secret(),
       },
       assets: { assets: [{ code: 'USDC', issuer: Keypair.random().publicKey() }] },
+      kycRequired: { USDC: ['first_name', 'email_address'] },
       framework: { database: { provider: 'sqlite', url: 'sqlite::memory:' } },
     });
 
@@ -238,6 +249,19 @@ describe('AK-062 interactive session validation, revocation and single-use compl
     const { req, res, getResult } = makeRequest({
       method: 'GET',
       path: `/transactions/${encodeURIComponent(input.transactionId)}`,
+      headers,
+    });
+    await handleExpressRouterRequest(context, req, res);
+    return getResult();
+  }
+
+  async function readSessionState(input: { transactionId: string; sessionId?: string }) {
+    const headers: Record<string, string> = {};
+    if (input.sessionId) headers[HEADER] = input.sessionId;
+
+    const { req, res, getResult } = makeRequest({
+      method: 'GET',
+      path: `/transactions/${encodeURIComponent(input.transactionId)}/state`,
       headers,
     });
     await handleExpressRouterRequest(context, req, res);
@@ -484,5 +508,86 @@ describe('AK-062 interactive session validation, revocation and single-use compl
     // A plain bearer read without a session header remains valid.
     const bearerOnly = await readTransaction({ transactionId, account: ownerAccount });
     expect(bearerOnly.status).toBe(200);
+  });
+
+  it('returns only bound session state and configured fields without caching', async () => {
+    const transactionId = await seedDeposit(ownerAccount);
+    const session = await issueSession({
+      account: ownerAccount,
+      transactionId,
+      expiresAt: futureExpiry(),
+    });
+
+    const response = await readSessionState({ transactionId, sessionId: session.id });
+
+    expect(response.status).toBe(200);
+    expect(response.headers['cache-control']).toBe('no-store');
+    expect(response.body).toEqual({
+      transaction_id: transactionId,
+      status: 'pending_user_transfer_start',
+      permitted_actions: ['view', 'complete'],
+      required_fields: ['first_name', 'email_address'],
+    });
+    expect(response.body).not.toHaveProperty('account');
+    expect(response.body).not.toHaveProperty('amount');
+  });
+
+  it('rejects missing, expired, revoked and transaction-mismatched state sessions', async () => {
+    const transactionId = await seedDeposit(ownerAccount);
+    const otherTransactionId = await seedDeposit(ownerAccount);
+    const expired = await issueSession({
+      account: ownerAccount,
+      transactionId,
+      expiresAt: pastExpiry(),
+    });
+    const revoked = await issueSession({
+      account: ownerAccount,
+      transactionId,
+      expiresAt: futureExpiry(),
+    });
+    await database.revokeInteractiveSession(revoked.id);
+
+    const missing = await readSessionState({ transactionId });
+    expect(missing.status).toBe(401);
+    expect(missing.body.error).toBe('interactive_session_required');
+    expect(missing.headers['cache-control']).toBe('no-store');
+
+    const expiredResult = await readSessionState({ transactionId, sessionId: expired.id });
+    expect(expiredResult.status).toBe(401);
+    expect(expiredResult.body.error).toBe('interactive_session_expired');
+    expect(expiredResult.headers['cache-control']).toBe('no-store');
+
+    const revokedResult = await readSessionState({ transactionId, sessionId: revoked.id });
+    expect(revokedResult.status).toBe(401);
+    expect(revokedResult.body.error).toBe('interactive_session_revoked');
+
+    const mismatched = await readSessionState({
+      transactionId: otherTransactionId,
+      sessionId: expired.id,
+    });
+    expect(mismatched.status).toBe(403);
+    expect(mismatched.body.message).toBe('Interactive session is bound to a different transaction');
+  });
+
+  it('allows the host page to request state with the interactive-session CORS header', async () => {
+    const transactionId = await seedDeposit(ownerAccount);
+    const { req, res, getResult } = makeRequest({
+      method: 'OPTIONS',
+      path: `/transactions/${encodeURIComponent(transactionId)}/state`,
+      headers: {
+        origin: 'https://host.example',
+        'access-control-request-method': 'GET',
+        'access-control-request-headers': 'x-interactive-session',
+      },
+    });
+
+    await handleExpressRouterRequest(context, req, res);
+
+    const response = getResult();
+    expect(response.status).toBe(204);
+    expect(response.headers['access-control-allow-headers']?.toLowerCase()).toContain(
+      'x-interactive-session',
+    );
+    expect(response.headers['access-control-allow-methods']).toContain('GET');
   });
 });
