@@ -1,5 +1,9 @@
 import { describe, expect, it, vi } from 'vitest';
-import { recoverStellarSubmission } from '@/services/stellar-submission-recovery.ts';
+import {
+  recoverPersistedStellarSubmission,
+  recoverStellarSubmission,
+} from '@/services/stellar-submission-recovery.ts';
+import type { InteractiveTransactionRecord } from '@/runtime/interfaces.ts';
 
 const hash = 'a'.repeat(64);
 
@@ -36,5 +40,46 @@ describe('recoverStellarSubmission', () => {
       'A persisted 64-character Stellar transaction hash is required',
     );
     expect(getTransaction).not.toHaveBeenCalled();
+  });
+
+  it('loads and reconciles the transaction hash saved in the database', async () => {
+    const transaction: InteractiveTransactionRecord = {
+      id: 'transaction-1',
+      account: 'GACCOUNT',
+      kind: 'deposit',
+      assetCode: 'USDC',
+      amount: '1',
+      status: 'pending_stellar',
+      stellarTransactionHash: hash,
+      createdAt: new Date(0).toISOString(),
+      updatedAt: new Date(0).toISOString(),
+    };
+    const getTransaction = vi.fn().mockResolvedValue({
+      status: 'found',
+      value: { hash, successful: true, ledger: 99 },
+    });
+    const getInteractiveTransactionById = vi.fn().mockResolvedValue(transaction);
+    await expect(
+      recoverPersistedStellarSubmission(
+        { getInteractiveTransactionById },
+        { getTransaction },
+        transaction.id,
+      ),
+    ).resolves.toEqual({ outcome: 'confirmed', hash, ledger: 99 });
+    expect(getInteractiveTransactionById).toHaveBeenCalledWith(transaction.id);
+    expect(getTransaction).toHaveBeenCalledWith(hash);
+
+    getInteractiveTransactionById.mockResolvedValue({
+      ...transaction,
+      stellarTransactionHash: null,
+    });
+    await expect(
+      recoverPersistedStellarSubmission(
+        { getInteractiveTransactionById },
+        { getTransaction },
+        transaction.id,
+      ),
+    ).resolves.toEqual({ outcome: 'not_ready', reason: 'hash_not_persisted' });
+    expect(getTransaction).toHaveBeenCalledTimes(1);
   });
 });

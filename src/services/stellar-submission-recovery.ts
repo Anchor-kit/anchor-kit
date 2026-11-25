@@ -1,4 +1,5 @@
 import type {
+  DatabaseAdapter,
   StellarNetworkClient,
   StellarNetworkResult,
   StellarTransactionState,
@@ -12,6 +13,24 @@ export type StellarSubmissionRecoveryResult =
       hash: string;
       reason: 'not_found' | 'network' | 'timeout' | 'invalid_response' | 'network_mismatch';
     };
+
+export type PersistedStellarSubmissionRecoveryResult =
+  | { outcome: 'not_ready'; reason: 'transaction_not_found' | 'hash_not_persisted' }
+  | StellarSubmissionRecoveryResult;
+
+/** Load the stored hash by transaction ID and reconcile it without creating a new envelope. */
+export async function recoverPersistedStellarSubmission(
+  database: Pick<DatabaseAdapter, 'getInteractiveTransactionById'>,
+  network: Pick<StellarNetworkClient, 'getTransaction'>,
+  transactionId: string,
+): Promise<PersistedStellarSubmissionRecoveryResult> {
+  const transaction = await database.getInteractiveTransactionById(transactionId);
+  if (!transaction) return { outcome: 'not_ready', reason: 'transaction_not_found' };
+  if (!transaction.stellarTransactionHash) {
+    return { outcome: 'not_ready', reason: 'hash_not_persisted' };
+  }
+  return recoverStellarSubmission(network, transaction.stellarTransactionHash);
+}
 
 /** Query a previously persisted hash once; never submit a replacement envelope on uncertainty. */
 export async function recoverStellarSubmission(
