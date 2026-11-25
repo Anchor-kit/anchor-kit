@@ -30,6 +30,7 @@ export type {
   DatabaseAdapter,
   IdempotencyRecord,
   InteractiveTransactionRecord,
+  InteractiveTransactionIdentifier,
   KycVerificationProvider,
   PaymentRailAdapter,
   QueueJob,
