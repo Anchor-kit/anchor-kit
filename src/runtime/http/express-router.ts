@@ -1,7 +1,11 @@
 import type { AnchorConfig } from '@/core/config.ts';
 import { errorHandler } from '../../utils/error-handler.ts';
 import { InMemoryRateLimiter, type RateLimitRule } from './rate-limiter.ts';
-import type { DatabaseAdapter, WebhookProcessor } from '@/runtime/interfaces.ts';
+import type {
+  DatabaseAdapter,
+  Sep10AccountLookup,
+  WebhookProcessor,
+} from '@/runtime/interfaces.ts';
 import type { RouteDefinition } from '@/types/foundation.ts';
 import type { AnchorPluginHooks } from '@/types/plugin.ts';
 import { Keypair } from '@stellar/stellar-sdk';
@@ -21,9 +25,11 @@ export type ExpressLikeMiddleware = (
 interface RouterDependencies {
   config: AnchorConfig;
   database: DatabaseAdapter;
+  isReady?: () => boolean;
   webhookProcessor: WebhookProcessor;
   depositRequestHooks?: NonNullable<AnchorPluginHooks['onDepositRequest']>[];
   sep10ChallengeHooks?: NonNullable<AnchorPluginHooks['onSep10Challenge']>[];
+  sep10AccountLookup?: Sep10AccountLookup;
   pluginRoutes?: Array<{ pluginId: string; route: RouteDefinition }>;
 }
 
@@ -54,9 +60,11 @@ export class AnchorExpressRouter {
     this.context = {
       config,
       database: dependencies.database,
+      isReady: dependencies.isReady ?? (() => false),
       webhookProcessor: dependencies.webhookProcessor,
       depositRequestHooks: dependencies.depositRequestHooks ?? [],
       sep10ChallengeHooks: dependencies.sep10ChallengeHooks ?? [],
+      sep10AccountLookup: dependencies.sep10AccountLookup,
       sep10ServerKeypair,
       networkPassphrase,
       maxBodyBytes,

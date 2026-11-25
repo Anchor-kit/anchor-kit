@@ -33,7 +33,11 @@ export type {
   QueueJob,
   QueueDrainStatus,
   QueueAdapter,
+  Sep10AccountLookup,
+  Sep10AccountSigners,
   SettlementJobRecord,
+  SettlementJobLease,
+  SettlementLeaseAdapter,
   Watcher,
   WebhookEventRecord,
   WebhookProcessor,
@@ -52,3 +56,6 @@ export type {
   InteractiveResponse,
   TransactionResponse,
 } from './client/anchor-client.ts';
+
+export { createInteractiveInitiationResponse } from './core/sep24/interactive-response.ts';
+export type { InteractiveInitiationResponse } from './core/sep24/interactive-response.ts';
