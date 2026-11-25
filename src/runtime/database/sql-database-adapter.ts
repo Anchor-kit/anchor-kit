@@ -1629,6 +1629,44 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
     return this.mapTransactionRow(row);
   }
 
+  public async setInteractiveTransactionRailPayment(input: {
+    transactionId: string;
+    railReference: string;
+    amountIn: string;
+    currency: string;
+  }): Promise<boolean> {
+    const updatedAt = nowIso();
+    if (this.sqlite) {
+      const result = this.sqlite
+        .prepare(
+          `UPDATE interactive_transactions
+           SET rail_reference = ?, amount_in = ?, currency = ?, updated_at = ?
+           WHERE id = ? AND status = 'incomplete'
+             AND (rail_reference IS NULL OR (rail_reference = ? AND amount_in = ? AND currency = ?))`,
+        )
+        .run(
+          input.railReference,
+          input.amountIn,
+          input.currency,
+          updatedAt,
+          input.transactionId,
+          input.railReference,
+          input.amountIn,
+          input.currency,
+        );
+      return result.changes === 1;
+    }
+    const result = await this.requirePostgres().query<{ id: string }>(
+      `UPDATE interactive_transactions
+       SET rail_reference = $1, amount_in = $2, currency = $3, updated_at = $4
+       WHERE id = $5 AND status = 'incomplete'
+         AND (rail_reference IS NULL OR (rail_reference = $1 AND amount_in = $2 AND currency = $3))
+       RETURNING id`,
+      [input.railReference, input.amountIn, input.currency, updatedAt, input.transactionId],
+    );
+    return result.rows.length === 1;
+  }
+
   public async findInteractiveTransaction(input: {
     account: string;
     identifier: InteractiveTransactionIdentifier;

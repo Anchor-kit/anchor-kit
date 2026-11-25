@@ -362,6 +362,13 @@ export interface DatabaseAdapter extends SettlementLeaseAdapter, StellarSequence
     status: TransactionStatus;
   }): Promise<InteractiveTransactionRecord>;
   getInteractiveTransactionById(id: string): Promise<InteractiveTransactionRecord | null>;
+  /** Persist a stable rail reference and expected fiat values before provider initiation. */
+  setInteractiveTransactionRailPayment?(input: {
+    transactionId: string;
+    railReference: string;
+    amountIn: string;
+    currency: string;
+  }): Promise<boolean>;
   findInteractiveTransaction(input: {
     account: string;
     identifier: InteractiveTransactionIdentifier;
