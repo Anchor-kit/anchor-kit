@@ -1,5 +1,5 @@
 import { makeSqliteDbUrlForTests } from '@/core/factory.ts';
-import { createAnchor, type AnchorInstance } from '@/index.ts';
+import { createAnchor, utils, type AnchorInstance } from '@/index.ts';
 import type { DatabaseAdapter } from '@/runtime/interfaces.ts';
 import type { AnchorPlugin } from '@/types/plugin.ts';
 import { ACCESS_TOKEN_AUDIENCE, ACCESS_TOKEN_ISSUER } from '@/runtime/http/express-router-impl.ts';
@@ -696,6 +696,11 @@ describe('MVP Express-mounted integration', () => {
       );
       expect(challengeTx.operations).toHaveLength(2);
       expect(challengeTx.operations[0]?.type).toBe('manageData');
+      expect(challengeTx.operations[0]).toMatchObject({
+        type: 'manageData',
+        name: 'anchor.example.com auth',
+        source: clientKeypair.publicKey(),
+      });
       expect(challengeTx.operations[1]).toMatchObject({
         type: 'manageData',
         name: 'client_domain',
@@ -1678,7 +1683,7 @@ describe('MVP Express-mounted integration', () => {
     });
 
     expect(response.status).toBe(201);
-    expect(response.body.status).toBe('pending_user_transfer_start');
+    expect(response.body.status).toBe('incomplete');
   });
 
   it('5h) deposit with numeric amount within limits is accepted', async () => {
@@ -1695,7 +1700,7 @@ describe('MVP Express-mounted integration', () => {
 
     expect(response.status).toBe(201);
     expect(response.body.id).toBeTruthy();
-    expect(response.body.status).toBe('pending_user_transfer_start');
+    expect(response.body.status).toBe('incomplete');
     expect(response.body.amount).toBe('50');
     expect(response.body.updated_at).toBe(response.body.created_at);
   });
@@ -1716,12 +1721,183 @@ describe('MVP Express-mounted integration', () => {
     transactionId = String(response.body.id ?? '');
     depositInteractiveUrl = String(response.body.interactive_url ?? '');
     expect(transactionId.length).toBeGreaterThan(0);
-    expect(response.body.status).toBe('pending_user_transfer_start');
+    expect(response.body.status).toBe('incomplete');
     expect(response.body.asset_issuer).toBe(
       'GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5',
     );
     expect(response.body.account).toBe(clientKeypair.publicKey());
     expect(response.body).not.toHaveProperty('idempotency_replay');
+    expect(response.body).not.toHaveProperty('type');
+    expect(response.body).not.toHaveProperty('url');
+  });
+
+  it('6b) standard SEP-24 form initiation returns a scoped URL and stable ID', async () => {
+    const request = {
+      method: 'POST',
+      path: '/transactions/deposit/interactive',
+      headers: {
+        'content-type': 'application/x-www-form-urlencoded',
+        authorization: `Bearer ${accessToken}`,
+        'idempotency-key': 'sep24-standard-initiation',
+        'x-forwarded-for': '10.0.0.99',
+      },
+      rawBody: new URLSearchParams({ asset_code: 'USDC', amount: '25.5' }).toString(),
+    };
+    const response = await invoke(request);
+
+    expect(response.status).toBe(200);
+    expect(Object.keys(response.body).sort()).toEqual(['id', 'type', 'url']);
+    expect(response.body.type).toBe('interactive_customer_info_needed');
+    const id = String(response.body.id);
+    const url = new URL(String(response.body.url));
+    expect(url.origin).toBe('https://anchor.example.com');
+    expect(url.pathname).toBe(`/deposit/${encodeURIComponent(id)}`);
+    expect(response.headers['cache-control']).toBe('no-store');
+
+    const session = url.searchParams.get('token');
+    expect(session).toBeTruthy();
+    await expect(
+      utils.verifyInteractiveSession(session ?? '', 'jwt-test-secret', id, 'deposit'),
+    ).resolves.toEqual({
+      account: clientKeypair.publicKey(),
+      transactionId: id,
+      actions: ['deposit'],
+    });
+    await expect(
+      utils.verifyInteractiveSession(session ?? '', 'jwt-test-secret', 'other-id', 'deposit'),
+    ).rejects.toThrow('Interactive session is not authorized for this action');
+
+    const replay = await invoke(request);
+    expect(replay.status).toBe(200);
+    expect(replay.body.id).toBe(id);
+    expect(replay.body.type).toBe('interactive_customer_info_needed');
+    expect(replay.body).toHaveProperty('url');
+  });
+
+  it('accepts equivalent urlencoded and multipart deposit fields with the same idempotency key', async () => {
+    const headers = {
+      'x-forwarded-for': '10.0.2.1',
+      authorization: `Bearer ${accessToken}`,
+      'idempotency-key': 'deposit-form-equivalent',
+    };
+    const form = await invoke({
+      method: 'POST',
+      path: '/transactions/deposit/interactive',
+      headers: { ...headers, 'content-type': 'application/x-www-form-urlencoded' },
+      rawBody: 'asset_code=USDC&amount=25.500',
+    });
+    expect(form.status).toBe(200);
+    expect(form.body.type).toBe('interactive_customer_info_needed');
+    const multipart =
+      '--example-boundary\r\nContent-Disposition: form-data; name="asset_code"\r\n\r\nUSDC\r\n--example-boundary\r\nContent-Disposition: form-data; name="amount"\r\n\r\n25.500\r\n--example-boundary--\r\n';
+    const replay = await invoke({
+      method: 'POST',
+      path: '/transactions/deposit/interactive',
+      headers: { ...headers, 'content-type': 'multipart/form-data; boundary=example-boundary' },
+      rawBody: multipart,
+    });
+    expect(replay.status).toBe(200);
+    expect(replay.body.id).toBe(form.body.id);
+    expect(replay.body.type).toBe('interactive_customer_info_needed');
+  });
+
+  it('rejects duplicate or malformed form fields before storing a deposit', async () => {
+    const db = (anchor as unknown as { database: DatabaseAdapter }).database;
+    const insert = vi.spyOn(db, 'insertInteractiveTransaction');
+    const create = vi.spyOn(db, 'createDepositWithIdempotency');
+    try {
+      const cases = [
+        { type: 'application/x-www-form-urlencoded', body: 'asset_code=USDC&amount=1&amount=2' },
+        { type: 'application/x-www-form-urlencoded', body: 'asset_code=USDC&amount=%GG' },
+        {
+          type: 'application/json',
+          body: ' {"asset_code":"USDC","amount":"1","amou\\u006et":"2"}',
+        },
+        {
+          type: 'multipart/form-data; boundary=x',
+          body: '--x\r\nContent-Disposition: form-data; name="amount"\r\n\r\n1\r\n--x\r\nContent-Disposition: form-data; name="amount"\r\n\r\n2\r\n--x--\r\n',
+        },
+        {
+          type: 'multipart/form-data; boundary=x',
+          body: '--x\r\nContent-Disposition: form-data; name="asset_code"; filename="secret.txt"\r\nContent-Type: text/plain\r\n\r\nUSDC\r\n--x--\r\n',
+        },
+      ];
+      for (const input of cases) {
+        const response = await invoke({
+          method: 'POST',
+          path: '/transactions/deposit/interactive',
+          headers: {
+            authorization: `Bearer ${accessToken}`,
+            'x-forwarded-for': '10.0.2.2',
+            'content-type': input.type,
+          },
+          rawBody: input.body,
+        });
+        expect(response.status).toBe(400);
+      }
+      expect(insert).not.toHaveBeenCalled();
+      expect(create).not.toHaveBeenCalled();
+    } finally {
+      insert.mockRestore();
+      create.mockRestore();
+    }
+  });
+
+  it('rejects oversized form data before storing a deposit', async () => {
+    const db = (anchor as unknown as { database: DatabaseAdapter }).database;
+    const insert = vi.spyOn(db, 'insertInteractiveTransaction');
+    try {
+      const response = await invoke({
+        method: 'POST',
+        path: '/transactions/deposit/interactive',
+        headers: {
+          authorization: `Bearer ${accessToken}`,
+          'x-forwarded-for': '10.0.2.3',
+          'content-type': 'application/x-www-form-urlencoded',
+        },
+        rawBody: `asset_code=USDC&amount=${'1'.repeat(1_048_577)}`,
+      });
+      expect(response.status).toBe(413);
+      expect(insert).not.toHaveBeenCalled();
+    } finally {
+      insert.mockRestore();
+    }
+  });
+
+  it('rejects a framework-parsed form when the raw bytes are unavailable', async () => {
+    const requestStream = Object.assign(Readable.from([]), {
+      body: { asset_code: 'USDC', amount: '5' },
+    });
+    const response = await invoke({
+      method: 'POST',
+      path: '/transactions/deposit/interactive',
+      headers: {
+        authorization: `Bearer ${accessToken}`,
+        'x-forwarded-for': '10.0.2.4',
+        'content-type': 'application/x-www-form-urlencoded',
+      },
+      requestStream,
+    });
+    expect(response.status).toBe(400);
+    expect(response.body.message).toBe('Raw form body is required');
+  });
+
+  it('rejects a framework-parsed JSON body when the raw bytes are unavailable', async () => {
+    const requestStream = Object.assign(Readable.from([]), {
+      body: { asset_code: 'USDC', amount: '5' },
+    });
+    const response = await invoke({
+      method: 'POST',
+      path: '/transactions/deposit/interactive',
+      headers: {
+        authorization: `Bearer ${accessToken}`,
+        'x-forwarded-for': '10.0.2.5',
+        'content-type': 'application/json',
+      },
+      requestStream,
+    });
+    expect(response.status).toBe(400);
+    expect(response.body.message).toBe('Raw JSON body is required');
   });
 
   it('6a) decimal deposit amounts preserve their exact string formatting through create, persist, and lookup', async () => {
@@ -1798,7 +1974,7 @@ describe('MVP Express-mounted integration', () => {
     expect(response.status).toBe(201);
     expect(response.body.id).toBe(transactionId);
     expect(response.body.interactive_url).toBe(depositInteractiveUrl);
-    expect(response.body.status).toBe('pending_user_transfer_start');
+    expect(response.body.status).toBe('incomplete');
     expect(response.body.account).toBe(clientKeypair.publicKey());
     expect(response.body.idempotency_replay).toBe(true);
   });
@@ -1920,7 +2096,7 @@ describe('MVP Express-mounted integration', () => {
 
     expect(response.status).toBe(201);
     expect(response.body.id).toBeTruthy();
-    expect(response.body.status).toBe('pending_user_transfer_start');
+    expect(response.body.status).toBe('incomplete');
   });
 
   it('7) transaction lookup fetches persisted data', async () => {
@@ -3538,7 +3714,10 @@ describe('MVP Express-mounted integration', () => {
       expect(response.status).toBe(400);
       expect(response.body).toEqual({
         error: 'invalid_request',
-        message: 'Content-Type must be application/json',
+        message:
+          request.path === '/transactions/deposit/interactive'
+            ? 'Unsupported deposit Content-Type'
+            : 'Content-Type must be application/json',
       });
     }
   });

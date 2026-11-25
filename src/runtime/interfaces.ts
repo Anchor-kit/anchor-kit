@@ -45,6 +45,35 @@ export interface AccountSigner {
   weight: number;
 }
 
+/**
+ * Signer summary for a SEP-10 client account.
+ *
+ * `signers` must be the complete authorization set reported by the network,
+ * including the master key entry (whose public key equals the account ID) when
+ * the master key has non-zero weight. Duplicate keys are rejected.
+ */
+export interface Sep10AccountSigners {
+  signers: readonly AccountSigner[];
+  /** Account thresholds; SEP-10 authentication requires the medium threshold. */
+  thresholds: {
+    low: number;
+    medium: number;
+    high: number;
+  };
+}
+
+/**
+ * Injectable SEP-10 client account lookup.
+ *
+ * Return `null` only when the account genuinely does not exist on the network;
+ * that selects the protocol's nonexistent-account signature branch. Throw for
+ * transport or upstream failures so an outage is never treated as an absent
+ * account.
+ */
+export interface Sep10AccountLookup {
+  load(accountId: string): Promise<Sep10AccountSigners | null>;
+}
+
 export interface AuthChallengeRecord {
   id: string;
   account: string;
@@ -150,10 +179,41 @@ export interface SettlementJobRecord {
   updatedAt: string;
 }
 
-export interface DatabaseAdapter {
+/** Ownership for one settlement-job attempt. Tokens must not be reused. */
+export interface SettlementJobLease {
+  job: SettlementJobRecord;
+  owner: string;
+  token: string;
+  expiresAt: string;
+  attempt: number;
+}
+
+export interface SettlementLeaseAdapter {
+  /** Lists pending jobs and expired leases; claim remains the ownership gate. */
+  listClaimableSettlementJobs(limit: number): Promise<SettlementJobRecord[]>;
+  claimSettlementJob(input: {
+    operationId: string;
+    owner: string;
+    durationMs: number;
+  }): Promise<SettlementJobLease | null>;
+  heartbeatSettlementJob(input: {
+    operationId: string;
+    token: string;
+    durationMs: number;
+  }): Promise<boolean>;
+  finishSettlementJob(input: {
+    operationId: string;
+    token: string;
+    status: 'pending' | 'completed' | 'failed';
+  }): Promise<boolean>;
+}
+
+export interface DatabaseAdapter extends SettlementLeaseAdapter {
   connect(): Promise<void>;
   disconnect(): Promise<void>;
   migrate(): Promise<void>;
+  /** Check storage connectivity without exposing connection details. */
+  checkReadiness?(): Promise<void>;
 
   insertAuthChallenge(input: {
     id: string;
@@ -285,6 +345,7 @@ export interface DatabaseAdapter {
   }): Promise<{ record: SettlementJobRecord; inserted: boolean }>;
   getSettlementJobByOperationId(operationId: string): Promise<SettlementJobRecord | null>;
   listPendingSettlementJobs(limit: number): Promise<SettlementJobRecord[]>;
+  /** @deprecated Status changes require a lease; this method rejects without one. */
   updateSettlementJobStatus(input: {
     operationId: string;
     status: SettlementJobRecord['status'];
@@ -308,6 +369,7 @@ export interface QueueDrainStatus {
 }
 
 export interface QueueAdapter {
+  readonly isRunning?: boolean;
   readonly status?: QueueDrainStatus;
   enqueue(job: QueueJob): Promise<void>;
   start(worker: (job: QueueJob) => Promise<void>): Promise<void>;
@@ -315,6 +377,7 @@ export interface QueueAdapter {
 }
 
 export interface Watcher {
+  readonly isRunning?: boolean;
   readonly name: string;
   start(): Promise<void>;
   stop(): Promise<void>;

@@ -65,6 +65,34 @@ describe('PostgreSQL schema isolation', () => {
           stellarTransactionHash: 'stellar-hash-pg',
         });
         expect(await second.getInteractiveTransactionById(transactionId)).toBeNull();
+
+        const reservedId = randomUUID();
+        await first.reserveIdempotencyRecord({
+          id: randomUUID(),
+          scope: 'schema-test',
+          idempotencyKey: reservedId,
+          requestHash: 'hash',
+        });
+        await first.createDepositWithIdempotency({
+          transaction: {
+            id: reservedId,
+            account: 'GTEST',
+            kind: 'deposit',
+            assetCode: 'USDC',
+            amount: '2',
+            status: 'pending_user_transfer_start',
+            createdAt: new Date().toISOString(),
+          },
+          idempotency: {
+            scope: 'schema-test',
+            idempotencyKey: reservedId,
+            requestHash: 'hash',
+            statusCode: 201,
+            responseBody: '{}',
+          },
+        });
+        expect(await first.getInteractiveTransactionById(reservedId)).not.toBeNull();
+        expect(await second.getInteractiveTransactionById(reservedId)).toBeNull();
       } finally {
         await first.disconnect();
         await second.disconnect();
