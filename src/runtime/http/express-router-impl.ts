@@ -21,6 +21,7 @@ import Big from 'big.js';
 import {
   Account,
   Keypair,
+  Memo,
   Operation,
   StrKey,
   Transaction,
@@ -72,6 +73,13 @@ export interface ExpressRouterContext {
 
 interface AuthenticatedRequestData {
   account: string;
+}
+
+interface Sep10AccountIdentity {
+  address: string;
+  signer: string;
+  subject: string;
+  memo?: string;
 }
 
 type RawBodyValue = string | Buffer | Uint8Array;
@@ -944,6 +952,36 @@ function extractNonceFromChallenge(transaction: Transaction, homeDomain: string)
   return null;
 }
 
+function sep10Identity(address: string, memo?: string): Sep10AccountIdentity | null {
+  if (StrKey.isValidMed25519PublicKey(address)) {
+    if (memo !== undefined) return null;
+    const muxed = StrKey.decodeMed25519PublicKey(address);
+    return {
+      address,
+      signer: StrKey.encodeEd25519PublicKey(muxed.subarray(0, 32)),
+      subject: address,
+    };
+  }
+  if (!StrKey.isValidEd25519PublicKey(address)) return null;
+  if (memo === undefined) return { address, signer: address, subject: address };
+  if (!/^(0|[1-9][0-9]*)$/.test(memo)) return null;
+  try {
+    if (BigInt(memo) > 0xffff_ffff_ffff_ffffn) return null;
+  } catch {
+    return null;
+  }
+  return { address, signer: address, subject: `${address}:${memo}`, memo };
+}
+
+function sep10Subject(subject: string): Sep10AccountIdentity | null {
+  const separator = subject.indexOf(':');
+  const address = separator === -1 ? subject : subject.slice(0, separator);
+  const memo = separator === -1 ? undefined : subject.slice(separator + 1);
+  if (memo === '') return null;
+  const identity = sep10Identity(address, memo);
+  return identity?.subject === subject ? identity : null;
+}
+
 function authenticate(
   context: ExpressRouterContext,
   req: IncomingMessage,
@@ -962,7 +1000,7 @@ function authenticate(
     const audience = typeof decoded.aud === 'string' ? decoded.aud : null;
     if (
       !account ||
-      !StrKey.isValidEd25519PublicKey(account) ||
+      !sep10Subject(account) ||
       scope !== 'anchor_api' ||
       typ !== 'access_token' ||
       issuer !== ACCESS_TOKEN_ISSUER ||
@@ -1231,8 +1269,9 @@ async function handleAuthChallenge(
     return;
   }
 
-  // Accept canonical Stellar public keys and treat surrounding whitespace as non-semantic.
+  // Accept canonical Stellar account addresses and treat surrounding whitespace as non-semantic.
   const accountParams = parseUrl(req).searchParams.getAll('account');
+  const memoParams = parseUrl(req).searchParams.getAll('memo');
   if (accountParams.length === 0) {
     sendJson(res, 400, {
       error: 'invalid_request',
@@ -1258,10 +1297,20 @@ async function handleAuthChallenge(
     return;
   }
 
-  if (!StrKey.isValidEd25519PublicKey(account)) {
+  if (memoParams.length > 1) {
     sendJson(res, 400, {
       error: 'invalid_request',
-      message: 'account must be a valid Stellar public key',
+      message: 'Query param memo must be provided at most once',
+    });
+    return;
+  }
+  const memo = memoParams.length === 1 ? memoParams[0] : undefined;
+  const identity = sep10Identity(account, memo);
+  if (!identity) {
+    sendJson(res, 400, {
+      error: 'invalid_request',
+      message:
+        'account must be a valid Stellar public or muxed account; memo must be a uint64 ID for classic accounts',
     });
     return;
   }
@@ -1282,10 +1331,11 @@ async function handleAuthChallenge(
       Operation.manageData({
         name: `${context.config.get('server').homeDomain}${SEP10_AUTH_OPERATION_SUFFIX}`,
         value: nonce,
-        source: account,
+        source: identity.address,
       }),
     )
     .setTimebounds(now, expiresAtUnix);
+  if (identity.memo !== undefined) challengeBuilder.addMemo(Memo.id(identity.memo));
 
   const securityConfig = context.config.get('security');
   if (securityConfig.enableClientAttribution) {
@@ -1330,7 +1380,7 @@ async function handleAuthChallenge(
   throwIfRequestAborted(req);
   await context.database.insertAuthChallenge({
     id: randomUUID(),
-    account,
+    account: identity.subject,
     challenge: nonce,
     expiresAt,
   });
@@ -1393,10 +1443,10 @@ async function handleAuthToken(
     return;
   }
 
-  if (!standardRequest && !StrKey.isValidEd25519PublicKey(account)) {
+  if (!standardRequest && !sep10Identity(account)) {
     sendJson(res, 400, {
       error: 'invalid_request',
-      message: 'account must be a valid Stellar public key',
+      message: 'account must be a valid Stellar public or muxed account',
     });
     return;
   }
@@ -1412,17 +1462,33 @@ async function handleAuthToken(
     return;
   }
 
-  if (standardRequest) {
-    account =
-      extractAccountFromChallenge(transaction, context.config.get('server').homeDomain) ?? '';
-    if (!StrKey.isValidEd25519PublicKey(account)) {
-      sendJson(res, 401, {
-        error: 'invalid_challenge',
-        message: 'Challenge account is invalid',
-      });
-      return;
-    }
+  const challengeAccount =
+    extractAccountFromChallenge(transaction, context.config.get('server').homeDomain) ?? '';
+  const challengeMemo =
+    transaction.memo.type === 'id' && typeof transaction.memo.value === 'string'
+      ? transaction.memo.value
+      : undefined;
+  const identity = sep10Identity(challengeAccount, challengeMemo);
+  if (!identity || (transaction.memo.type !== 'none' && transaction.memo.type !== 'id')) {
+    sendJson(res, 401, {
+      error: 'invalid_challenge',
+      message: 'Challenge account or memo is invalid',
+    });
+    return;
   }
+  const requestIdentity = standardRequest ? identity : sep10Identity(account);
+  if (!requestIdentity) {
+    sendJson(res, 400, {
+      error: 'invalid_request',
+      message: 'account must be a valid Stellar public or muxed account',
+    });
+    return;
+  }
+  if (!standardRequest && requestIdentity.address !== identity.address) {
+    sendJson(res, 401, { error: 'invalid_challenge', message: 'Challenge not found' });
+    return;
+  }
+  account = identity.subject;
 
   if (transaction.source !== context.sep10ServerKeypair.publicKey()) {
     sendJson(res, 401, {
@@ -1451,7 +1517,7 @@ async function handleAuthToken(
 
   const securityConfig = context.config.get('security');
   const accountAuthorization = await authorizeSep10AccountSignatures(transaction, {
-    account,
+    account: identity.signer,
     serverPublicKey: context.sep10ServerKeypair.publicKey(),
     lookup: context.sep10AccountLookup,
     additionalSigners:
@@ -1492,7 +1558,7 @@ async function handleAuthToken(
   }
 
   const stored = await context.database.getAuthChallengeByChallenge(nonce);
-  if (!stored || stored.account !== account) {
+  if (!stored || stored.account !== identity.subject) {
     sendJson(res, 401, { error: 'invalid_challenge', message: 'Challenge not found' });
     return;
   }
