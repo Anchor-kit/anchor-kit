@@ -35,13 +35,13 @@ semantics; do not infer queue replay from it.
 
 ## Signals available to the host today
 
-| Signal | What it tells you | Limits |
-| ------ | ----------------- | ------ |
-| `anchor.getQueueStatus()` | `pending` (waiting jobs, including retry backoff) and `active` counts without payloads | Snapshot only; not persisted and contains no per-job age or throughput |
-| `anchor.getFailedQueueJobs()` | The in-memory terminal failures available for operator review; the newest 1000 are retained | Lost on process exit; older records are dropped when the retention limit is exceeded |
-| `framework.queue.onError` / `onFailedJob` | Host callback when a job permanently fails or exhausts retries | Callbacks are invoked only for terminal failures, not each attempt; the host must export/retain the signal |
-| `GET /health` | Lightweight liveness response | Does not indicate database or worker readiness |
-| `GET /ready` | Readiness response checks initialized state, background queue/watchers and database readiness | Does not report queue depth or guarantee job recovery |
+| Signal                                    | What it tells you                                                                             | Limits                                                                                                     |
+| ----------------------------------------- | --------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------- |
+| `anchor.getQueueStatus()`                 | `pending` (waiting jobs, including retry backoff) and `active` counts without payloads        | Snapshot only; not persisted and contains no per-job age or throughput                                     |
+| `anchor.getFailedQueueJobs()`             | The in-memory terminal failures available for operator review; the newest 1000 are retained   | Lost on process exit; older records are dropped when the retention limit is exceeded                       |
+| `framework.queue.onError` / `onFailedJob` | Host callback when a job permanently fails or exhausts retries                                | Callbacks are invoked only for terminal failures, not each attempt; the host must export/retain the signal |
+| `GET /health`                             | Lightweight liveness response                                                                 | Does not indicate database or worker readiness                                                             |
+| `GET /ready`                              | Readiness response checks initialized state, background queue/watchers and database readiness | Does not report queue depth or guarantee job recovery                                                      |
 
 The queue logs terminal errors to the console when neither failure callback is configured; callback
 errors are also logged. The SDK does not currently export queue metrics, tracing, or Sentry/OTLP
