@@ -1,6 +1,7 @@
 import { ConfigError, MalformedPersistedDataError } from '../../core/errors.ts';
 import type {
   AuthChallengeRecord,
+  ConfirmSettlementResult,
   DatabaseAdapter,
   IdempotencyRecord,
   InteractiveTransactionRecord,
@@ -13,6 +14,7 @@ import type {
 } from '@/runtime/interfaces.ts';
 import type { Customer } from '@/types/customer.ts';
 import { getAllowedNextTransactionStatuses } from '@/types/transaction-status.ts';
+import Big from 'big.js';
 import type { FrameworkConfig } from '@/types/config.ts';
 import type { SchemaMigration, SchemaMigrationContext } from '@/types/foundation.ts';
 import { isTransactionStatus, type TransactionStatus } from '@/types/transaction-status.ts';
@@ -1370,6 +1372,185 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
       reason: transaction ? 'status_mismatch' : 'not_found',
       transaction,
     };
+  }
+
+  public async confirmSettlement(input: {
+    transactionId: string;
+    transactionHash: string;
+    amount: string;
+    recipient: string;
+  }): Promise<ConfirmSettlementResult> {
+    if (!input.transactionId.trim() || !input.recipient.trim()) {
+      throw new ConfigError(
+        'Settlement confirmation transaction ID and recipient must not be empty',
+      );
+    }
+    if (!/^[0-9a-f]{64}$/i.test(input.transactionHash)) {
+      throw new ConfigError(
+        'Settlement confirmation requires a 64-character Stellar transaction hash',
+      );
+    }
+
+    const transactionHash = input.transactionHash.toLowerCase();
+    const matchesConfirmation = (transaction: InteractiveTransactionRecord): boolean => {
+      let amountMatches: boolean;
+      try {
+        amountMatches =
+          new Big(input.amount).gt(0) &&
+          new Big(input.amount).eq(transaction.amountOut ?? transaction.amount);
+      } catch {
+        amountMatches = false;
+      }
+      return amountMatches && transaction.account === input.recipient;
+    };
+
+    if (this.sqlite) {
+      const database = this.sqlite;
+      const confirm = database.transaction((): ConfirmSettlementResult => {
+        const row = database
+          .prepare('SELECT * FROM interactive_transactions WHERE id = ? LIMIT 1')
+          .get(input.transactionId) as Record<string, unknown> | null;
+        if (!row) return { outcome: 'conflict', reason: 'not_found', transaction: null };
+
+        const transaction = this.mapTransactionRow(row);
+        if (!matchesConfirmation(transaction)) {
+          return { outcome: 'conflict', reason: 'confirmation_mismatch', transaction };
+        }
+        if (
+          transaction.stellarTransactionHash &&
+          transaction.stellarTransactionHash.toLowerCase() !== transactionHash
+        ) {
+          return { outcome: 'conflict', reason: 'hash_mismatch', transaction };
+        }
+        if (transaction.status === 'completed') {
+          if (!transaction.stellarTransactionHash) {
+            return { outcome: 'conflict', reason: 'hash_mismatch', transaction };
+          }
+          return { outcome: 'replayed', transaction };
+        }
+        if (transaction.status !== 'pending_stellar') {
+          return { outcome: 'conflict', reason: 'status_mismatch', transaction };
+        }
+
+        const update = database
+          .prepare(
+            "UPDATE interactive_transactions SET status = 'completed', stellar_transaction_hash = ?, updated_at = ? WHERE id = ? AND status = 'pending_stellar' AND (stellar_transaction_hash IS NULL OR LOWER(stellar_transaction_hash) = ?)",
+          )
+          .run(transactionHash, nowIso(), input.transactionId, transactionHash);
+        if (update.changes !== 1) {
+          const currentRow = database
+            .prepare('SELECT * FROM interactive_transactions WHERE id = ? LIMIT 1')
+            .get(input.transactionId) as Record<string, unknown> | null;
+          const current = currentRow ? this.mapTransactionRow(currentRow) : null;
+          return {
+            outcome: 'conflict',
+            reason: current ? 'status_mismatch' : 'not_found',
+            transaction: current,
+          };
+        }
+
+        const completedRow = database
+          .prepare('SELECT * FROM interactive_transactions WHERE id = ? LIMIT 1')
+          .get(input.transactionId) as Record<string, unknown> | null;
+        if (!completedRow) throw new ConfigError('Confirmed transaction disappeared after update');
+        return { outcome: 'completed', transaction: this.mapTransactionRow(completedRow) };
+      });
+      return confirm.immediate();
+    }
+
+    const Client = this.postgresClientConstructor;
+    if (!Client) throw new ConfigError('PostgreSQL client is not connected');
+
+    const postgres = new Client({ connectionString: this.url });
+    return (async (): Promise<ConfirmSettlementResult> => {
+      let transactionStarted = false;
+      let operationError: unknown;
+      try {
+        await postgres.connect();
+        await postgres.query(`SET search_path TO "${this.schema ?? 'public'}"`);
+        await postgres.query('BEGIN');
+        transactionStarted = true;
+
+        const response = await postgres.query<Record<string, unknown>>(
+          'SELECT * FROM interactive_transactions WHERE id = $1 LIMIT 1 FOR UPDATE',
+          [input.transactionId],
+        );
+        const row = response.rows[0];
+        if (!row) {
+          await postgres.query('COMMIT');
+          transactionStarted = false;
+          return { outcome: 'conflict', reason: 'not_found', transaction: null };
+        }
+
+        const transaction = this.mapTransactionRow(row);
+        if (!matchesConfirmation(transaction)) {
+          await postgres.query('COMMIT');
+          transactionStarted = false;
+          return { outcome: 'conflict', reason: 'confirmation_mismatch', transaction };
+        }
+        if (
+          transaction.stellarTransactionHash &&
+          transaction.stellarTransactionHash.toLowerCase() !== transactionHash
+        ) {
+          await postgres.query('COMMIT');
+          transactionStarted = false;
+          return { outcome: 'conflict', reason: 'hash_mismatch', transaction };
+        }
+        if (transaction.status === 'completed') {
+          await postgres.query('COMMIT');
+          transactionStarted = false;
+          if (!transaction.stellarTransactionHash) {
+            return { outcome: 'conflict', reason: 'hash_mismatch', transaction };
+          }
+          return { outcome: 'replayed', transaction };
+        }
+        if (transaction.status !== 'pending_stellar') {
+          await postgres.query('COMMIT');
+          transactionStarted = false;
+          return { outcome: 'conflict', reason: 'status_mismatch', transaction };
+        }
+
+        const updated = await postgres.query<Record<string, unknown>>(
+          "UPDATE interactive_transactions SET status = 'completed', stellar_transaction_hash = $1, updated_at = $2 WHERE id = $3 AND status = 'pending_stellar' AND (stellar_transaction_hash IS NULL OR LOWER(stellar_transaction_hash) = $1) RETURNING *",
+          [transactionHash, nowIso(), input.transactionId],
+        );
+        const completedRow = updated.rows[0];
+        if (!completedRow) {
+          const currentResponse = await postgres.query<Record<string, unknown>>(
+            'SELECT * FROM interactive_transactions WHERE id = $1 LIMIT 1',
+            [input.transactionId],
+          );
+          await postgres.query('COMMIT');
+          transactionStarted = false;
+          const currentRow = currentResponse.rows[0];
+          return {
+            outcome: 'conflict',
+            reason: currentRow ? 'status_mismatch' : 'not_found',
+            transaction: currentRow ? this.mapTransactionRow(currentRow) : null,
+          };
+        }
+
+        await postgres.query('COMMIT');
+        transactionStarted = false;
+        return { outcome: 'completed', transaction: this.mapTransactionRow(completedRow) };
+      } catch (error) {
+        operationError = error;
+        if (transactionStarted) {
+          try {
+            await postgres.query('ROLLBACK');
+          } catch (rollbackError) {
+            operationError = new AggregateError(
+              [error, rollbackError],
+              'Settlement confirmation rollback failed',
+              { cause: error },
+            );
+          }
+        }
+      }
+      throw operationError;
+    })().finally(async () => {
+      await postgres.end();
+    });
   }
 
   public async insertOrGetCustomer(input: Omit<Customer, 'created_at'>): Promise<Customer> {

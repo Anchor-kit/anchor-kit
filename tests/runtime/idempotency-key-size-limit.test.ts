@@ -213,6 +213,9 @@ function makeFakeDb(rejectOnIdempotency = false): {
     async recordReconciledRailPayment() {
       throw new Error('Unexpected database call');
     },
+    async confirmSettlement() {
+      throw new Error('Unexpected database call');
+    },
     async cleanupOldRecords() {},
   };
 

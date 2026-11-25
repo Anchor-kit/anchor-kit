@@ -72,6 +72,7 @@ describe('AnchorInstance pre-init router access', () => {
       getSettlementJobByOperationId: unexpectedDatabaseCall,
       listPendingSettlementJobs: unexpectedDatabaseCall,
       updateSettlementJobStatus: unexpectedDatabaseCall,
+      confirmSettlement: unexpectedDatabaseCall,
       recordReconciledRailPayment: unexpectedDatabaseCall,
       listClaimableSettlementJobs: unexpectedDatabaseCall,
       claimSettlementJob: unexpectedDatabaseCall,

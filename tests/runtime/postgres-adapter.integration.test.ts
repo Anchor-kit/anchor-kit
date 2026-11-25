@@ -33,12 +33,41 @@ postgresTest('SqlDatabaseAdapter – PostgreSQL integration', () => {
       amount: '25.00',
       status: 'pending_user_transfer_start',
     });
-
     expect(inserted.id).toBe(id);
     expect(await db.getInteractiveTransactionById(id)).toMatchObject({
       id,
       kind: 'deposit',
       status: 'pending_user_transfer_start',
+    });
+  });
+
+  it('completes a matching Stellar settlement once under concurrent replay', async () => {
+    const transactionId = randomUUID();
+    const transactionHash = 'c'.repeat(64);
+    await db.insertInteractiveTransaction({
+      id: transactionId,
+      account: 'GTEST1234',
+      kind: 'deposit',
+      assetCode: 'USDC',
+      amount: '25.00',
+      amountOut: '22.50',
+      status: 'pending_stellar',
+    });
+    const results = await Promise.all(
+      Array.from({ length: 4 }, () =>
+        db.confirmSettlement({
+          transactionId,
+          transactionHash,
+          amount: '22.5',
+          recipient: 'GTEST1234',
+        }),
+      ),
+    );
+    expect(results.filter((result) => result.outcome === 'completed')).toHaveLength(1);
+    expect(results.filter((result) => result.outcome === 'replayed')).toHaveLength(3);
+    await expect(db.getInteractiveTransactionById(transactionId)).resolves.toMatchObject({
+      status: 'completed',
+      stellarTransactionHash: transactionHash,
     });
   });
 
@@ -60,13 +89,8 @@ postgresTest('SqlDatabaseAdapter – PostgreSQL integration', () => {
       amount: '25.00',
       status: 'pending_external',
     });
-
     await expect(
-      db.recordReconciledRailPayment({
-        transactionId,
-        operationId,
-        jobId: duplicateJobId,
-      }),
+      db.recordReconciledRailPayment({ transactionId, operationId, jobId: duplicateJobId }),
     ).rejects.toThrow();
     await expect(db.getInteractiveTransactionById(transactionId)).resolves.toMatchObject({
       status: 'pending_external',
@@ -75,16 +99,11 @@ postgresTest('SqlDatabaseAdapter – PostgreSQL integration', () => {
 
     const results = await Promise.all(
       Array.from({ length: 6 }, () =>
-        db.recordReconciledRailPayment({
-          transactionId,
-          operationId,
-          jobId: randomUUID(),
-        }),
+        db.recordReconciledRailPayment({ transactionId, operationId, jobId: randomUUID() }),
       ),
     );
     const enqueued = results.filter((result) => result.outcome === 'enqueued');
     const replays = results.filter((result) => result.outcome === 'replayed');
-
     expect(enqueued).toHaveLength(1);
     expect(replays).toHaveLength(5);
     const [first] = enqueued;
@@ -108,12 +127,7 @@ postgresTest('SqlDatabaseAdapter – PostgreSQL integration', () => {
   it('updates customer KYC data only through its associated account', async () => {
     const id = `customer-${randomUUID()}`;
     const accountId = `G${randomUUID().replaceAll('-', '').toUpperCase()}`;
-    await db.insertOrGetCustomer({
-      id,
-      account_id: accountId,
-      kyc_data: { status: 'pending' },
-    });
-
+    await db.insertOrGetCustomer({ id, account_id: accountId, kyc_data: { status: 'pending' } });
     expect(
       await db.updateCustomer({
         id,
@@ -148,7 +162,6 @@ postgresTest('SqlDatabaseAdapter – PostgreSQL integration', () => {
         }),
       ),
     );
-
     expect(results.filter(({ inserted }) => inserted)).toHaveLength(1);
     expect(new Set(results.map(({ record }) => record.id)).size).toBe(1);
     expect(results.every(({ record }) => record.eventId === eventId)).toBe(true);
