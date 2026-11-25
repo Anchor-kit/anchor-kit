@@ -134,7 +134,7 @@ For a fast SQLite check of the transactional guarantee and plugin-name encoding,
 bun test tests/runtime/database/versioned-migrations.test.ts
 ```
 
-That test covers a failed fixture migration with rollback and retry, plus plugin registration through the public factory. It does not replace the disposable-database rehearsal with the production plugin set.
+That test covers a failed fixture migration with rollback and retry, plus two ordered plugin migrations applied to an existing core database and skipped on a second migrate call. It exercises SQLite. PostgreSQL migration integration requires a disposable PostgreSQL database configured through `DATABASE_URL`; the PostgreSQL integration tests are skipped when that variable is unset. It does not replace the disposable-database rehearsal with the production plugin set.
 
 ## Deployment procedure for a failed migration
 
