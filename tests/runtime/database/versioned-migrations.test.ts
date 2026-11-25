@@ -264,6 +264,7 @@ describe('versioned database migrations', () => {
     for (const plugin of plugins) anchor.use(plugin);
     const coreAdapter = new SqlDatabaseAdapter({ provider: 'sqlite', url });
     let repeatAdapter: SqlDatabaseAdapter | undefined;
+    let database: Database | undefined;
 
     try {
       await coreAdapter.connect();
@@ -303,7 +304,8 @@ describe('versioned database migrations', () => {
       await repeatAdapter.connect();
       await repeatAdapter.migrate();
 
-      const database = (repeatAdapter as unknown as { sqlite: Database }).sqlite;
+      await repeatAdapter.disconnect();
+      database = new Database(path);
       expect(
         database.prepare('SELECT plugin_id FROM plugin_migration_order ORDER BY sequence').all(),
       ).toEqual([{ plugin_id: 'ledger' }, { plugin_id: 'audit' }]);
@@ -329,6 +331,7 @@ describe('versioned database migrations', () => {
           .get('existing-core-challenge'),
       ).toEqual({ id: 'existing-core-challenge', challenge: 'core-challenge' });
     } finally {
+      database?.close();
       await repeatAdapter?.disconnect();
       await anchor.shutdown();
       await coreAdapter.disconnect();
