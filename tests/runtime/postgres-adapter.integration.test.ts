@@ -42,6 +42,69 @@ postgresTest('SqlDatabaseAdapter – PostgreSQL integration', () => {
     });
   });
 
+  it('atomically advances a reconciled rail payment and replays its durable job', async () => {
+    const transactionId = randomUUID();
+    const operationId = `rail-op-${randomUUID()}`;
+    const existingOperationId = `existing-op-${randomUUID()}`;
+    const duplicateJobId = randomUUID();
+    await db.insertOrGetSettlementJob({
+      id: duplicateJobId,
+      operationId: existingOperationId,
+      payloadRef: 'transaction:already-recorded',
+    });
+    await db.insertInteractiveTransaction({
+      id: transactionId,
+      account: 'GTEST1234',
+      kind: 'deposit',
+      assetCode: 'USDC',
+      amount: '25.00',
+      status: 'pending_external',
+    });
+
+    await expect(
+      db.recordReconciledRailPayment({
+        transactionId,
+        operationId,
+        jobId: duplicateJobId,
+      }),
+    ).rejects.toThrow();
+    await expect(db.getInteractiveTransactionById(transactionId)).resolves.toMatchObject({
+      status: 'pending_external',
+    });
+    await expect(db.getSettlementJobByOperationId(operationId)).resolves.toBeNull();
+
+    const results = await Promise.all(
+      Array.from({ length: 6 }, () =>
+        db.recordReconciledRailPayment({
+          transactionId,
+          operationId,
+          jobId: randomUUID(),
+        }),
+      ),
+    );
+    const enqueued = results.filter((result) => result.outcome === 'enqueued');
+    const replays = results.filter((result) => result.outcome === 'replayed');
+
+    expect(enqueued).toHaveLength(1);
+    expect(replays).toHaveLength(5);
+    const [first] = enqueued;
+    if (!first || first.outcome !== 'enqueued') {
+      throw new Error('Concurrent reconciled rail payment did not create exactly one job');
+    }
+    expect(first).toMatchObject({
+      transaction: { id: transactionId, status: 'pending_stellar' },
+      job: { operationId, status: 'pending' },
+    });
+    expect(
+      new Set(results.map((result) => (result.outcome === 'conflict' ? null : result.job.id))),
+    ).toHaveProperty('size', 1);
+    await expect(db.getSettlementJobByOperationId(operationId)).resolves.toMatchObject({
+      id: first.job.id,
+      operationId,
+      payloadRef: `transaction:${transactionId}`,
+    });
+  });
+
   it('updates customer KYC data only through its associated account', async () => {
     const id = `customer-${randomUUID()}`;
     const accountId = `G${randomUUID().replaceAll('-', '').toUpperCase()}`;

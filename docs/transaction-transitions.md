@@ -23,3 +23,21 @@ bun test tests/runtime/database/sql-database-adapter.test.ts tests/types/transac
 
 Expected result: both test files pass, including one-winner competing transitions and an invalid
 transition that preserves amount, status, and timestamps.
+
+## Reconciled rail payments
+
+After a provider event has been verified and matched to a transaction, call
+`DatabaseAdapter.recordReconciledRailPayment()` to move a `pending_external` deposit to
+`pending_stellar` and record its durable settlement job in one database transaction. Reusing the
+same operation ID returns the existing job. A status mismatch, missing transaction, or reused
+operation ID does not create another job. Callers must verify the provider event before invoking
+this persistence operation.
+
+Focused verification:
+
+```bash
+bun test tests/runtime/database/settlement-jobs.test.ts
+```
+
+Expected result: the rollback fixture leaves the transaction and settlement job unchanged on
+failure; a successful retry stores both; replay returns the same job ID.

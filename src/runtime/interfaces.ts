@@ -180,6 +180,18 @@ export interface SettlementJobRecord {
   updatedAt: string;
 }
 
+export type ReconciledRailPaymentResult =
+  | {
+      outcome: 'enqueued' | 'replayed';
+      transaction: InteractiveTransactionRecord;
+      job: SettlementJobRecord;
+    }
+  | {
+      outcome: 'conflict';
+      reason: 'not_found' | 'status_mismatch' | 'operation_reused';
+      transaction: InteractiveTransactionRecord | null;
+    };
+
 /** Ownership for one settlement-job attempt. Tokens must not be reused. */
 export interface SettlementJobLease {
   job: SettlementJobRecord;
@@ -361,6 +373,11 @@ export interface DatabaseAdapter extends SettlementLeaseAdapter {
     operationId: string;
     status: SettlementJobRecord['status'];
   }): Promise<boolean>;
+  recordReconciledRailPayment(input: {
+    transactionId: string;
+    operationId: string;
+    jobId: string;
+  }): Promise<ReconciledRailPaymentResult>;
   cleanupOldRecords(cutoffIso: string): Promise<void>;
 }
 

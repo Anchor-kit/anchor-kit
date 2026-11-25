@@ -93,6 +93,31 @@ describe('PostgreSQL schema isolation', () => {
         });
         expect(await first.getInteractiveTransactionById(reservedId)).not.toBeNull();
         expect(await second.getInteractiveTransactionById(reservedId)).toBeNull();
+
+        const railTransactionId = randomUUID();
+        const railOperationId = randomUUID();
+        const railJobId = randomUUID();
+        await first.insertInteractiveTransaction({
+          id: railTransactionId,
+          account: 'GTEST',
+          kind: 'deposit',
+          assetCode: 'USDC',
+          amount: '3.00',
+          status: 'pending_external',
+        });
+        await expect(
+          first.recordReconciledRailPayment({
+            transactionId: railTransactionId,
+            operationId: railOperationId,
+            jobId: railJobId,
+          }),
+        ).resolves.toMatchObject({
+          outcome: 'enqueued',
+          transaction: { id: railTransactionId, status: 'pending_stellar' },
+          job: { id: railJobId, operationId: railOperationId },
+        });
+        expect(await second.getInteractiveTransactionById(railTransactionId)).toBeNull();
+        expect(await second.getSettlementJobByOperationId(railOperationId)).toBeNull();
       } finally {
         await first.disconnect();
         await second.disconnect();

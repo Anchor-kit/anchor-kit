@@ -210,6 +210,9 @@ function makeFakeDb(rejectOnIdempotency = false): {
     async updateSettlementJobStatus() {
       return false;
     },
+    async recordReconciledRailPayment() {
+      throw new Error('Unexpected database call');
+    },
     async cleanupOldRecords() {},
   };
 

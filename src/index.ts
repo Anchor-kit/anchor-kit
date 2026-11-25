@@ -34,6 +34,7 @@ export type {
   QueueJob,
   QueueDrainStatus,
   QueueAdapter,
+  ReconciledRailPaymentResult,
   Sep10AccountLookup,
   Sep10AccountSigners,
   SettlementJobRecord,

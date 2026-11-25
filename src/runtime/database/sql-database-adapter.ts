@@ -4,6 +4,7 @@ import type {
   DatabaseAdapter,
   IdempotencyRecord,
   InteractiveTransactionRecord,
+  ReconciledRailPaymentResult,
   TransactionTransitionResult,
   SettlementJobRecord,
   SettlementJobLease,
@@ -2389,6 +2390,223 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
     status: SettlementJobRecord['status'];
   }): Promise<boolean> {
     throw new ConfigError('Settlement job status changes require a lease token');
+  }
+
+  public async recordReconciledRailPayment(input: {
+    transactionId: string;
+    operationId: string;
+    jobId: string;
+  }): Promise<ReconciledRailPaymentResult> {
+    if (!input.transactionId.trim() || !input.operationId.trim() || !input.jobId.trim()) {
+      throw new ConfigError('Reconciled rail payment identifiers must not be empty');
+    }
+
+    const payloadRef = `transaction:${input.transactionId}`;
+    const createdAt = nowIso();
+
+    if (this.sqlite) {
+      const database = this.sqlite;
+      const record = database.transaction((): ReconciledRailPaymentResult => {
+        const transactionRow = database
+          .prepare('SELECT * FROM interactive_transactions WHERE id = ? LIMIT 1')
+          .get(input.transactionId) as Record<string, unknown> | null;
+        if (!transactionRow) {
+          return { outcome: 'conflict', reason: 'not_found', transaction: null };
+        }
+
+        const transaction = this.mapTransactionRow(transactionRow);
+        const jobRow = database
+          .prepare('SELECT * FROM settlement_jobs WHERE operation_id = ? LIMIT 1')
+          .get(input.operationId) as Record<string, unknown> | null;
+
+        if (transaction.status === 'pending_stellar') {
+          if (jobRow && String(jobRow.payload_ref) === payloadRef) {
+            return {
+              outcome: 'replayed',
+              transaction,
+              job: this.mapSettlementJobRow(jobRow),
+            };
+          }
+          return {
+            outcome: 'conflict',
+            reason: jobRow ? 'operation_reused' : 'status_mismatch',
+            transaction,
+          };
+        }
+
+        if (transaction.status !== 'pending_external') {
+          return { outcome: 'conflict', reason: 'status_mismatch', transaction };
+        }
+        if (jobRow) {
+          return {
+            outcome: 'conflict',
+            reason:
+              String(jobRow.payload_ref) === payloadRef ? 'status_mismatch' : 'operation_reused',
+            transaction,
+          };
+        }
+
+        const updatedAt = nowIso();
+        const update = database
+          .prepare(
+            "UPDATE interactive_transactions SET status = 'pending_stellar', updated_at = ? WHERE id = ? AND status = 'pending_external'",
+          )
+          .run(updatedAt, input.transactionId);
+        if (update.changes !== 1) {
+          const currentRow = database
+            .prepare('SELECT * FROM interactive_transactions WHERE id = ? LIMIT 1')
+            .get(input.transactionId) as Record<string, unknown> | null;
+          return {
+            outcome: 'conflict',
+            reason: currentRow ? 'status_mismatch' : 'not_found',
+            transaction: currentRow ? this.mapTransactionRow(currentRow) : null,
+          };
+        }
+
+        database
+          .prepare(
+            "INSERT INTO settlement_jobs (id, operation_id, payload_ref, status, created_at, updated_at) VALUES (?, ?, ?, 'pending', ?, ?)",
+          )
+          .run(input.jobId, input.operationId, payloadRef, createdAt, createdAt);
+
+        const updatedRow = database
+          .prepare('SELECT * FROM interactive_transactions WHERE id = ? LIMIT 1')
+          .get(input.transactionId) as Record<string, unknown> | null;
+        const insertedJobRow = database
+          .prepare('SELECT * FROM settlement_jobs WHERE operation_id = ? LIMIT 1')
+          .get(input.operationId) as Record<string, unknown> | null;
+        if (!updatedRow || !insertedJobRow) {
+          throw new ConfigError('Reconciled rail payment was not persisted atomically');
+        }
+
+        return {
+          outcome: 'enqueued',
+          transaction: this.mapTransactionRow(updatedRow),
+          job: this.mapSettlementJobRow(insertedJobRow),
+        };
+      });
+      return record.immediate();
+    }
+
+    const Client = this.postgresClientConstructor;
+    if (!Client) throw new ConfigError('PostgreSQL client is not connected');
+
+    const postgres = new Client({ connectionString: this.url });
+    return (async (): Promise<ReconciledRailPaymentResult> => {
+      let transactionStarted = false;
+      let operationError: unknown;
+      try {
+        await postgres.connect();
+        await postgres.query(`SET search_path TO "${this.schema ?? 'public'}"`);
+        await postgres.query('BEGIN');
+        transactionStarted = true;
+
+        const currentResponse = await postgres.query<Record<string, unknown>>(
+          'SELECT * FROM interactive_transactions WHERE id = $1 LIMIT 1 FOR UPDATE',
+          [input.transactionId],
+        );
+        const currentRow = currentResponse.rows[0];
+        if (!currentRow) {
+          await postgres.query('COMMIT');
+          transactionStarted = false;
+          return { outcome: 'conflict', reason: 'not_found', transaction: null };
+        }
+        const transaction = this.mapTransactionRow(currentRow);
+
+        const existingJobResponse = await postgres.query<Record<string, unknown>>(
+          'SELECT * FROM settlement_jobs WHERE operation_id = $1 LIMIT 1',
+          [input.operationId],
+        );
+        const existingJob = existingJobResponse.rows[0];
+        if (transaction.status === 'pending_stellar') {
+          await postgres.query('COMMIT');
+          transactionStarted = false;
+          if (existingJob && String(existingJob.payload_ref) === payloadRef) {
+            return {
+              outcome: 'replayed',
+              transaction,
+              job: this.mapSettlementJobRow(existingJob),
+            };
+          }
+          return {
+            outcome: 'conflict',
+            reason: existingJob ? 'operation_reused' : 'status_mismatch',
+            transaction,
+          };
+        }
+
+        if (transaction.status !== 'pending_external' || existingJob) {
+          await postgres.query('COMMIT');
+          transactionStarted = false;
+          return {
+            outcome: 'conflict',
+            reason:
+              transaction.status !== 'pending_external'
+                ? 'status_mismatch'
+                : existingJob && String(existingJob.payload_ref) !== payloadRef
+                  ? 'operation_reused'
+                  : 'status_mismatch',
+            transaction,
+          };
+        }
+
+        const updatedResponse = await postgres.query<Record<string, unknown>>(
+          "UPDATE interactive_transactions SET status = 'pending_stellar', updated_at = $1 WHERE id = $2 AND status = 'pending_external' RETURNING *",
+          [nowIso(), input.transactionId],
+        );
+        const updatedRow = updatedResponse.rows[0];
+        if (!updatedRow) {
+          const latestResponse = await postgres.query<Record<string, unknown>>(
+            'SELECT * FROM interactive_transactions WHERE id = $1 LIMIT 1',
+            [input.transactionId],
+          );
+          await postgres.query('COMMIT');
+          transactionStarted = false;
+          const latestRow = latestResponse.rows[0];
+          return {
+            outcome: 'conflict',
+            reason: latestRow ? 'status_mismatch' : 'not_found',
+            transaction: latestRow ? this.mapTransactionRow(latestRow) : null,
+          };
+        }
+
+        const jobResponse = await postgres.query<Record<string, unknown>>(
+          "INSERT INTO settlement_jobs (id, operation_id, payload_ref, status, created_at, updated_at) VALUES ($1, $2, $3, 'pending', $4, $4) ON CONFLICT(operation_id) DO NOTHING RETURNING *",
+          [input.jobId, input.operationId, payloadRef, createdAt],
+        );
+        const jobRow = jobResponse.rows[0];
+        if (!jobRow) {
+          throw new ConfigError('Settlement operation was already recorded before its transition');
+        }
+
+        await postgres.query('COMMIT');
+        transactionStarted = false;
+        return {
+          outcome: 'enqueued',
+          transaction: this.mapTransactionRow(updatedRow),
+          job: this.mapSettlementJobRow(jobRow),
+        };
+      } catch (error) {
+        operationError = error;
+        if (transactionStarted) {
+          try {
+            await postgres.query('ROLLBACK');
+          } catch (rollbackError) {
+            operationError = new AggregateError(
+              [error, rollbackError],
+              'Rail settlement rollback failed',
+              {
+                cause: error,
+              },
+            );
+          }
+        }
+      }
+
+      throw operationError;
+    })().finally(async () => {
+      await postgres.end();
+    });
   }
 
   public async cleanupOldRecords(cutoffIso: string): Promise<void> {
