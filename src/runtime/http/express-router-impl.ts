@@ -1506,18 +1506,57 @@ async function handleAuthToken(
     return;
   }
 
-  const parsedBody = await parsePostJsonBody(req, res, context.maxBodyBytes);
-  if (!parsedBody) {
+  const contentType = firstNonEmptyString(req.headers['content-type'])
+    ?.split(';', 1)[0]
+    ?.trim()
+    .toLowerCase();
+  let body: Record<string, unknown>;
+  if (contentType === 'application/json') {
+    const parsedBody = await parsePostJsonBody(req, res, context.maxBodyBytes);
+    if (!parsedBody) return;
+    body = parsedBody.body;
+  } else if (contentType === 'application/x-www-form-urlencoded') {
+    let rawBody: RawBodyValue;
+    try {
+      rawBody = await readRawBody(req, context.maxBodyBytes);
+      const text = new TextDecoder('utf-8', { fatal: true }).decode(
+        typeof rawBody === 'string' ? Buffer.from(rawBody, 'utf8') : Buffer.from(rawBody),
+      );
+      const parsed = Object.create(null) as Record<string, unknown>;
+      for (const part of text.split('&')) {
+        for (const field of part.split('=')) decodeURIComponent(field.replace(/\+/g, ' '));
+      }
+      for (const [key, value] of new URLSearchParams(text)) {
+        if (Object.hasOwn(parsed, key)) throw new Error('duplicate form field');
+        parsed[key] = value;
+      }
+      body = parsed;
+    } catch (error) {
+      if (error instanceof PayloadTooLargeError) {
+        sendJson(res, 413, { error: 'payload_too_large', message: error.message });
+      } else {
+        sendJson(res, 400, {
+          error: 'invalid_request',
+          message: 'Invalid or duplicate form fields',
+        });
+      }
+      return;
+    }
+  } else {
+    sendJson(res, 400, {
+      error: 'invalid_request',
+      message: 'Content-Type must be application/json or application/x-www-form-urlencoded',
+    });
     return;
   }
 
-  let account = typeof parsedBody.body.account === 'string' ? parsedBody.body.account.trim() : '';
+  let account = typeof body.account === 'string' ? body.account.trim() : '';
   const signedChallenge = standardRequest
-    ? typeof parsedBody.body.transaction === 'string'
-      ? parsedBody.body.transaction
+    ? typeof body.transaction === 'string'
+      ? body.transaction
       : ''
-    : typeof parsedBody.body.challenge === 'string'
-      ? parsedBody.body.challenge
+    : typeof body.challenge === 'string'
+      ? body.challenge
       : '';
   if ((!standardRequest && !account) || !signedChallenge) {
     sendJson(res, 400, {
