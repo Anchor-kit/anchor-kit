@@ -628,6 +628,35 @@ describe('MVP Express-mounted integration', () => {
     expect(Math.abs(expiresAtTime - expectedExpiry)).toBeLessThan(5000);
   });
 
+  it('3b) accepts a form-encoded SEP-10 exchange at the standard endpoint', async () => {
+    const account = clientKeypair.publicKey();
+    const challengeResponse = await invoke({
+      path: `/auth?account=${account}`,
+      headers: { 'x-forwarded-for': '10.0.0.77' },
+    });
+    expect(challengeResponse.status).toBe(200);
+    const challengeTx = new Transaction(
+      String(challengeResponse.body.transaction),
+      String(challengeResponse.body.network_passphrase),
+    );
+    challengeTx.sign(clientKeypair);
+
+    const form = new URLSearchParams({ transaction: challengeTx.toXDR() });
+    const tokenResponse = await invoke({
+      method: 'POST',
+      path: '/auth',
+      headers: {
+        'content-type': 'application/x-www-form-urlencoded',
+        'x-forwarded-for': '10.0.0.77',
+      },
+      rawBody: form.toString(),
+    });
+
+    expect(tokenResponse.status).toBe(200);
+    expect(tokenResponse.body.account).toBe(account);
+    expect(tokenResponse.body.token).toBeTypeOf('string');
+  });
+
   it('3e) accepts one authorization header value and rejects ambiguous arrays', async () => {
     const endpoint = {
       method: 'GET',
@@ -3770,7 +3799,9 @@ describe('MVP Express-mounted integration', () => {
         message:
           request.path === '/transactions/deposit/interactive'
             ? 'Unsupported deposit Content-Type'
-            : 'Content-Type must be application/json',
+            : request.path === '/auth/token'
+              ? 'Content-Type must be application/json or application/x-www-form-urlencoded'
+              : 'Content-Type must be application/json',
       });
     }
   });
