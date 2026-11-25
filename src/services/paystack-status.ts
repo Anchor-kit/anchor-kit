@@ -41,7 +41,7 @@ export async function getPaystackTestStatus(
     data.amount <= 0 ||
     !('currency' in data) ||
     typeof data.currency !== 'string' ||
-    !['GHS', 'KES', 'NGN', 'USD', 'ZAR'].includes(data.currency) ||
+    !['GHS', 'KES', 'NGN', 'USD', 'XOF', 'ZAR'].includes(data.currency) ||
     !('status' in data) ||
     typeof data.status !== 'string'
   ) {
@@ -63,7 +63,10 @@ export async function getPaystackTestStatus(
     provider: 'paystack',
     reference: input.reference,
     amount: {
-      amount: `${Math.floor(data.amount / 100)}.${String(data.amount % 100).padStart(2, '0')}`,
+      amount:
+        data.currency === 'XOF'
+          ? String(Math.floor(data.amount / 100))
+          : `${Math.floor(data.amount / 100)}.${String(data.amount % 100).padStart(2, '0')}`,
       currency: data.currency,
     },
     status,

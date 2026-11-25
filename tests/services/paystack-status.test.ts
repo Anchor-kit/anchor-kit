@@ -69,4 +69,16 @@ describe('Paystack test status', () => {
       }),
     ).rejects.toThrow('Invalid Paystack transaction response');
   });
+
+  it('normalizes XOF without fractional digits', async () => {
+    expect(
+      await getPaystackTestStatus(input, {
+        secretKey: 'sk_test_example',
+        fetch: response({
+          status: true,
+          data: { ...data, amount: 1200, currency: 'XOF' },
+        }),
+      }),
+    ).toMatchObject({ amount: { amount: '12', currency: 'XOF' } });
+  });
 });
