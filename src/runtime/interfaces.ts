@@ -111,6 +111,7 @@ export interface InteractiveTransactionRecord {
   currency?: string | null;
   railReference?: string | null;
   stellarTransactionHash?: string | null;
+  stellarSignedXdr?: string | null;
   status: TransactionStatus;
   createdAt: string;
   updatedAt: string;
@@ -356,6 +357,12 @@ export interface DatabaseAdapter extends SettlementLeaseAdapter, StellarSequence
     status: TransactionStatus;
   }): Promise<InteractiveTransactionRecord>;
   getInteractiveTransactionById(id: string): Promise<InteractiveTransactionRecord | null>;
+  /** Persist the signed envelope and its network-specific hash before submit. */
+  persistSignedStellarTransaction?(input: {
+    transactionId: string;
+    signedXdr: string;
+    transactionHash: string;
+  }): Promise<boolean>;
   findInteractiveTransaction(input: {
     account: string;
     identifier: InteractiveTransactionIdentifier;

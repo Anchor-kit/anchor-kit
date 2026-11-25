@@ -9,6 +9,7 @@ import {
   TransactionBuilder,
 } from '@stellar/stellar-sdk';
 import { HorizonNetworkClient } from '../../src/services/horizon-network-client.ts';
+import type { InteractiveTransactionRecord } from '../../src/runtime/interfaces.ts';
 
 const account = 'GBYHKEYCYLCF6JTM3FPCVGOVVQS4JU7FEKGTVRQT7CWJHHDK6F5MW4UV';
 const hash = 'a'.repeat(64);
@@ -150,5 +151,46 @@ describe('HorizonNetworkClient', () => {
     expect(
       await new HorizonNetworkClient({ ...config, timeoutMs: 5 }, timeout).submitTransaction(xdr),
     ).toEqual({ outcome: 'unknown', hash: expectedHash, reason: 'timeout' });
+  });
+
+  it('submits only the signed envelope stored with the matching hash', async () => {
+    const xdr = signedXdr();
+    const expectedHash = new Transaction(xdr, passphrase).hash().toString('hex');
+    const transaction: InteractiveTransactionRecord = {
+      id: 'transaction-1',
+      account,
+      kind: 'deposit',
+      assetCode: 'USDC',
+      amount: '1',
+      status: 'pending_stellar',
+      stellarSignedXdr: xdr,
+      stellarTransactionHash: expectedHash,
+      createdAt: new Date(0).toISOString(),
+      updatedAt: new Date(0).toISOString(),
+    };
+    const fetcher = mock(async (input: string | URL | Request, init?: RequestInit) => {
+      if (input.toString() === config.horizonUrl) return root();
+      expect(new URLSearchParams(String(init?.body)).get('tx')).toBe(xdr);
+      return Response.json({ hash: expectedHash, successful: true, ledger: 123 });
+    });
+    const client = new HorizonNetworkClient(config, fetcher);
+    await expect(
+      client.submitPersistedTransaction(
+        { getInteractiveTransactionById: async () => transaction },
+        transaction.id,
+      ),
+    ).resolves.toEqual({ outcome: 'confirmed', hash: expectedHash, ledger: 123 });
+
+    const mismatched = await client.submitPersistedTransaction(
+      {
+        getInteractiveTransactionById: async () => ({
+          ...transaction,
+          stellarTransactionHash: 'b'.repeat(64),
+        }),
+      },
+      transaction.id,
+    );
+    expect(mismatched).toEqual({ outcome: 'not_ready', reason: 'stored_hash_mismatch' });
+    expect(fetcher).toHaveBeenCalledTimes(2);
   });
 });

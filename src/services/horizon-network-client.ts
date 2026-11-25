@@ -1,5 +1,6 @@
 import { StrKey } from '@stellar/stellar-sdk';
 import { signedSettlementHash } from './settlement-identity.ts';
+import type { DatabaseAdapter } from '@/runtime/interfaces.ts';
 import type {
   StellarAccountState,
   StellarNetworkClient,
@@ -167,6 +168,28 @@ export class HorizonNetworkClient implements StellarNetworkClient {
       clearTimeout(timer);
     }
   }
+
+  /** Submit only the envelope durably stored for this transaction, after checking its hash. */
+  async submitPersistedTransaction(
+    database: Pick<DatabaseAdapter, 'getInteractiveTransactionById'>,
+    transactionId: string,
+  ): Promise<StellarPersistedSubmissionResult> {
+    const transaction = await database.getInteractiveTransactionById(transactionId);
+    if (!transaction) return { outcome: 'not_ready', reason: 'transaction_not_found' };
+    if (!transaction.stellarSignedXdr || !transaction.stellarTransactionHash) {
+      return { outcome: 'not_ready', reason: 'signed_envelope_not_persisted' };
+    }
+    let computedHash: string;
+    try {
+      computedHash = signedSettlementHash(transaction.stellarSignedXdr, this.networkPassphrase);
+    } catch {
+      return { outcome: 'not_ready', reason: 'signed_envelope_invalid' };
+    }
+    if (computedHash !== transaction.stellarTransactionHash.toLowerCase()) {
+      return { outcome: 'not_ready', reason: 'stored_hash_mismatch' };
+    }
+    return this.submitTransaction(transaction.stellarSignedXdr);
+  }
 }
 
 export type StellarSubmissionResult =
@@ -177,3 +200,14 @@ export type StellarSubmissionResult =
       hash: string;
       reason: 'network' | 'timeout' | 'invalid_response' | 'network_mismatch' | 'not_confirmed';
     };
+
+export type StellarPersistedSubmissionResult =
+  | {
+      outcome: 'not_ready';
+      reason:
+        | 'transaction_not_found'
+        | 'signed_envelope_not_persisted'
+        | 'signed_envelope_invalid'
+        | 'stored_hash_mismatch';
+    }
+  | StellarSubmissionResult;
