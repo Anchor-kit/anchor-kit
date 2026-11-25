@@ -68,6 +68,11 @@ export {
 } from './runtime/queue/in-memory-queue.ts';
 export type { ExpressLikeMiddleware } from './runtime/http/express-router.ts';
 
+export { assessIssuedAssetRecipient } from './runtime/settlement/recipient-readiness.ts';
+export type {
+  RecipientReadiness,
+  RecipientSnapshot,
+} from './runtime/settlement/recipient-readiness.ts';
 export { matchRailEvent } from './runtime/settlement/match-rail-event.ts';
 export type { RailMatchResult } from './runtime/settlement/match-rail-event.ts';
 export { AnchorClient, AnchorClientError } from './client/anchor-client.ts';
