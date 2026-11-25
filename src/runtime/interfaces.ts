@@ -224,6 +224,18 @@ export interface SettlementJobLease {
   attempt: number;
 }
 
+/** A fenced reservation for one Stellar account sequence and payment intent. */
+export interface StellarSequenceLease {
+  accountId: string;
+  sequence: string;
+  operationId: string;
+  payloadHash: string;
+  owner: string;
+  token: string;
+  expiresAt: string;
+  attempt: number;
+}
+
 export interface SettlementLeaseAdapter {
   /** Lists pending jobs and expired leases; claim remains the ownership gate. */
   listClaimableSettlementJobs(limit: number): Promise<SettlementJobRecord[]>;
@@ -244,7 +256,29 @@ export interface SettlementLeaseAdapter {
   }): Promise<boolean>;
 }
 
-export interface DatabaseAdapter extends SettlementLeaseAdapter {
+export interface StellarSequenceLeaseAdapter {
+  /**
+   * Reserves one sequence for one immutable operation. Expired leases may only be
+   * reclaimed by the same operation with the same payload hash; other operations
+   * remain blocked until the reserved transaction is confirmed.
+   */
+  reserveStellarSequence(input: {
+    accountId: string;
+    networkSequence: string;
+    operationId: string;
+    payloadHash: string;
+    owner: string;
+    durationMs: number;
+  }): Promise<StellarSequenceLease | null>;
+  /** Release a reservation only after Horizon confirms its transaction. */
+  completeStellarSequenceOperation(input: {
+    accountId: string;
+    operationId: string;
+    token: string;
+  }): Promise<boolean>;
+}
+
+export interface DatabaseAdapter extends SettlementLeaseAdapter, StellarSequenceLeaseAdapter {
   connect(): Promise<void>;
   disconnect(): Promise<void>;
   migrate(): Promise<void>;

@@ -81,6 +81,8 @@ describe('AnchorInstance pre-init router access', () => {
       claimSettlementJob: unexpectedDatabaseCall,
       heartbeatSettlementJob: unexpectedDatabaseCall,
       finishSettlementJob: unexpectedDatabaseCall,
+      reserveStellarSequence: unexpectedDatabaseCall,
+      completeStellarSequenceOperation: unexpectedDatabaseCall,
       insertWatcherTask: unexpectedDatabaseCall,
       listPendingWatcherTasks: unexpectedDatabaseCall,
       updateWatcherTaskStatus: unexpectedDatabaseCall,

@@ -216,6 +216,12 @@ function makeFakeDb(rejectOnIdempotency = false): {
     async finishSettlementJob() {
       return false;
     },
+    async reserveStellarSequence() {
+      return null;
+    },
+    async completeStellarSequenceOperation() {
+      return false;
+    },
     async updateSettlementJobStatus() {
       return false;
     },

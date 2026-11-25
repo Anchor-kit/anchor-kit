@@ -113,6 +113,8 @@ describe('versioned database migrations', () => {
         { name: 'core:004-settlement-job-leases' },
         { name: 'core:005-webhook-recovery-result' },
         { name: 'core:006-refund-operations' },
+        { name: 'core:007-stellar-sequence-leases' },
+        { name: 'core:008-stellar-sequence-operations' },
       ]);
     } finally {
       await adapter.disconnect();
