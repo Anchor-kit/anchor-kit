@@ -25,6 +25,12 @@ export interface PaymentRailAdapter {
     statusLookup: boolean;
     recovery: boolean;
   }>;
+  /**
+   * Initiates one provider operation. Implementations must treat `operationId`
+   * as an idempotency key: replaying the same request after a timeout or
+   * process restart must return the original operation instead of creating a
+   * second charge. A different payload for an existing operationId must fail.
+   */
   initiate(
     input: PaymentRailInitiationRequest,
   ): Promise<RailCapabilityResult<PaymentRailOperation>>;
@@ -357,6 +363,13 @@ export interface DatabaseAdapter extends SettlementLeaseAdapter, StellarSequence
     status: TransactionStatus;
   }): Promise<InteractiveTransactionRecord>;
   getInteractiveTransactionById(id: string): Promise<InteractiveTransactionRecord | null>;
+  /** Persist a stable rail reference and expected fiat values before provider initiation. */
+  setInteractiveTransactionRailPayment?(input: {
+    transactionId: string;
+    railReference: string;
+    amountIn: string;
+    currency: string;
+  }): Promise<boolean>;
   /** Persist the signed envelope and its network-specific hash before submit. */
   persistSignedStellarTransaction?(input: {
     transactionId: string;

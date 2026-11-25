@@ -34,6 +34,10 @@ export type {
 } from './services/stellar-submission-recovery.ts';
 export { interactiveSessionState } from './services/interactive-session-state.ts';
 export type { InteractiveSessionState } from './services/interactive-session-state.ts';
+export {
+  initiateRailPayment,
+  RailPaymentInitiationError,
+} from './services/rail-payment-initiation.ts';
 export type { StellarTransactionSigner } from './services/stellar-signer.ts';
 export * as utils from './utils';
 export {

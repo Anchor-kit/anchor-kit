@@ -1,5 +1,13 @@
 # Focused issue acceptance checks
 
+For webhook duplicate delivery and provider-scoped deduplication, run:
+
+```sh
+bun test tests/runtime/webhooks/default-webhook-processor.test.ts tests/runtime/sql-adapter-webhook-dedupe.test.ts
+```
+
+Expected result: all tests pass. Deduplication is scoped to `(provider, event_id)` such that identical event IDs from different providers are treated as independent events, while duplicate deliveries within the same provider return `{ duplicate: true, status: 'processed' }` without re-executing callback side effects. See [docs/webhook-duplicate-delivery.md](./webhook-duplicate-delivery.md) for the operational guide and troubleshooting runbook.
+
 For registered payment rail webhook verification, run:
 
 ```sh
@@ -71,6 +79,15 @@ bun test tests/utils/stellar.test.ts tests/core/config.test.ts tests/runtime/aut
 ```
 
 Expected result: all four test files pass. The checks cover UUID hash memo XDR round-tripping and the 28-byte text-memo limit; deterministic KYC requirements and policy validation; 64-byte, unique SEP-10 nonce values persisted and consumed once; and Bun SQLite initialization.
+
+For the operational checklist for production readiness reviews (#816), run:
+
+```sh
+bun test tests/production-readiness-checklist.test.ts
+node scripts/check-doc-acceptance.mjs
+```
+
+Expected result: both commands pass. The operational checklist in `ROADMAP.md` provides maintainers with explicit assessment criteria across protocol interoperability, settlement, security review, recovery, and release evidence. Each item links directly to supporting documentation and test artifacts, leaving each item as an open assessment without declaring production readiness.
 
 The Node runtime portability check requires the built SDK. On Windows, run the build commands in Git Bash because the existing build script uses `rm`:
 

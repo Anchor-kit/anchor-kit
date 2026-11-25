@@ -13,6 +13,24 @@ describe('MockPaymentRail', () => {
     expect(initiated.supported).toBe(true);
     if (!initiated.supported) return;
 
+    const replay = await rail.initiate({
+      operationId: 'op-1',
+      reference: 'anchor-ref-1',
+      accountId: 'GACCOUNT',
+      amount: { amount: '25.00', currency: 'NGN' },
+    });
+    const conflictingReplay = await rail.initiate({
+      operationId: 'op-1',
+      reference: 'anchor-ref-1',
+      accountId: 'GACCOUNT',
+      amount: { amount: '250.00', currency: 'NGN' },
+    });
+    expect(replay).toEqual(initiated);
+    expect(conflictingReplay).toEqual({
+      supported: false,
+      reason: 'operationId was reused with different payment details',
+    });
+
     const event = {
       eventId: 'event-1',
       provider: 'mock',

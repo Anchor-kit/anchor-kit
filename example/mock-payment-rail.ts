@@ -41,7 +41,20 @@ export class MockPaymentRail implements PaymentRailAdapter {
   ): Promise<RailCapabilityResult<PaymentRailOperation>> {
     if (this.options.failInitiation) return { supported: false, reason: 'mock initiation failure' };
     const prior = this.operations.get(input.operationId);
-    if (prior) return { supported: true, value: prior };
+    if (prior) {
+      if (
+        prior.provider !== this.provider ||
+        prior.reference !== input.reference ||
+        prior.amount.amount !== input.amount.amount ||
+        prior.amount.currency !== input.amount.currency
+      ) {
+        return {
+          supported: false,
+          reason: 'operationId was reused with different payment details',
+        };
+      }
+      return { supported: true, value: prior };
+    }
     const operation: PaymentRailOperation = {
       operationId: input.operationId,
       provider: this.provider,
