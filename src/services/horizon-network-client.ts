@@ -171,7 +171,7 @@ export class HorizonNetworkClient implements StellarNetworkClient {
 
   /** Submit only the envelope durably stored for this transaction, after checking its hash. */
   async submitPersistedTransaction(
-    database: Pick<DatabaseAdapter, 'getInteractiveTransactionById'>,
+    database: Pick<DatabaseAdapter, 'getInteractiveTransactionById' | 'updateTransactionStatus'>,
     transactionId: string,
   ): Promise<StellarPersistedSubmissionResult> {
     const transaction = await database.getInteractiveTransactionById(transactionId);
@@ -188,7 +188,11 @@ export class HorizonNetworkClient implements StellarNetworkClient {
     if (computedHash !== transaction.stellarTransactionHash.toLowerCase()) {
       return { outcome: 'not_ready', reason: 'stored_hash_mismatch' };
     }
-    return this.submitTransaction(transaction.stellarSignedXdr);
+    const result = await this.submitTransaction(transaction.stellarSignedXdr);
+    if (result.outcome === 'rejected') {
+      await database.updateTransactionStatus(transaction.id, 'error', 'pending_stellar');
+    }
+    return result;
   }
 }
 

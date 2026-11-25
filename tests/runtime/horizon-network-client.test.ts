@@ -176,7 +176,10 @@ describe('HorizonNetworkClient', () => {
     const client = new HorizonNetworkClient(config, fetcher);
     await expect(
       client.submitPersistedTransaction(
-        { getInteractiveTransactionById: async () => transaction },
+        {
+          getInteractiveTransactionById: async () => transaction,
+          updateTransactionStatus: async () => true,
+        },
         transaction.id,
       ),
     ).resolves.toEqual({ outcome: 'confirmed', hash: expectedHash, ledger: 123 });
@@ -187,10 +190,35 @@ describe('HorizonNetworkClient', () => {
           ...transaction,
           stellarTransactionHash: 'b'.repeat(64),
         }),
+        updateTransactionStatus: async () => true,
       },
       transaction.id,
     );
     expect(mismatched).toEqual({ outcome: 'not_ready', reason: 'stored_hash_mismatch' });
     expect(fetcher).toHaveBeenCalledTimes(2);
+
+    const updateTransactionStatus = mock(async () => true);
+    const rejectClient = new HorizonNetworkClient(
+      config,
+      mock(async (input: string | URL | Request) =>
+        input.toString() === config.horizonUrl
+          ? root()
+          : Response.json(
+              { extras: { result_codes: { transaction: 'tx_bad_seq' } } },
+              { status: 400 },
+            ),
+      ),
+    );
+    await expect(
+      rejectClient.submitPersistedTransaction(
+        { getInteractiveTransactionById: async () => transaction, updateTransactionStatus },
+        transaction.id,
+      ),
+    ).resolves.toMatchObject({ outcome: 'rejected', code: 'tx_bad_seq' });
+    expect(updateTransactionStatus).toHaveBeenCalledWith(
+      transaction.id,
+      'error',
+      'pending_stellar',
+    );
   });
 });
