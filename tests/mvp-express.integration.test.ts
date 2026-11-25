@@ -1553,7 +1553,7 @@ describe('MVP Express-mounted integration', () => {
     });
 
     expect(response.status).toBe(201);
-    expect(response.body.status).toBe('pending_user_transfer_start');
+    expect(response.body.status).toBe('incomplete');
   });
 
   it('5h) deposit with numeric amount within limits is accepted', async () => {
@@ -1570,7 +1570,7 @@ describe('MVP Express-mounted integration', () => {
 
     expect(response.status).toBe(201);
     expect(response.body.id).toBeTruthy();
-    expect(response.body.status).toBe('pending_user_transfer_start');
+    expect(response.body.status).toBe('incomplete');
     expect(response.body.amount).toBe('50');
     expect(response.body.updated_at).toBe(response.body.created_at);
   });
@@ -1591,7 +1591,7 @@ describe('MVP Express-mounted integration', () => {
     transactionId = String(response.body.id ?? '');
     depositInteractiveUrl = String(response.body.interactive_url ?? '');
     expect(transactionId.length).toBeGreaterThan(0);
-    expect(response.body.status).toBe('pending_user_transfer_start');
+    expect(response.body.status).toBe('incomplete');
     expect(response.body.asset_issuer).toBe(
       'GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5',
     );
@@ -1718,7 +1718,7 @@ describe('MVP Express-mounted integration', () => {
     expect(response.status).toBe(201);
     expect(response.body.id).toBe(transactionId);
     expect(response.body.interactive_url).toBe(depositInteractiveUrl);
-    expect(response.body.status).toBe('pending_user_transfer_start');
+    expect(response.body.status).toBe('incomplete');
     expect(response.body.account).toBe(clientKeypair.publicKey());
     expect(response.body.idempotency_replay).toBe(true);
   });
@@ -1840,7 +1840,7 @@ describe('MVP Express-mounted integration', () => {
 
     expect(response.status).toBe(201);
     expect(response.body.id).toBeTruthy();
-    expect(response.body.status).toBe('pending_user_transfer_start');
+    expect(response.body.status).toBe('incomplete');
   });
 
   it('7) transaction lookup fetches persisted data', async () => {
