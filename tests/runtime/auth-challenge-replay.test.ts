@@ -106,6 +106,18 @@ class ControllableFakeDatabaseAdapter implements DatabaseAdapter {
   async updateTransactionStatus(_id: string, _status: string): Promise<boolean> {
     return true;
   }
+
+  async insertOrGetCustomer(): Promise<never> {
+    throw new Error('Unexpected customer database call');
+  }
+
+  async getCustomerByAccountId() {
+    return null;
+  }
+
+  async updateCustomer(): Promise<boolean> {
+    return false;
+  }
   async getIdempotencyRecord(): Promise<null> {
     return null;
   }
@@ -214,6 +226,7 @@ function makeTestContext(
       auth_token: { windowMs: 60000, max: 1000 },
       webhook: { windowMs: 60000, max: 1000 },
       deposit: { windowMs: 60000, max: 1000 },
+      customer: { windowMs: 60000, max: 1000 },
     },
     sep10ServerKeypair: serverKeypair,
     networkPassphrase: Networks.TESTNET,

@@ -105,6 +105,37 @@ postgresTest('SqlDatabaseAdapter – PostgreSQL integration', () => {
     });
   });
 
+  it('updates customer KYC data only through its associated account', async () => {
+    const id = `customer-${randomUUID()}`;
+    const accountId = `G${randomUUID().replaceAll('-', '').toUpperCase()}`;
+    await db.insertOrGetCustomer({
+      id,
+      account_id: accountId,
+      kyc_data: { status: 'pending' },
+    });
+
+    expect(
+      await db.updateCustomer({
+        id,
+        account_id: 'GOTHERACCOUNT',
+        kyc_data: { status: 'approved', first_name: 'Ada' },
+      }),
+    ).toBe(false);
+    expect(
+      await db.updateCustomer({
+        id,
+        account_id: accountId,
+        email_address: 'ada@example.com',
+        kyc_data: { status: 'approved', first_name: 'Ada' },
+      }),
+    ).toBe(true);
+    expect(await db.getCustomerByAccountId(accountId)).toMatchObject({
+      account_id: accountId,
+      email_address: 'ada@example.com',
+      kyc_data: { status: 'approved', first_name: 'Ada' },
+    });
+  });
+
   it('atomically deduplicates concurrent deliveries of the same webhook event', async () => {
     const eventId = `evt-${randomUUID()}`;
     const results = await Promise.all(

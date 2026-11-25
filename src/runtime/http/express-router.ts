@@ -3,6 +3,7 @@ import { errorHandler } from '../../utils/error-handler.ts';
 import { InMemoryRateLimiter, type RateLimitRule } from './rate-limiter.ts';
 import type {
   DatabaseAdapter,
+  KycVerificationProvider,
   Sep10AccountLookup,
   WebhookProcessor,
 } from '@/runtime/interfaces.ts';
@@ -27,6 +28,7 @@ interface RouterDependencies {
   database: DatabaseAdapter;
   isReady?: () => boolean;
   webhookProcessor: WebhookProcessor;
+  kycVerificationProvider?: KycVerificationProvider;
   depositRequestHooks?: NonNullable<AnchorPluginHooks['onDepositRequest']>[];
   sep10ChallengeHooks?: NonNullable<AnchorPluginHooks['onSep10Challenge']>[];
   sep10AccountLookup?: Sep10AccountLookup;
@@ -48,13 +50,14 @@ export class AnchorExpressRouter {
     const rateLimitConfig = config.get('framework').rateLimit;
     const windowMs = rateLimitConfig?.windowMs ?? 60000;
     const rateRules: Record<
-      'auth_challenge' | 'auth_token' | 'webhook' | 'deposit',
+      'auth_challenge' | 'auth_token' | 'webhook' | 'deposit' | 'customer',
       RateLimitRule
     > = {
       auth_challenge: { windowMs, max: rateLimitConfig?.authChallengeMax ?? 30 },
       auth_token: { windowMs, max: rateLimitConfig?.authTokenMax ?? 30 },
       webhook: { windowMs, max: rateLimitConfig?.webhookMax ?? 120 },
       deposit: { windowMs, max: rateLimitConfig?.depositMax ?? 60 },
+      customer: { windowMs, max: rateLimitConfig?.authTokenMax ?? 30 },
     };
 
     this.context = {
@@ -62,6 +65,7 @@ export class AnchorExpressRouter {
       database: dependencies.database,
       isReady: dependencies.isReady ?? (() => false),
       webhookProcessor: dependencies.webhookProcessor,
+      kycVerificationProvider: dependencies.kycVerificationProvider,
       depositRequestHooks: dependencies.depositRequestHooks ?? [],
       sep10ChallengeHooks: dependencies.sep10ChallengeHooks ?? [],
       sep10AccountLookup: dependencies.sep10AccountLookup,

@@ -1472,6 +1472,41 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
     return row ? this.mapCustomerRow(row) : null;
   }
 
+  public async updateCustomer(input: {
+    id: string;
+    account_id: string;
+    email_address?: string;
+    phone_number?: string;
+    kyc_data: Customer['kyc_data'];
+  }): Promise<boolean> {
+    if (this.sqlite) {
+      const result = this.sqlite
+        .prepare(
+          'UPDATE customers SET email_address = COALESCE(?, email_address), phone_number = COALESCE(?, phone_number), kyc_data = ? WHERE id = ? AND EXISTS (SELECT 1 FROM customer_accounts WHERE customer_id = customers.id AND account_id = ?)',
+        )
+        .run(
+          input.email_address ?? null,
+          input.phone_number ?? null,
+          JSON.stringify(input.kyc_data),
+          input.id,
+          input.account_id,
+        );
+      return result.changes === 1;
+    }
+
+    const response = await this.requirePostgres().query(
+      'UPDATE customers SET email_address = COALESCE($1, email_address), phone_number = COALESCE($2, phone_number), kyc_data = $3 WHERE id = $4 AND EXISTS (SELECT 1 FROM customer_accounts WHERE customer_id = customers.id AND account_id = $5) RETURNING id',
+      [
+        input.email_address ?? null,
+        input.phone_number ?? null,
+        input.kyc_data,
+        input.id,
+        input.account_id,
+      ],
+    );
+    return response.rowCount === 1;
+  }
+
   public async getIdempotencyRecord(
     scope: string,
     idempotencyKey: string,
