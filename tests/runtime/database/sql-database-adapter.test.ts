@@ -39,6 +39,21 @@ describe('SqlDatabaseAdapter (sqlite)', () => {
     }
   });
 
+  it('finalizes outstanding prepared statements before disconnect', async () => {
+    const database = (adapter as unknown as { sqlite: Database }).sqlite;
+    const statement = database.prepare('SELECT 1');
+    const finalize = statement.finalize.bind(statement);
+    let finalized = false;
+    statement.finalize = () => {
+      finalized = true;
+      finalize();
+    };
+
+    await adapter.disconnect();
+
+    expect(finalized).toBe(true);
+  });
+
   it('persists and consumes auth challenges correctly', async () => {
     await adapter.insertAuthChallenge({
       id: 'challenge-1',

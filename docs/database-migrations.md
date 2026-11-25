@@ -2,7 +2,7 @@
 
 `SqlDatabaseAdapter` applies code-defined, named migrations. There is no migration CLI, no filesystem SQL loader, and no `down` migration. `anchor.init()` calls `connect()` then `migrate()`, and `migrate()` skips names that are already recorded as applied.
 
-Core migrations run in declaration order, followed by plugin migrations in plugin registration order. The current core migrations are `core:001-initial-schema`, `core:002-idempotency-status`, and `core:003-current-runtime-tables`. The first two create/adopt the schema without dropping tables or replacing existing data; `core:003-current-runtime-tables` creates the current runtime tables with `IF NOT EXISTS`.
+Core migrations run in declaration order, followed by plugin migrations in plugin registration order. Current core migrations are `core:001-initial-schema`, `core:002-idempotency-status`, `core:003-current-runtime-tables`, `core:004-settlement-job-leases`, and `core:005-webhook-recovery-result`. The first two create or adopt the schema without dropping tables or replacing existing data. `core:003-current-runtime-tables` creates runtime tables with `IF NOT EXISTS`; `core:004-settlement-job-leases` adds lease fields to settlement jobs; `core:005-webhook-recovery-result` stores recovered webhook operations and marks unfinished legacy events for reconciliation.
 
 Plugins register append-only named migrations through `schema.migrations`:
 

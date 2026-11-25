@@ -456,17 +456,38 @@ function configureSqliteConnection(database: SqliteLike, path: string): void {
 
 function trackSqliteStatements(database: SqliteLike): () => void {
   const statements = new Set<WeakRef<SqliteStatement>>();
+  const finalizer = new FinalizationRegistry<WeakRef<SqliteStatement>>((reference) => {
+    statements.delete(reference);
+  });
   const trackedDatabase = database as unknown as { prepare(sql: string): SqliteStatement };
   const prepare = trackedDatabase.prepare.bind(trackedDatabase);
+  let preparationsSinceSweep = 0;
+
+  const pruneCollectedStatements = (): void => {
+    for (const reference of statements) {
+      if (!reference.deref()) {
+        statements.delete(reference);
+        finalizer.unregister(reference);
+      }
+    }
+  };
 
   trackedDatabase.prepare = (sql: string): SqliteStatement => {
     const statement = prepare(sql);
-    statements.add(new WeakRef(statement));
+    const reference = new WeakRef(statement);
+    statements.add(reference);
+    finalizer.register(statement, reference, reference);
+    preparationsSinceSweep += 1;
+    if (preparationsSinceSweep >= 128) {
+      pruneCollectedStatements();
+      preparationsSinceSweep = 0;
+    }
     return statement;
   };
 
   return () => {
     for (const reference of statements) {
+      finalizer.unregister(reference);
       const statement = reference.deref();
       if (!statement) {
         continue;
