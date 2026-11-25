@@ -113,6 +113,15 @@ function makeFakeDb(rejectOnIdempotency = false): {
     async updateTransactionStatus() {
       return true;
     },
+    async insertOrGetCustomer(): Promise<never> {
+      throw new Error('Unexpected customer database call');
+    },
+    async getCustomerByAccountId() {
+      return null;
+    },
+    async updateCustomer() {
+      return false;
+    },
     async getIdempotencyRecord() {
       return null;
     },
@@ -189,8 +198,26 @@ function makeFakeDb(rejectOnIdempotency = false): {
     async listPendingSettlementJobs() {
       return [];
     },
+    async listClaimableSettlementJobs() {
+      return [];
+    },
+    async claimSettlementJob() {
+      return null;
+    },
+    async heartbeatSettlementJob() {
+      return false;
+    },
+    async finishSettlementJob() {
+      return false;
+    },
     async updateSettlementJobStatus() {
       return false;
+    },
+    async recordReconciledRailPayment() {
+      throw new Error('Unexpected database call');
+    },
+    async confirmSettlement() {
+      throw new Error('Unexpected database call');
     },
     async cleanupOldRecords() {},
   };
@@ -205,6 +232,7 @@ function makeFakeDb(rejectOnIdempotency = false): {
 
 function makeContext(db: DatabaseAdapter): ExpressRouterContext {
   return {
+    isReady: () => false,
     config,
     database: db,
     webhookProcessor: {
@@ -223,6 +251,7 @@ function makeContext(db: DatabaseAdapter): ExpressRouterContext {
       auth_token: { windowMs: 60000, max: 1000 },
       webhook: { windowMs: 60000, max: 1000 },
       deposit: { windowMs: 60000, max: 1000 },
+      customer: { windowMs: 60000, max: 1000 },
     },
   };
 }

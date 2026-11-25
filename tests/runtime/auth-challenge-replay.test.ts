@@ -109,6 +109,18 @@ class ControllableFakeDatabaseAdapter implements DatabaseAdapter {
   async updateTransactionStatus(_id: string, _status: string): Promise<boolean> {
     return true;
   }
+
+  async insertOrGetCustomer(): Promise<never> {
+    throw new Error('Unexpected customer database call');
+  }
+
+  async getCustomerByAccountId() {
+    return null;
+  }
+
+  async updateCustomer(): Promise<boolean> {
+    return false;
+  }
   async getIdempotencyRecord(): Promise<null> {
     return null;
   }
@@ -150,8 +162,26 @@ class ControllableFakeDatabaseAdapter implements DatabaseAdapter {
   async listPendingSettlementJobs(): Promise<never[]> {
     return [];
   }
+  async listClaimableSettlementJobs() {
+    return [];
+  }
+  async claimSettlementJob() {
+    return null;
+  }
+  async heartbeatSettlementJob() {
+    return false;
+  }
+  async finishSettlementJob() {
+    return false;
+  }
   async updateSettlementJobStatus(): Promise<boolean> {
     return false;
+  }
+  async recordReconciledRailPayment(): Promise<never> {
+    throw new Error('Unexpected database call');
+  }
+  async confirmSettlement(): Promise<never> {
+    throw new Error('Unexpected database call');
   }
   async cleanupOldRecords(): Promise<void> {}
 }
@@ -191,6 +221,7 @@ function makeTestContext(
   return {
     config,
     database: dbAdapter,
+    isReady: () => false,
     webhookProcessor: new DefaultWebhookProcessor({
       config: config.getConfig(),
       database: dbAdapter,
@@ -201,6 +232,7 @@ function makeTestContext(
       auth_token: { windowMs: 60000, max: 1000 },
       webhook: { windowMs: 60000, max: 1000 },
       deposit: { windowMs: 60000, max: 1000 },
+      customer: { windowMs: 60000, max: 1000 },
     },
     sep10ServerKeypair: serverKeypair,
     networkPassphrase: Networks.TESTNET,

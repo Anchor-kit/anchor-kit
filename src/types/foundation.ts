@@ -58,6 +58,8 @@ export interface KycData {
   // Government ID / document references
   id_number?: string;
   id_type?: string;
+  /** Additional configured SEP-9 fields stored without exposing their values in API responses. */
+  additional_fields?: Record<string, string>;
   documents?: IdentityDocument[];
 
   // Timestamps
