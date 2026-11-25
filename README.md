@@ -204,6 +204,8 @@ const databaseUrl = makeSqliteDbUrlForTests();
 
 Run `bun test tests/runtime/atomic-idempotency-concurrency.test.ts` to check PostgreSQL concurrency. It skips five PostgreSQL cases when both `TEST_POSTGRES_URL` and `DATABASE_URL` are unset. CI and `REQUIRE_POSTGRES_TESTS` require a working PostgreSQL connection.
 
+Run `bun test tests/runtime/postgres-migration-lock.integration.test.ts` to check that two independent connections can migrate the same disposable PostgreSQL database without duplicate migration records or partial schema changes, and that a failed migration can be retried. Like the other PostgreSQL integration suites, it skips when neither `TEST_POSTGRES_URL` nor `DATABASE_URL` is set.
+
 Run `bun test tests/core/plugin-lifecycle.test.ts` to check reverse-order cleanup during shutdown and initialization rollback. The tests also check that cleanup failures do not prevent database disconnect.
 
 ### Custom database adapters
