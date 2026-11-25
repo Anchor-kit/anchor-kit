@@ -480,9 +480,9 @@ describe('InMemoryQueueAdapter', () => {
         processQueueJob: (job: unknown) => Promise<void>;
       }
     ).processQueueJob.bind(anchor);
-    await expect(
-      processQueueJob({ type: 'expire_transaction', payload: {} }),
-    ).resolves.toBeUndefined();
+    await expect(processQueueJob({ type: 'expire_transaction', payload: {} })).rejects.toThrow(
+      /Malformed expire_transaction job/,
+    );
     await expect(
       processQueueJob({
         type: 'unknown_job',
@@ -501,6 +501,7 @@ describe('InMemoryQueueAdapter', () => {
     });
     const queue = new InMemoryQueueAdapter({
       concurrency: 1,
+      retry: { maxAttempts: 1 },
       onError: (job, error) => {
         failures.push({ job, error });
       },
@@ -604,6 +605,7 @@ describe('InMemoryQueueAdapter', () => {
     });
     const queue = new InMemoryQueueAdapter({
       concurrency: 1,
+      retry: { maxAttempts: 1 },
       onError: (job, error) => {
         failures.push({ job, error });
       },
