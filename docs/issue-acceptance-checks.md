@@ -1,5 +1,13 @@
 # Focused issue acceptance checks
 
+For signed settlement identity, run:
+
+```sh
+bun test tests/services/settlement-identity.test.ts
+```
+
+Expected result: 2 tests pass. Hashing uses the supplied network passphrase and rejects unsigned or malformed envelopes. Signature verification and protected persistence are separate requirements.
+
 For the example deposit placeholder, run:
 
 ```sh
