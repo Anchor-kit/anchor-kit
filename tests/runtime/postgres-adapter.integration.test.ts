@@ -33,12 +33,160 @@ postgresTest('SqlDatabaseAdapter – PostgreSQL integration', () => {
       amount: '25.00',
       status: 'pending_user_transfer_start',
     });
-
     expect(inserted.id).toBe(id);
     expect(await db.getInteractiveTransactionById(id)).toMatchObject({
       id,
       kind: 'deposit',
       status: 'pending_user_transfer_start',
+    });
+  });
+
+  it('persists, revokes, and atomically consumes interactive session actions', async () => {
+    const transactionId = randomUUID();
+    await db.insertInteractiveTransaction({
+      id: transactionId,
+      account: 'GTEST1234',
+      kind: 'deposit',
+      assetCode: 'USDC',
+      amount: '1.00',
+      status: 'incomplete',
+    });
+    const id = randomUUID();
+    const session = await db.insertInteractiveSession({
+      id,
+      account: 'GTEST1234',
+      transactionId,
+      actions: ['view', 'complete'],
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    });
+    expect(session.consumedActions).toEqual([]);
+    await expect(db.getInteractiveSessionById(id)).resolves.toMatchObject({
+      id,
+      account: 'GTEST1234',
+      transactionId,
+      actions: ['view', 'complete'],
+      consumedActions: [],
+      revokedAt: null,
+    });
+
+    const consumption = await Promise.all(
+      Array.from({ length: 5 }, () => db.consumeInteractiveSessionAction(id, 'complete')),
+    );
+    expect(consumption.filter(Boolean)).toHaveLength(1);
+    await expect(db.getInteractiveSessionById(id)).resolves.toMatchObject({
+      consumedActions: ['complete'],
+    });
+    await expect(db.revokeInteractiveSession(id)).resolves.toBe(true);
+    await expect(db.revokeInteractiveSession(id)).resolves.toBe(false);
+    await expect(db.consumeInteractiveSessionAction(id, 'view')).resolves.toBe(false);
+  });
+
+  it('completes a matching Stellar settlement once under concurrent replay', async () => {
+    const transactionId = randomUUID();
+    const transactionHash = 'c'.repeat(64);
+    await db.insertInteractiveTransaction({
+      id: transactionId,
+      account: 'GTEST1234',
+      kind: 'deposit',
+      assetCode: 'USDC',
+      amount: '25.00',
+      amountOut: '22.50',
+      status: 'pending_stellar',
+    });
+    const results = await Promise.all(
+      Array.from({ length: 4 }, () =>
+        db.confirmSettlement({
+          transactionId,
+          transactionHash,
+          amount: '22.5',
+          recipient: 'GTEST1234',
+        }),
+      ),
+    );
+    expect(results.filter((result) => result.outcome === 'completed')).toHaveLength(1);
+    expect(results.filter((result) => result.outcome === 'replayed')).toHaveLength(3);
+    await expect(db.getInteractiveTransactionById(transactionId)).resolves.toMatchObject({
+      status: 'completed',
+      stellarTransactionHash: transactionHash,
+    });
+  });
+
+  it('atomically advances a reconciled rail payment and replays its durable job', async () => {
+    const transactionId = randomUUID();
+    const operationId = `rail-op-${randomUUID()}`;
+    const existingOperationId = `existing-op-${randomUUID()}`;
+    const duplicateJobId = randomUUID();
+    await db.insertOrGetSettlementJob({
+      id: duplicateJobId,
+      operationId: existingOperationId,
+      payloadRef: 'transaction:already-recorded',
+    });
+    await db.insertInteractiveTransaction({
+      id: transactionId,
+      account: 'GTEST1234',
+      kind: 'deposit',
+      assetCode: 'USDC',
+      amount: '25.00',
+      status: 'pending_external',
+    });
+    await expect(
+      db.recordReconciledRailPayment({ transactionId, operationId, jobId: duplicateJobId }),
+    ).rejects.toThrow();
+    await expect(db.getInteractiveTransactionById(transactionId)).resolves.toMatchObject({
+      status: 'pending_external',
+    });
+    await expect(db.getSettlementJobByOperationId(operationId)).resolves.toBeNull();
+
+    const results = await Promise.all(
+      Array.from({ length: 6 }, () =>
+        db.recordReconciledRailPayment({ transactionId, operationId, jobId: randomUUID() }),
+      ),
+    );
+    const enqueued = results.filter((result) => result.outcome === 'enqueued');
+    const replays = results.filter((result) => result.outcome === 'replayed');
+    expect(enqueued).toHaveLength(1);
+    expect(replays).toHaveLength(5);
+    const [first] = enqueued;
+    if (!first || first.outcome !== 'enqueued') {
+      throw new Error('Concurrent reconciled rail payment did not create exactly one job');
+    }
+    expect(first).toMatchObject({
+      transaction: { id: transactionId, status: 'pending_stellar' },
+      job: { operationId, status: 'pending' },
+    });
+    expect(
+      new Set(results.map((result) => (result.outcome === 'conflict' ? null : result.job.id))),
+    ).toHaveProperty('size', 1);
+    await expect(db.getSettlementJobByOperationId(operationId)).resolves.toMatchObject({
+      id: first.job.id,
+      operationId,
+      payloadRef: `transaction:${transactionId}`,
+    });
+  });
+
+  it('updates customer KYC data only through its associated account', async () => {
+    const id = `customer-${randomUUID()}`;
+    const accountId = `G${randomUUID().replaceAll('-', '').toUpperCase()}`;
+    await db.insertOrGetCustomer({ id, account_id: accountId, kyc_data: { status: 'pending' } });
+    expect(
+      await db.updateCustomer({
+        id,
+        account_id: 'GOTHERACCOUNT',
+        kyc_data: { status: 'approved', first_name: 'Ada' },
+      }),
+    ).toBe(false);
+    expect(
+      await db.updateCustomer({
+        id,
+        account_id: accountId,
+        email_address: 'ada@example.com',
+        kyc_data: { status: 'approved', first_name: 'Ada' },
+      }),
+    ).toBe(true);
+    expect(await db.getCustomerByAccountId(accountId)).toMatchObject({
+      account_id: accountId,
+      email_address: 'ada@example.com',
+      kyc_data: { status: 'approved', first_name: 'Ada' },
     });
   });
 
@@ -54,9 +202,39 @@ postgresTest('SqlDatabaseAdapter – PostgreSQL integration', () => {
         }),
       ),
     );
-
     expect(results.filter(({ inserted }) => inserted)).toHaveLength(1);
     expect(new Set(results.map(({ record }) => record.id)).size).toBe(1);
     expect(results.every(({ record }) => record.eventId === eventId)).toBe(true);
+  });
+
+  it('persists and transitions refund operations linked to a transaction', async () => {
+    const transactionId = randomUUID();
+    const operationId = randomUUID();
+    await db.insertInteractiveTransaction({
+      id: transactionId,
+      account: 'GTEST1234',
+      kind: 'deposit',
+      assetCode: 'USDC',
+      amount: '25.00',
+      status: 'completed',
+    });
+    await db.insertRefundOperation!({
+      operationId,
+      transactionId,
+      paymentId: 'refund-payment',
+      paymentIdType: 'external',
+      amount: '2.50',
+      fee: '0.05',
+      status: 'pending',
+    });
+    const results = await Promise.all([
+      db.finishRefundOperation!(operationId, 'completed'),
+      db.finishRefundOperation!(operationId, 'completed'),
+    ]);
+    expect(results.filter(Boolean)).toHaveLength(1);
+    expect(await db.finishRefundOperation!(operationId, 'failed')).toBe(false);
+    expect(await db.listRefundOperations!(transactionId)).toMatchObject([
+      { operationId, transactionId, amount: '2.50', fee: '0.05', status: 'completed' },
+    ]);
   });
 });

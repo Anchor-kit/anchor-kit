@@ -8,13 +8,18 @@ import { AnchorExpressRouter, type ExpressLikeMiddleware } from '../runtime/http
 import { validatePluginRoutes } from '../runtime/http/express-router-impl.ts';
 import type {
   DatabaseAdapter,
+  AccountLookupProvider,
   InteractiveTransactionRecord,
+  PaymentRailAdapter,
+  KycVerificationProvider,
   QueueAdapter,
   QueueDrainStatus,
+  QueueJobFailure,
+  Sep10AccountLookup,
   Watcher,
   WebhookProcessor,
 } from '@/runtime/interfaces.ts';
-import { InMemoryQueueAdapter } from '@/runtime/queue/in-memory-queue.ts';
+import { InMemoryQueueAdapter, PermanentJobError } from '@/runtime/queue/in-memory-queue.ts';
 import { TransactionWatcher } from '@/runtime/watchers/transaction-watcher.ts';
 import { DefaultWebhookProcessor } from '@/runtime/webhooks/default-webhook-processor.ts';
 import type { SchemaMigration } from '@/types/foundation.ts';
@@ -27,6 +32,19 @@ export interface CreateAnchorOptions {
    * disconnect during shutdown; do not share it with another active instance.
    */
   databaseAdapter?: DatabaseAdapter;
+  paymentRailAdapters?: readonly PaymentRailAdapter[];
+  /** KYC provider used by authenticated SEP-12 customer submissions. */
+  kycVerificationProvider?: KycVerificationProvider;
+
+  /**
+   * Injectable SEP-10 client account lookup used to verify challenge
+   * signatures. Resolve `null` for accounts that do not exist on the network and
+   * throw for upstream failures. Without a lookup, the router keeps its legacy
+   * single-key account-signature check.
+   */
+  sep10AccountLookup?: Sep10AccountLookup;
+  /** Typed SEP-10 account lookup with explicit not-found and upstream outcomes. */
+  accountLookup?: AccountLookupProvider;
 }
 
 /**
@@ -40,6 +58,10 @@ export class AnchorInstance {
 
   private database: DatabaseAdapter | null = null;
   private readonly injectedDatabaseAdapter?: DatabaseAdapter;
+  private readonly paymentRailAdapters?: readonly PaymentRailAdapter[];
+  private readonly kycVerificationProvider?: KycVerificationProvider;
+  private readonly injectedSep10AccountLookup?: Sep10AccountLookup;
+  private readonly injectedAccountLookup?: AccountLookupProvider;
   private queue: QueueAdapter | null = null;
   private webhookProcessor: WebhookProcessor | null = null;
   private watchers: Watcher[] = [];
@@ -56,6 +78,10 @@ export class AnchorInstance {
     this.config = new AnchorConfig(config);
     this.config.validate();
     this.injectedDatabaseAdapter = options.databaseAdapter;
+    this.paymentRailAdapters = options.paymentRailAdapters;
+    this.kycVerificationProvider = options.kycVerificationProvider;
+    this.injectedSep10AccountLookup = options.sep10AccountLookup;
+    this.injectedAccountLookup = options.accountLookup;
   }
 
   /**
@@ -109,12 +135,16 @@ export class AnchorInstance {
         this.queue = new InMemoryQueueAdapter({
           concurrency: queueConcurrency,
           maxPendingJobs: frameworkConfig.queue?.maxPendingJobs,
+          retry: frameworkConfig.queue?.retry,
+          classifyError: frameworkConfig.queue?.classifyError,
           onError: frameworkConfig.queue?.onError,
+          onFailedJob: frameworkConfig.queue?.onFailedJob,
         });
 
         this.webhookProcessor = new DefaultWebhookProcessor({
           config: this.config.getConfig(),
           database: this.database,
+          paymentRailAdapters: this.paymentRailAdapters,
         });
 
         const watchersEnabled = frameworkConfig.watchers?.enabled ?? true;
@@ -144,9 +174,21 @@ export class AnchorInstance {
           config: this.config,
           database: this.database,
           webhookProcessor: this.webhookProcessor,
+          kycVerificationProvider: this.kycVerificationProvider,
           depositRequestHooks,
           sep10ChallengeHooks,
+          sep10AccountLookup: this.injectedSep10AccountLookup,
+          accountLookup: this.injectedAccountLookup,
           pluginRoutes,
+          isReady: () =>
+            this.initialized &&
+            !this.initPromise &&
+            !this.shutdownPromise &&
+            !this.backgroundJobsPromise &&
+            !this.backgroundJobsStopPromise &&
+            this.backgroundJobsRunning &&
+            this.queue?.isRunning === true &&
+            this.watchers.every((watcher) => watcher.isRunning === true),
         }).getMiddleware();
 
         this.initialized = true;
@@ -254,6 +296,29 @@ export class AnchorInstance {
   /** Return pending and active queue counts without exposing job payloads. */
   public getQueueStatus(): QueueDrainStatus {
     return this.queue?.status ?? { pending: 0, active: 0 };
+  }
+
+  /**
+   * Return permanent or attempt-exhausted queue work for operator review.
+   *
+   * Terminal failures are never reported as success: a job that fails permanently or
+   * exhausts its bounded retries is recorded here and passed to
+   * `framework.queue.onFailedJob`, if configured.
+   */
+  public getFailedQueueJobs(): readonly QueueJobFailure[] {
+    return this.queue?.listFailedJobs?.() ?? [];
+  }
+
+  /**
+   * Re-enqueue a failed job with a fresh attempt budget after operator review.
+   * Returns false when the id is unknown or the active queue does not retain failures.
+   */
+  public async requeueFailedQueueJob(id: string): Promise<boolean> {
+    const queue = this.requireQueue();
+    if (!queue.requeueFailedJob) {
+      throw new ConfigError('Queue adapter does not support failed-job requeue');
+    }
+    return queue.requeueFailedJob(id);
   }
 
   /**
@@ -429,16 +494,16 @@ export class AnchorInstance {
       !('type' in input) ||
       !('payload' in input)
     ) {
-      return;
+      throw new PermanentJobError('Malformed queue job: expected an object with type and payload');
     }
 
     const job = input as { type: unknown; payload: unknown };
     if (typeof job.type !== 'string') {
-      return;
+      throw new PermanentJobError('Malformed queue job: type must be a string');
     }
 
     if (typeof job.payload !== 'object' || job.payload === null || Array.isArray(job.payload)) {
-      return;
+      throw new PermanentJobError('Malformed queue job: payload must be an object');
     }
 
     const payload = job.payload as Record<string, unknown>;
@@ -446,7 +511,9 @@ export class AnchorInstance {
     if (job.type === 'expire_transaction') {
       const transactionIdValue = payload.transactionId;
       if (typeof transactionIdValue !== 'string' || transactionIdValue.length === 0) {
-        return;
+        throw new PermanentJobError(
+          'Malformed expire_transaction job: payload.transactionId must be a non-empty string',
+        );
       }
 
       const transaction = await database.getInteractiveTransactionById(transactionIdValue);
@@ -472,7 +539,9 @@ export class AnchorInstance {
     if (job.type === 'process_watcher_task') {
       const watcherTaskIdValue = payload.watcherTaskId;
       if (typeof watcherTaskIdValue !== 'string' || watcherTaskIdValue.length === 0) {
-        return;
+        throw new PermanentJobError(
+          'Malformed process_watcher_task job: payload.watcherTaskId must be a non-empty string',
+        );
       }
 
       await database.updateWatcherTaskStatus({
@@ -485,7 +554,9 @@ export class AnchorInstance {
     if (job.type === 'cleanup_records') {
       const retentionDaysValue = payload.retentionDays;
       if (typeof retentionDaysValue !== 'number' || !Number.isFinite(retentionDaysValue)) {
-        return;
+        throw new PermanentJobError(
+          'Malformed cleanup_records job: payload.retentionDays must be a finite number',
+        );
       }
 
       const cutoffMs = Date.now() - retentionDaysValue * 24 * 60 * 60 * 1000;
@@ -494,7 +565,7 @@ export class AnchorInstance {
       return;
     }
 
-    throw new Error(`Unknown queue job type: ${String(job.type)}`);
+    throw new PermanentJobError(`Unknown queue job type: ${String(job.type)}`);
   }
 
   private async notifyTransactionStatusChange(
@@ -509,8 +580,9 @@ export class AnchorInstance {
       try {
         await hook(transaction, oldStatus, newStatus);
       } catch (error) {
-        // The in-memory queue is best-effort and drops failed jobs without retry.
-        // Log hook failures and continue so one plugin cannot block other hooks.
+        // Plugin hook failures must not block other hooks or fail an already-persisted
+        // transaction transition. The queue retry policy does not cover this side effect,
+        // so log it for operator review instead of silently discarding it.
         console.error(`[AnchorKit] Plugin "${plugin.id}" transaction status hook failed`, error);
       }
     }

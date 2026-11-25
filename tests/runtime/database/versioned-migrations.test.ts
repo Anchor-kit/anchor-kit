@@ -110,7 +110,20 @@ describe('versioned database migrations', () => {
         { name: 'core:001-initial-schema' },
         { name: 'core:002-idempotency-status' },
         { name: 'core:003-current-runtime-tables' },
+        { name: 'core:004-settlement-job-leases' },
+        { name: 'core:005-webhook-recovery-result' },
+        { name: 'core:006-refund-operations' },
+        { name: 'core:007-stellar-sequence-leases' },
+        { name: 'core:008-stellar-sequence-operations' },
+        { name: 'core:009-interactive-sessions' },
       ]);
+      expect(
+        database
+          .prepare(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'interactive_sessions'",
+          )
+          .get(),
+      ).toEqual({ name: 'interactive_sessions' });
     } finally {
       await adapter.disconnect();
       removeSqliteFile(path);

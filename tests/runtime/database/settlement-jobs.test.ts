@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { unlinkSync } from 'node:fs';
+import { Database } from 'bun:sqlite';
 import {
   makeSqliteDbUrlForTests,
   SqlDatabaseAdapter,
@@ -57,7 +58,7 @@ describe('durable settlement job records', () => {
     await expect(adapter.listPendingSettlementJobs(10)).resolves.toHaveLength(1);
     await expect(
       adapter.updateSettlementJobStatus({ operationId: 'settlement-1', status: 'processing' }),
-    ).resolves.toBe(true);
+    ).rejects.toThrow('require a lease token');
   });
 
   it('rejects reuse of an operation identity with a different payload reference', async () => {
@@ -79,5 +80,180 @@ describe('durable settlement job records', () => {
         payloadRef: 'transaction:tx-2',
       }),
     ).rejects.toThrow('different payload reference');
+  });
+
+  it('completes only a matching confirmed amount, recipient, and hash and replays once', async () => {
+    const url = makeSqliteDbUrlForTests();
+    dbPath = url.slice('file:'.length);
+    adapter = new SqlDatabaseAdapter({ provider: 'sqlite', url });
+    await adapter.connect();
+    await adapter.migrate();
+    const transactionId = 'confirmed-settlement-tx';
+    const transactionHash = 'a'.repeat(64);
+    await adapter.insertInteractiveTransaction({
+      id: transactionId,
+      account: 'GTEST1234',
+      kind: 'deposit',
+      assetCode: 'USDC',
+      amount: '25.00',
+      amountOut: '22.50',
+      status: 'pending_stellar',
+    });
+
+    const first = await adapter.confirmSettlement({
+      transactionId,
+      transactionHash,
+      amount: '22.5000000',
+      recipient: 'GTEST1234',
+    });
+    const replay = await adapter.confirmSettlement({
+      transactionId,
+      transactionHash: transactionHash.toUpperCase(),
+      amount: '22.5',
+      recipient: 'GTEST1234',
+    });
+    expect(first).toMatchObject({
+      outcome: 'completed',
+      transaction: {
+        id: transactionId,
+        status: 'completed',
+        stellarTransactionHash: transactionHash,
+      },
+    });
+    expect(replay).toMatchObject({
+      outcome: 'replayed',
+      transaction: {
+        id: transactionId,
+        status: 'completed',
+        stellarTransactionHash: transactionHash,
+      },
+    });
+  });
+
+  it('leaves a settlement pending when the confirmed amount or recipient differs', async () => {
+    const url = makeSqliteDbUrlForTests();
+    dbPath = url.slice('file:'.length);
+    adapter = new SqlDatabaseAdapter({ provider: 'sqlite', url });
+    await adapter.connect();
+    await adapter.migrate();
+    const transactionId = 'mismatched-settlement-tx';
+    await adapter.insertInteractiveTransaction({
+      id: transactionId,
+      account: 'GTEST1234',
+      kind: 'deposit',
+      assetCode: 'USDC',
+      amount: '25.00',
+      status: 'pending_stellar',
+    });
+
+    await expect(
+      adapter.confirmSettlement({
+        transactionId,
+        transactionHash: 'b'.repeat(64),
+        amount: '24.99',
+        recipient: 'GTEST1234',
+      }),
+    ).resolves.toMatchObject({ outcome: 'conflict', reason: 'confirmation_mismatch' });
+    await expect(
+      adapter.confirmSettlement({
+        transactionId,
+        transactionHash: 'b'.repeat(64),
+        amount: '25.00',
+        recipient: 'GOTHER1234',
+      }),
+    ).resolves.toMatchObject({ outcome: 'conflict', reason: 'confirmation_mismatch' });
+    await expect(adapter.getInteractiveTransactionById(transactionId)).resolves.toMatchObject({
+      status: 'pending_stellar',
+      stellarTransactionHash: null,
+    });
+  });
+
+  it('commits a reconciled rail transition and settlement job together and replays once', async () => {
+    const url = makeSqliteDbUrlForTests();
+    dbPath = url.slice('file:'.length);
+    adapter = new SqlDatabaseAdapter({ provider: 'sqlite', url });
+    await adapter.connect();
+    await adapter.migrate();
+    const transactionId = 'rail-payment-tx';
+    await adapter.insertInteractiveTransaction({
+      id: transactionId,
+      account: 'GTEST1234',
+      kind: 'deposit',
+      assetCode: 'USDC',
+      amount: '25.00',
+      railReference: 'rail-reference-1',
+      status: 'pending_external',
+    });
+
+    const failingConnection = new Database(dbPath);
+    failingConnection.exec(`
+      CREATE TRIGGER reject_settlement_job
+      BEFORE INSERT ON settlement_jobs
+      BEGIN
+        SELECT RAISE(ABORT, 'simulated crash before settlement job insert');
+      END;
+    `);
+    try {
+      await expect(
+        adapter.recordReconciledRailPayment({
+          transactionId,
+          operationId: 'rail-operation-1',
+          jobId: 'rail-job-1',
+        }),
+      ).rejects.toThrow('simulated crash before settlement job insert');
+      await expect(adapter.getInteractiveTransactionById(transactionId)).resolves.toMatchObject({
+        status: 'pending_external',
+      });
+      await expect(adapter.getSettlementJobByOperationId('rail-operation-1')).resolves.toBeNull();
+    } finally {
+      failingConnection.exec('DROP TRIGGER reject_settlement_job');
+      failingConnection.close();
+    }
+
+    const first = await adapter.recordReconciledRailPayment({
+      transactionId,
+      operationId: 'rail-operation-1',
+      jobId: 'rail-job-1',
+    });
+    const replay = await adapter.recordReconciledRailPayment({
+      transactionId,
+      operationId: 'rail-operation-1',
+      jobId: 'a-different-retry-id',
+    });
+    expect(first).toMatchObject({
+      outcome: 'enqueued',
+      transaction: { id: transactionId, status: 'pending_stellar' },
+      job: { id: 'rail-job-1', operationId: 'rail-operation-1', status: 'pending' },
+    });
+    expect(replay).toMatchObject({
+      outcome: 'replayed',
+      transaction: { id: transactionId, status: 'pending_stellar' },
+      job: { id: 'rail-job-1', operationId: 'rail-operation-1', status: 'pending' },
+    });
+    await expect(adapter.listPendingSettlementJobs(10)).resolves.toHaveLength(1);
+  });
+
+  it('does not create a settlement job from a transaction outside the reconciled state', async () => {
+    const url = makeSqliteDbUrlForTests();
+    dbPath = url.slice('file:'.length);
+    adapter = new SqlDatabaseAdapter({ provider: 'sqlite', url });
+    await adapter.connect();
+    await adapter.migrate();
+    await adapter.insertInteractiveTransaction({
+      id: 'not-reconciled-tx',
+      account: 'GTEST1234',
+      kind: 'deposit',
+      assetCode: 'USDC',
+      amount: '25.00',
+      status: 'pending_user_transfer_start',
+    });
+    await expect(
+      adapter.recordReconciledRailPayment({
+        transactionId: 'not-reconciled-tx',
+        operationId: 'unexpected-operation',
+        jobId: 'unexpected-job',
+      }),
+    ).resolves.toMatchObject({ outcome: 'conflict', reason: 'status_mismatch' });
+    await expect(adapter.getSettlementJobByOperationId('unexpected-operation')).resolves.toBeNull();
   });
 });

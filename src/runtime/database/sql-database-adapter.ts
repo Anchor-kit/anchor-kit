@@ -1,16 +1,28 @@
-import { ConfigError, MalformedPersistedDataError } from '../../core/errors.ts';
+import { validateTransactionHistory } from './transaction-history.ts';
+import { ConfigError, MalformedPersistedDataError, ValidationError } from '../../core/errors.ts';
 import type {
   AuthChallengeRecord,
+  ConfirmSettlementResult,
   DatabaseAdapter,
   IdempotencyRecord,
+  InteractiveSessionRecord,
   InteractiveTransactionRecord,
+  InteractiveTransactionIdentifier,
+  TransactionHistoryQuery,
+  ReconciledRailPaymentResult,
+  RefundRecord,
   TransactionTransitionResult,
   SettlementJobRecord,
+  SettlementJobLease,
+  StellarSequenceLease,
   WatcherTaskRecord,
   WebhookEventRecord,
 } from '@/runtime/interfaces.ts';
+import type { PaymentRailOperation } from '@/types/transaction.ts';
+import { parseRecoveredOperation } from '@/runtime/webhooks/recovery-result.ts';
 import type { Customer } from '@/types/customer.ts';
 import { getAllowedNextTransactionStatuses } from '@/types/transaction-status.ts';
+import Big from 'big.js';
 import type { FrameworkConfig } from '@/types/config.ts';
 import type { SchemaMigration, SchemaMigrationContext } from '@/types/foundation.ts';
 import { isTransactionStatus, type TransactionStatus } from '@/types/transaction-status.ts';
@@ -18,8 +30,10 @@ import type { Database } from 'bun:sqlite';
 import { randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
+import { serializeRefunds } from '@/services/refund-serialization.ts';
 
 type SqliteLike = Database;
+type SqliteStatement = ReturnType<SqliteLike['prepare']>;
 
 interface PostgresClient {
   connect(): Promise<void>;
@@ -89,7 +103,8 @@ export const SQLITE_JOURNAL_MODE = 'WAL';
 export const SQLITE_BUSY_TIMEOUT_MS = 5000;
 
 /**
- * Indexes supporting watcher polling and retention cleanup.
+ * Indexes supporting watcher polling, retention cleanup, and interactive
+ * session lookups.
  *
  * Watcher polling filters `watcher_tasks` by `status` and orders by
  * `created_at`, while retention deletes rows by `created_at` combined with a
@@ -97,6 +112,10 @@ export const SQLITE_BUSY_TIMEOUT_MS = 5000;
  * are pruned by `expires_at`, and idempotency keys by `created_at`. Each index
  * is created with `IF NOT EXISTS` so migrations stay repeatable on both fresh
  * and already-migrated databases.
+ *
+ * Interactive sessions are loaded by id on every gated request, and are also
+ * looked up by transaction when a hosted flow is resumed, so both columns are
+ * indexed.
  */
 export const SQLITE_INDEX_STATEMENTS: readonly string[] = [
   'CREATE INDEX IF NOT EXISTS idx_watcher_tasks_status_created_at ON watcher_tasks (status, created_at)',
@@ -105,6 +124,8 @@ export const SQLITE_INDEX_STATEMENTS: readonly string[] = [
   'CREATE INDEX IF NOT EXISTS idx_auth_challenges_expires_at ON auth_challenges (expires_at)',
   'CREATE INDEX IF NOT EXISTS idx_idempotency_keys_created_at ON idempotency_keys (created_at)',
   'CREATE INDEX IF NOT EXISTS idx_settlement_jobs_status_created_at ON settlement_jobs (status, created_at)',
+  'CREATE INDEX IF NOT EXISTS idx_interactive_sessions_transaction_id ON interactive_sessions (transaction_id)',
+  'CREATE INDEX IF NOT EXISTS idx_interactive_sessions_expires_at ON interactive_sessions (expires_at)',
 ];
 
 export const POSTGRES_INDEX_STATEMENTS: readonly string[] = [
@@ -114,6 +135,8 @@ export const POSTGRES_INDEX_STATEMENTS: readonly string[] = [
   'CREATE INDEX IF NOT EXISTS idx_auth_challenges_expires_at ON auth_challenges (expires_at)',
   'CREATE INDEX IF NOT EXISTS idx_idempotency_keys_created_at ON idempotency_keys (created_at)',
   'CREATE INDEX IF NOT EXISTS idx_settlement_jobs_status_created_at ON settlement_jobs (status, created_at)',
+  'CREATE INDEX IF NOT EXISTS idx_interactive_sessions_transaction_id ON interactive_sessions (transaction_id)',
+  'CREATE INDEX IF NOT EXISTS idx_interactive_sessions_expires_at ON interactive_sessions (expires_at)',
 ];
 
 const CORE_MIGRATIONS: readonly SchemaMigration[] = [
@@ -202,6 +225,16 @@ const CORE_MIGRATIONS: readonly SchemaMigration[] = [
               created_at TEXT NOT NULL,
               updated_at TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS interactive_sessions (
+              id TEXT PRIMARY KEY,
+              account TEXT NOT NULL,
+              transaction_id TEXT NOT NULL REFERENCES interactive_transactions(id),
+              actions TEXT NOT NULL,
+              consumed_actions TEXT NOT NULL DEFAULT '[]',
+              expires_at TEXT NOT NULL,
+              revoked_at TEXT,
+              created_at TEXT NOT NULL
+            );
           `
           : `
             CREATE TABLE IF NOT EXISTS auth_challenges (
@@ -283,6 +316,16 @@ const CORE_MIGRATIONS: readonly SchemaMigration[] = [
               created_at TIMESTAMPTZ NOT NULL,
               updated_at TIMESTAMPTZ NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS interactive_sessions (
+              id TEXT PRIMARY KEY,
+              account TEXT NOT NULL,
+              transaction_id TEXT NOT NULL REFERENCES interactive_transactions(id),
+              actions JSONB NOT NULL,
+              consumed_actions JSONB NOT NULL DEFAULT '[]'::jsonb,
+              expires_at TIMESTAMPTZ NOT NULL,
+              revoked_at TIMESTAMPTZ,
+              created_at TIMESTAMPTZ NOT NULL
+            );
           `,
       );
 
@@ -352,6 +395,164 @@ const CORE_MIGRATIONS: readonly SchemaMigration[] = [
               updated_at TIMESTAMPTZ NOT NULL
             );
           `,
+      );
+    },
+  },
+  {
+    name: 'core:004-settlement-job-leases',
+    async up({ dialect, execute, hasColumn }) {
+      const columns = [
+        ['lease_owner', 'TEXT'],
+        ['lease_token', 'TEXT'],
+        ['lease_expires_at', dialect === 'sqlite' ? 'TEXT' : 'TIMESTAMPTZ'],
+        ['lease_attempt', 'INTEGER NOT NULL DEFAULT 0'],
+      ] as const;
+      for (const [name, type] of columns) {
+        if (!(await hasColumn('settlement_jobs', name))) {
+          await execute(`ALTER TABLE settlement_jobs ADD COLUMN ${name} ${type}`);
+        }
+      }
+    },
+  },
+  {
+    name: 'core:005-webhook-recovery-result',
+    async up({ dialect, execute, hasColumn }) {
+      if (!(await hasColumn('webhook_events', 'recovery_result'))) {
+        await execute(
+          `ALTER TABLE webhook_events ADD COLUMN recovery_result ${dialect === 'sqlite' ? 'TEXT' : 'JSONB'}`,
+        );
+      }
+      // Existing unfinished events may already have caused an external effect.
+      await execute(
+        "UPDATE webhook_events SET attempt_number = 1 WHERE attempt_number = 0 AND status IN ('pending', 'failed', 'unresolved')",
+      );
+    },
+  },
+  {
+    name: 'core:006-refund-operations',
+    async up({ execute }) {
+      await execute(`CREATE TABLE IF NOT EXISTS refund_operations (
+        operation_id TEXT PRIMARY KEY,
+        transaction_id TEXT NOT NULL REFERENCES interactive_transactions(id),
+        payment_id TEXT NOT NULL,
+        payment_id_type TEXT NOT NULL CHECK (payment_id_type IN ('stellar', 'external')),
+        amount TEXT NOT NULL,
+        fee TEXT NOT NULL,
+        status TEXT NOT NULL CHECK (status IN ('pending', 'completed', 'failed'))
+      )`);
+      await execute(
+        'CREATE INDEX IF NOT EXISTS idx_refund_operations_transaction ON refund_operations (transaction_id)',
+      );
+    },
+  },
+  {
+    name: 'core:007-stellar-sequence-leases',
+    async up({ dialect, execute }) {
+      await execute(
+        dialect === 'sqlite'
+          ? `CREATE TABLE IF NOT EXISTS stellar_sequence_leases (
+              account_id TEXT PRIMARY KEY,
+              last_sequence INTEGER NOT NULL CHECK (last_sequence > 0),
+              operation_id TEXT,
+              payload_hash TEXT,
+              lease_owner TEXT,
+              lease_token TEXT,
+              lease_expires_at TEXT,
+              lease_attempt INTEGER NOT NULL DEFAULT 0,
+              CHECK ((operation_id IS NULL AND payload_hash IS NULL AND lease_owner IS NULL AND lease_token IS NULL AND lease_expires_at IS NULL) OR
+                (operation_id IS NOT NULL AND payload_hash IS NOT NULL AND lease_owner IS NOT NULL AND lease_token IS NOT NULL AND lease_expires_at IS NOT NULL))
+            )`
+          : `CREATE TABLE IF NOT EXISTS stellar_sequence_leases (
+              account_id TEXT PRIMARY KEY,
+              last_sequence BIGINT NOT NULL CHECK (last_sequence > 0),
+              operation_id TEXT,
+              payload_hash TEXT,
+              lease_owner TEXT,
+              lease_token TEXT,
+              lease_expires_at TIMESTAMPTZ,
+              lease_attempt INTEGER NOT NULL DEFAULT 0,
+              CHECK ((operation_id IS NULL AND payload_hash IS NULL AND lease_owner IS NULL AND lease_token IS NULL AND lease_expires_at IS NULL) OR
+                (operation_id IS NOT NULL AND payload_hash IS NOT NULL AND lease_owner IS NOT NULL AND lease_token IS NOT NULL AND lease_expires_at IS NOT NULL))
+            )`,
+      );
+      await execute(
+        'CREATE UNIQUE INDEX IF NOT EXISTS idx_stellar_sequence_operation ON stellar_sequence_leases (operation_id) WHERE operation_id IS NOT NULL',
+      );
+    },
+  },
+  {
+    name: 'core:008-stellar-sequence-operations',
+    async up({ dialect, execute }) {
+      await execute(
+        dialect === 'sqlite'
+          ? `CREATE TABLE IF NOT EXISTS stellar_account_sequences (
+              account_id TEXT PRIMARY KEY,
+              last_sequence INTEGER NOT NULL CHECK (last_sequence >= 0),
+              active_operation_id TEXT,
+              lease_owner TEXT,
+              lease_token TEXT,
+              lease_expires_at TEXT
+            );
+            CREATE TABLE IF NOT EXISTS stellar_sequence_operations (
+              operation_id TEXT PRIMARY KEY,
+              account_id TEXT NOT NULL REFERENCES stellar_account_sequences(account_id),
+              payload_hash TEXT NOT NULL,
+              sequence INTEGER NOT NULL,
+              status TEXT NOT NULL CHECK (status IN ('pending', 'completed')),
+              lease_owner TEXT NOT NULL,
+              lease_token TEXT NOT NULL,
+              lease_expires_at TEXT NOT NULL,
+              lease_attempt INTEGER NOT NULL DEFAULT 1
+            );
+            CREATE INDEX IF NOT EXISTS idx_stellar_sequence_operations_account ON stellar_sequence_operations (account_id, sequence);`
+          : `CREATE TABLE IF NOT EXISTS stellar_account_sequences (
+              account_id TEXT PRIMARY KEY,
+              last_sequence BIGINT NOT NULL CHECK (last_sequence >= 0),
+              active_operation_id TEXT,
+              lease_owner TEXT,
+              lease_token TEXT,
+              lease_expires_at TIMESTAMPTZ
+            );
+            CREATE TABLE IF NOT EXISTS stellar_sequence_operations (
+              operation_id TEXT PRIMARY KEY,
+              account_id TEXT NOT NULL REFERENCES stellar_account_sequences(account_id),
+              payload_hash TEXT NOT NULL,
+              sequence BIGINT NOT NULL,
+              status TEXT NOT NULL CHECK (status IN ('pending', 'completed')),
+              lease_owner TEXT NOT NULL,
+              lease_token TEXT NOT NULL,
+              lease_expires_at TIMESTAMPTZ NOT NULL,
+              lease_attempt INTEGER NOT NULL DEFAULT 1
+            );
+            CREATE INDEX IF NOT EXISTS idx_stellar_sequence_operations_account ON stellar_sequence_operations (account_id, sequence);`,
+      );
+    },
+  },
+  {
+    name: 'core:009-interactive-sessions',
+    async up({ dialect, execute }) {
+      await execute(
+        dialect === 'sqlite'
+          ? `CREATE TABLE IF NOT EXISTS interactive_sessions (
+              id TEXT PRIMARY KEY,
+              account TEXT NOT NULL,
+              transaction_id TEXT NOT NULL REFERENCES interactive_transactions(id),
+              actions TEXT NOT NULL,
+              consumed_actions TEXT NOT NULL DEFAULT '[]',
+              expires_at TEXT NOT NULL,
+              revoked_at TEXT,
+              created_at TEXT NOT NULL
+            )`
+          : `CREATE TABLE IF NOT EXISTS interactive_sessions (
+              id TEXT PRIMARY KEY,
+              account TEXT NOT NULL,
+              transaction_id TEXT NOT NULL REFERENCES interactive_transactions(id),
+              actions JSONB NOT NULL,
+              consumed_actions JSONB NOT NULL DEFAULT '[]'::jsonb,
+              expires_at TIMESTAMPTZ NOT NULL,
+              revoked_at TIMESTAMPTZ,
+              created_at TIMESTAMPTZ NOT NULL
+            )`,
       );
     },
   },
@@ -453,6 +654,55 @@ function configureSqliteConnection(database: SqliteLike, path: string): void {
   database.exec(`PRAGMA journal_mode = ${SQLITE_JOURNAL_MODE};`);
 }
 
+function trackSqliteStatements(database: SqliteLike): () => void {
+  const statements = new Set<WeakRef<SqliteStatement>>();
+  const finalizer = new FinalizationRegistry<WeakRef<SqliteStatement>>((reference) => {
+    statements.delete(reference);
+  });
+  const trackedDatabase = database as unknown as { prepare(sql: string): SqliteStatement };
+  const prepare = trackedDatabase.prepare.bind(trackedDatabase);
+  let preparationsSinceSweep = 0;
+
+  const pruneCollectedStatements = (): void => {
+    for (const reference of statements) {
+      if (!reference.deref()) {
+        statements.delete(reference);
+        finalizer.unregister(reference);
+      }
+    }
+  };
+
+  trackedDatabase.prepare = (sql: string): SqliteStatement => {
+    const statement = prepare(sql);
+    const reference = new WeakRef(statement);
+    statements.add(reference);
+    finalizer.register(statement, reference, reference);
+    preparationsSinceSweep += 1;
+    if (preparationsSinceSweep >= 128) {
+      pruneCollectedStatements();
+      preparationsSinceSweep = 0;
+    }
+    return statement;
+  };
+
+  return () => {
+    for (const reference of statements) {
+      finalizer.unregister(reference);
+      const statement = reference.deref();
+      if (!statement) {
+        continue;
+      }
+
+      try {
+        statement.finalize();
+      } catch (error) {
+        void error;
+      }
+    }
+    statements.clear();
+  };
+}
+
 function parseJsonObject(value: unknown, parseSerializedText: boolean): Record<string, unknown> {
   let parsed = value;
 
@@ -480,6 +730,24 @@ function parseJsonObject(value: unknown, parseSerializedText: boolean): Record<s
   }
 
   return parsed as Record<string, unknown>;
+}
+
+function parseJsonStringArray(value: unknown, parseSerializedText: boolean): string[] {
+  let parsed = value;
+  if (parseSerializedText && typeof value === 'string') {
+    try {
+      parsed = JSON.parse(value);
+    } catch (error) {
+      throw new MalformedPersistedDataError(
+        `Malformed persisted JSON array: ${error instanceof Error ? error.message : String(error)}`,
+        { value: value.slice(0, 200) },
+      );
+    }
+  }
+  if (!Array.isArray(parsed) || !parsed.every((entry) => typeof entry === 'string')) {
+    throw new MalformedPersistedDataError('Persisted session actions must be an array of strings');
+  }
+  return parsed;
 }
 
 function validateSchemaIdentifier(schema: string): string {
@@ -533,6 +801,7 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
   private postgres: PostgresClient | null = null;
   private postgresClientConstructor: PostgresClientConstructor | null = null;
   private readonly migrations: readonly SchemaMigration[];
+  private finalizeSqliteStatements: (() => void) | null = null;
   private connectPromise: Promise<void> | null = null;
   private disconnectPromise: Promise<void> | null = null;
   private migratePromise: Promise<void> | null = null;
@@ -571,16 +840,18 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
         if (this.provider === 'sqlite') {
           const path = toSqlitePath(this.url);
           const database = await loadSqliteDatabase(path);
+          const finalizeStatements = trackSqliteStatements(database);
 
           try {
             configureSqliteConnection(database, path);
           } catch (error) {
-            // Do not leak the handle when the connection cannot be tuned.
+            finalizeStatements();
             database.close();
             throw error;
           }
 
           this.sqlite = database;
+          this.finalizeSqliteStatements = finalizeStatements;
           return;
         }
 
@@ -590,8 +861,17 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
           const pgModule = pgModuleUnknown as { Client: PostgresClientConstructor };
           this.postgresClientConstructor = pgModule.Client;
           const client = new pgModule.Client({ connectionString: this.url });
+          try {
+            await client.connect();
+            if (this.schema && this.schema !== 'public') {
+              await client.query(`CREATE SCHEMA IF NOT EXISTS "${this.schema}"`);
+            }
+            await client.query(`SET search_path TO "${this.schema ?? 'public'}"`);
+          } catch (error) {
+            await client.end().catch(() => {});
+            throw error;
+          }
           this.postgres = client;
-          await this.postgres.connect();
           return;
         }
 
@@ -611,6 +891,18 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
     }
   }
 
+  public async checkReadiness(): Promise<void> {
+    if (this.sqlite) {
+      this.sqlite.prepare('SELECT 1 FROM anchor_kit_migrations LIMIT 1').get();
+      return;
+    }
+    if (this.postgres) {
+      await this.postgres.query('SELECT 1 FROM anchor_kit_migrations LIMIT 1');
+      return;
+    }
+    throw new ConfigError('Database not connected');
+  }
+
   public async disconnect(): Promise<void> {
     if (!this.sqlite && !this.postgres) {
       return;
@@ -625,12 +917,15 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
       const sqlite = this.sqlite;
       const postgres = this.postgres;
       const postgresClientConstructor = this.postgresClientConstructor;
+      const finalizeStatements = this.finalizeSqliteStatements;
       this.sqlite = null;
       this.postgres = null;
       this.postgresClientConstructor = null;
+      this.finalizeSqliteStatements = null;
 
       try {
         if (sqlite) {
+          finalizeStatements?.();
           sqlite.close();
         }
 
@@ -641,6 +936,7 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
         this.sqlite = sqlite;
         this.postgres = postgres;
         this.postgresClientConstructor = postgresClientConstructor;
+        this.finalizeSqliteStatements = finalizeStatements;
         throw error;
       }
     })();
@@ -1156,6 +1452,122 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
     return (response.rowCount ?? 0) > 0;
   }
 
+  public async insertInteractiveSession(input: {
+    id: string;
+    account: string;
+    transactionId: string;
+    actions: string[];
+    expiresAt: string;
+  }): Promise<InteractiveSessionRecord> {
+    if (
+      !input.id.trim() ||
+      !input.account.trim() ||
+      !input.transactionId.trim() ||
+      input.actions.length === 0 ||
+      !input.actions.every((action) => typeof action === 'string' && action.trim().length > 0) ||
+      !Number.isFinite(Date.parse(input.expiresAt))
+    ) {
+      throw new RangeError('Interactive session requires valid identity, actions, and expiry');
+    }
+    const actions = [...new Set(input.actions)];
+    const createdAt = nowIso();
+    if (this.sqlite) {
+      this.sqlite
+        .prepare(
+          'INSERT INTO interactive_sessions (id, account, transaction_id, actions, consumed_actions, expires_at, revoked_at, created_at) VALUES (?, ?, ?, ?, ?, ?, NULL, ?)',
+        )
+        .run(
+          input.id,
+          input.account,
+          input.transactionId,
+          JSON.stringify(actions),
+          '[]',
+          input.expiresAt,
+          createdAt,
+        );
+    } else {
+      await this.requirePostgres().query(
+        "INSERT INTO interactive_sessions (id, account, transaction_id, actions, consumed_actions, expires_at, revoked_at, created_at) VALUES ($1, $2, $3, $4::jsonb, '[]'::jsonb, $5, NULL, $6)",
+        [
+          input.id,
+          input.account,
+          input.transactionId,
+          JSON.stringify(actions),
+          input.expiresAt,
+          createdAt,
+        ],
+      );
+    }
+    return {
+      id: input.id,
+      account: input.account,
+      transactionId: input.transactionId,
+      actions,
+      consumedActions: [],
+      expiresAt: input.expiresAt,
+      revokedAt: null,
+      createdAt,
+    };
+  }
+
+  public async getInteractiveSessionById(id: string): Promise<InteractiveSessionRecord | null> {
+    if (this.sqlite) {
+      const row = this.sqlite
+        .prepare('SELECT * FROM interactive_sessions WHERE id = ? LIMIT 1')
+        .get(id) as Record<string, unknown> | null;
+      return row ? this.mapInteractiveSessionRow(row) : null;
+    }
+    const response = await this.requirePostgres().query<Record<string, unknown>>(
+      'SELECT * FROM interactive_sessions WHERE id = $1 LIMIT 1',
+      [id],
+    );
+    const row = response.rows[0];
+    return row ? this.mapInteractiveSessionRow(row) : null;
+  }
+
+  public async revokeInteractiveSession(id: string): Promise<boolean> {
+    if (this.sqlite) {
+      const result = this.sqlite
+        .prepare(
+          'UPDATE interactive_sessions SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL',
+        )
+        .run(nowIso(), id);
+      return result.changes > 0;
+    }
+    const response = await this.requirePostgres().query<{ id: string }>(
+      'UPDATE interactive_sessions SET revoked_at = clock_timestamp() WHERE id = $1 AND revoked_at IS NULL RETURNING id',
+      [id],
+    );
+    return response.rows.length > 0;
+  }
+
+  public async consumeInteractiveSessionAction(id: string, action: string): Promise<boolean> {
+    if (!action.trim()) return false;
+    if (this.sqlite) {
+      const result = this.sqlite
+        .prepare(
+          `UPDATE interactive_sessions
+           SET consumed_actions = json_insert(consumed_actions, '$[#]', json(?))
+           WHERE id = ? AND revoked_at IS NULL
+             AND expires_at > strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+             AND EXISTS (SELECT 1 FROM json_each(actions) WHERE value = ?)
+             AND NOT EXISTS (SELECT 1 FROM json_each(consumed_actions) WHERE value = ?)`,
+        )
+        .run(JSON.stringify(action), id, action, action);
+      return result.changes > 0;
+    }
+    const response = await this.requirePostgres().query<{ id: string }>(
+      `UPDATE interactive_sessions
+       SET consumed_actions = consumed_actions || jsonb_build_array($2::text)
+       WHERE id = $1 AND revoked_at IS NULL AND expires_at > clock_timestamp()
+         AND actions @> jsonb_build_array($2::text)
+         AND NOT consumed_actions @> jsonb_build_array($2::text)
+       RETURNING id`,
+      [id, action],
+    );
+    return response.rows.length > 0;
+  }
+
   public async insertInteractiveTransaction(input: {
     id: string;
     account: string;
@@ -1254,6 +1666,70 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
     const row = response.rows[0];
     if (!row) return null;
     return this.mapTransactionRow(row);
+  }
+
+  public async findInteractiveTransaction(input: {
+    account: string;
+    identifier: InteractiveTransactionIdentifier;
+  }): Promise<InteractiveTransactionRecord | null> {
+    const column =
+      input.identifier.kind === 'id'
+        ? 'id'
+        : input.identifier.kind === 'stellar_transaction_id'
+          ? 'stellar_transaction_hash'
+          : 'rail_reference';
+    if (this.sqlite) {
+      const rows = this.sqlite
+        .prepare(
+          `SELECT * FROM interactive_transactions WHERE account = ? AND ${column} = ? LIMIT 2`,
+        )
+        .all(input.account, input.identifier.value) as Record<string, unknown>[];
+      return rows.length === 1 ? this.mapTransactionRow(rows[0]) : null;
+    }
+    const result = await this.requirePostgres().query<Record<string, unknown>>(
+      `SELECT * FROM interactive_transactions WHERE account = $1 AND ${column} = $2 LIMIT 2`,
+      [input.account, input.identifier.value],
+    );
+    return result.rows.length === 1 ? this.mapTransactionRow(result.rows[0]) : null;
+  }
+
+  public async listTransactions(
+    input: TransactionHistoryQuery,
+  ): Promise<InteractiveTransactionRecord[]> {
+    validateTransactionHistory(input);
+    const values: Array<string | number> = [input.account, input.assetCode];
+    const bind = (value: string | number) => {
+      values.push(value);
+      return this.sqlite ? '?' : `$${values.length}`;
+    };
+    const where = [
+      this.sqlite ? 'account = ?' : 'account = $1',
+      this.sqlite ? 'asset_code = ?' : 'asset_code = $2',
+    ];
+    if (input.kind !== undefined) where.push(`kind = ${bind(input.kind)}`);
+    if (input.noOlderThan !== undefined)
+      where.push(`created_at >= ${bind(new Date(input.noOlderThan).toISOString())}`);
+    if (input.pagingId !== undefined) {
+      const cursor = await this.findInteractiveTransaction({
+        account: input.account,
+        identifier: { kind: 'id', value: input.pagingId },
+      });
+      if (
+        !cursor ||
+        cursor.assetCode !== input.assetCode ||
+        (input.kind !== undefined && cursor.kind !== input.kind)
+      ) {
+        throw new ValidationError('Invalid transaction history cursor');
+      }
+      where.push(
+        `(created_at < ${bind(cursor.createdAt)} OR (created_at = ${bind(cursor.createdAt)} AND id < ${bind(cursor.id)}))`,
+      );
+    }
+    const sql = `SELECT * FROM interactive_transactions WHERE ${where.join(' AND ')} ORDER BY created_at DESC, id DESC LIMIT ${bind(input.limit ?? 10)}`;
+    const rows = this.sqlite
+      ? (this.sqlite.prepare(sql).all(...values) as Record<string, unknown>[])
+      : (await this.requirePostgres().query<Record<string, unknown>>(sql, values)).rows;
+    return rows.map((row) => this.mapTransactionRow(row));
   }
 
   public async listPendingTransactionsBefore(
@@ -1372,6 +1848,185 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
     };
   }
 
+  public async confirmSettlement(input: {
+    transactionId: string;
+    transactionHash: string;
+    amount: string;
+    recipient: string;
+  }): Promise<ConfirmSettlementResult> {
+    if (!input.transactionId.trim() || !input.recipient.trim()) {
+      throw new ConfigError(
+        'Settlement confirmation transaction ID and recipient must not be empty',
+      );
+    }
+    if (!/^[0-9a-f]{64}$/i.test(input.transactionHash)) {
+      throw new ConfigError(
+        'Settlement confirmation requires a 64-character Stellar transaction hash',
+      );
+    }
+
+    const transactionHash = input.transactionHash.toLowerCase();
+    const matchesConfirmation = (transaction: InteractiveTransactionRecord): boolean => {
+      let amountMatches: boolean;
+      try {
+        amountMatches =
+          new Big(input.amount).gt(0) &&
+          new Big(input.amount).eq(transaction.amountOut ?? transaction.amount);
+      } catch {
+        amountMatches = false;
+      }
+      return amountMatches && transaction.account === input.recipient;
+    };
+
+    if (this.sqlite) {
+      const database = this.sqlite;
+      const confirm = database.transaction((): ConfirmSettlementResult => {
+        const row = database
+          .prepare('SELECT * FROM interactive_transactions WHERE id = ? LIMIT 1')
+          .get(input.transactionId) as Record<string, unknown> | null;
+        if (!row) return { outcome: 'conflict', reason: 'not_found', transaction: null };
+
+        const transaction = this.mapTransactionRow(row);
+        if (!matchesConfirmation(transaction)) {
+          return { outcome: 'conflict', reason: 'confirmation_mismatch', transaction };
+        }
+        if (
+          transaction.stellarTransactionHash &&
+          transaction.stellarTransactionHash.toLowerCase() !== transactionHash
+        ) {
+          return { outcome: 'conflict', reason: 'hash_mismatch', transaction };
+        }
+        if (transaction.status === 'completed') {
+          if (!transaction.stellarTransactionHash) {
+            return { outcome: 'conflict', reason: 'hash_mismatch', transaction };
+          }
+          return { outcome: 'replayed', transaction };
+        }
+        if (transaction.status !== 'pending_stellar') {
+          return { outcome: 'conflict', reason: 'status_mismatch', transaction };
+        }
+
+        const update = database
+          .prepare(
+            "UPDATE interactive_transactions SET status = 'completed', stellar_transaction_hash = ?, updated_at = ? WHERE id = ? AND status = 'pending_stellar' AND (stellar_transaction_hash IS NULL OR LOWER(stellar_transaction_hash) = ?)",
+          )
+          .run(transactionHash, nowIso(), input.transactionId, transactionHash);
+        if (update.changes !== 1) {
+          const currentRow = database
+            .prepare('SELECT * FROM interactive_transactions WHERE id = ? LIMIT 1')
+            .get(input.transactionId) as Record<string, unknown> | null;
+          const current = currentRow ? this.mapTransactionRow(currentRow) : null;
+          return {
+            outcome: 'conflict',
+            reason: current ? 'status_mismatch' : 'not_found',
+            transaction: current,
+          };
+        }
+
+        const completedRow = database
+          .prepare('SELECT * FROM interactive_transactions WHERE id = ? LIMIT 1')
+          .get(input.transactionId) as Record<string, unknown> | null;
+        if (!completedRow) throw new ConfigError('Confirmed transaction disappeared after update');
+        return { outcome: 'completed', transaction: this.mapTransactionRow(completedRow) };
+      });
+      return confirm.immediate();
+    }
+
+    const Client = this.postgresClientConstructor;
+    if (!Client) throw new ConfigError('PostgreSQL client is not connected');
+
+    const postgres = new Client({ connectionString: this.url });
+    return (async (): Promise<ConfirmSettlementResult> => {
+      let transactionStarted = false;
+      let operationError: unknown;
+      try {
+        await postgres.connect();
+        await postgres.query(`SET search_path TO "${this.schema ?? 'public'}"`);
+        await postgres.query('BEGIN');
+        transactionStarted = true;
+
+        const response = await postgres.query<Record<string, unknown>>(
+          'SELECT * FROM interactive_transactions WHERE id = $1 LIMIT 1 FOR UPDATE',
+          [input.transactionId],
+        );
+        const row = response.rows[0];
+        if (!row) {
+          await postgres.query('COMMIT');
+          transactionStarted = false;
+          return { outcome: 'conflict', reason: 'not_found', transaction: null };
+        }
+
+        const transaction = this.mapTransactionRow(row);
+        if (!matchesConfirmation(transaction)) {
+          await postgres.query('COMMIT');
+          transactionStarted = false;
+          return { outcome: 'conflict', reason: 'confirmation_mismatch', transaction };
+        }
+        if (
+          transaction.stellarTransactionHash &&
+          transaction.stellarTransactionHash.toLowerCase() !== transactionHash
+        ) {
+          await postgres.query('COMMIT');
+          transactionStarted = false;
+          return { outcome: 'conflict', reason: 'hash_mismatch', transaction };
+        }
+        if (transaction.status === 'completed') {
+          await postgres.query('COMMIT');
+          transactionStarted = false;
+          if (!transaction.stellarTransactionHash) {
+            return { outcome: 'conflict', reason: 'hash_mismatch', transaction };
+          }
+          return { outcome: 'replayed', transaction };
+        }
+        if (transaction.status !== 'pending_stellar') {
+          await postgres.query('COMMIT');
+          transactionStarted = false;
+          return { outcome: 'conflict', reason: 'status_mismatch', transaction };
+        }
+
+        const updated = await postgres.query<Record<string, unknown>>(
+          "UPDATE interactive_transactions SET status = 'completed', stellar_transaction_hash = $1, updated_at = $2 WHERE id = $3 AND status = 'pending_stellar' AND (stellar_transaction_hash IS NULL OR LOWER(stellar_transaction_hash) = $1) RETURNING *",
+          [transactionHash, nowIso(), input.transactionId],
+        );
+        const completedRow = updated.rows[0];
+        if (!completedRow) {
+          const currentResponse = await postgres.query<Record<string, unknown>>(
+            'SELECT * FROM interactive_transactions WHERE id = $1 LIMIT 1',
+            [input.transactionId],
+          );
+          await postgres.query('COMMIT');
+          transactionStarted = false;
+          const currentRow = currentResponse.rows[0];
+          return {
+            outcome: 'conflict',
+            reason: currentRow ? 'status_mismatch' : 'not_found',
+            transaction: currentRow ? this.mapTransactionRow(currentRow) : null,
+          };
+        }
+
+        await postgres.query('COMMIT');
+        transactionStarted = false;
+        return { outcome: 'completed', transaction: this.mapTransactionRow(completedRow) };
+      } catch (error) {
+        operationError = error;
+        if (transactionStarted) {
+          try {
+            await postgres.query('ROLLBACK');
+          } catch (rollbackError) {
+            operationError = new AggregateError(
+              [error, rollbackError],
+              'Settlement confirmation rollback failed',
+              { cause: error },
+            );
+          }
+        }
+      }
+      throw operationError;
+    })().finally(async () => {
+      await postgres.end();
+    });
+  }
+
   public async insertOrGetCustomer(input: Omit<Customer, 'created_at'>): Promise<Customer> {
     const createdAt = Date.now();
     const kycData = input.kyc_data ? JSON.stringify(input.kyc_data) : null;
@@ -1470,6 +2125,41 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
     );
     const row = response.rows[0];
     return row ? this.mapCustomerRow(row) : null;
+  }
+
+  public async updateCustomer(input: {
+    id: string;
+    account_id: string;
+    email_address?: string;
+    phone_number?: string;
+    kyc_data: Customer['kyc_data'];
+  }): Promise<boolean> {
+    if (this.sqlite) {
+      const result = this.sqlite
+        .prepare(
+          'UPDATE customers SET email_address = COALESCE(?, email_address), phone_number = COALESCE(?, phone_number), kyc_data = ? WHERE id = ? AND EXISTS (SELECT 1 FROM customer_accounts WHERE customer_id = customers.id AND account_id = ?)',
+        )
+        .run(
+          input.email_address ?? null,
+          input.phone_number ?? null,
+          JSON.stringify(input.kyc_data),
+          input.id,
+          input.account_id,
+        );
+      return result.changes === 1;
+    }
+
+    const response = await this.requirePostgres().query(
+      'UPDATE customers SET email_address = COALESCE($1, email_address), phone_number = COALESCE($2, phone_number), kyc_data = $3 WHERE id = $4 AND EXISTS (SELECT 1 FROM customer_accounts WHERE customer_id = customers.id AND account_id = $5) RETURNING id',
+      [
+        input.email_address ?? null,
+        input.phone_number ?? null,
+        input.kyc_data,
+        input.id,
+        input.account_id,
+      ],
+    );
+    return response.rowCount === 1;
   }
 
   public async getIdempotencyRecord(
@@ -1627,6 +2317,10 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
       statusCode: number;
       responseBody: string;
     };
+    interactiveSession?: Pick<
+      InteractiveSessionRecord,
+      'id' | 'account' | 'transactionId' | 'actions' | 'expiresAt'
+    >;
   }): Promise<InteractiveTransactionRecord> {
     const transaction = input.transaction;
     const updatedAt = nowIso();
@@ -1648,6 +2342,21 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
             transaction.createdAt,
             updatedAt,
           );
+        if (input.interactiveSession) {
+          const session = input.interactiveSession;
+          sqlite
+            .prepare(
+              "INSERT INTO interactive_sessions (id, account, transaction_id, actions, consumed_actions, expires_at, revoked_at, created_at) VALUES (?, ?, ?, ?, '[]', ?, NULL, ?)",
+            )
+            .run(
+              session.id,
+              session.account,
+              session.transactionId,
+              JSON.stringify([...new Set(session.actions)]),
+              session.expiresAt,
+              nowIso(),
+            );
+        }
         const completed = sqlite
           .prepare(
             "UPDATE idempotency_keys SET status = 'completed', status_code = ?, response_body = ? WHERE scope = ? AND idempotency_key = ? AND request_hash = ? AND status = 'pending'",
@@ -1675,6 +2384,7 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
       let operationError: unknown;
       try {
         await postgres.connect();
+        await postgres.query(`SET search_path TO "${this.schema ?? 'public'}"`);
         await postgres.query('BEGIN');
         transactionStarted = true;
         await postgres.query(
@@ -1690,6 +2400,20 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
             updatedAt,
           ],
         );
+        if (input.interactiveSession) {
+          const session = input.interactiveSession;
+          await postgres.query(
+            "INSERT INTO interactive_sessions (id, account, transaction_id, actions, consumed_actions, expires_at, revoked_at, created_at) VALUES ($1, $2, $3, $4::jsonb, '[]'::jsonb, $5, NULL, $6)",
+            [
+              session.id,
+              session.account,
+              session.transactionId,
+              JSON.stringify([...new Set(session.actions)]),
+              session.expiresAt,
+              nowIso(),
+            ],
+          );
+        }
         const completed = await postgres.query<{ id: string }>(
           "UPDATE idempotency_keys SET status = 'completed', status_code = $1, response_body = $2 WHERE scope = $3 AND idempotency_key = $4 AND request_hash = $5 AND status = 'pending' RETURNING id",
           [
@@ -1795,7 +2519,7 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
           // in which case changes === 0 and this caller loses the race.
           const cas = this.sqlite
             .prepare(
-              "UPDATE webhook_events SET payload = ?, status = 'pending', error_message = NULL, processed_at = NULL, attempt_id = NULL, lease_owner = NULL, lease_expires_at = NULL, operation_key = COALESCE(operation_key, ?) WHERE id = ? AND status = 'failed'",
+              "UPDATE webhook_events SET payload = ?, status = 'pending', error_message = NULL, processed_at = NULL, attempt_number = CASE WHEN attempt_number = 0 THEN 1 ELSE attempt_number END, attempt_id = NULL, lease_owner = NULL, lease_expires_at = NULL, operation_key = COALESCE(operation_key, ?) WHERE id = ? AND status = 'failed'",
             )
             .run(JSON.stringify(input.payload), operationKey, record.id);
 
@@ -1869,7 +2593,7 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
         // Compare-and-set: only claim execution if the row is still 'failed'.
         // RETURNING id lets us detect whether the UPDATE matched any row.
         const cas = await this.requirePostgres().query<{ id: string }>(
-          "UPDATE webhook_events SET payload = $1::jsonb, status = 'pending', error_message = NULL, processed_at = NULL, attempt_id = NULL, lease_owner = NULL, lease_expires_at = NULL, operation_key = COALESCE(operation_key, $2) WHERE id = $3 AND status = 'failed' RETURNING id",
+          "UPDATE webhook_events SET payload = $1::jsonb, status = 'pending', error_message = NULL, processed_at = NULL, attempt_number = CASE WHEN attempt_number = 0 THEN 1 ELSE attempt_number END, attempt_id = NULL, lease_owner = NULL, lease_expires_at = NULL, operation_key = COALESCE(operation_key, $2) WHERE id = $3 AND status = 'failed' RETURNING id",
           [JSON.stringify(input.payload), operationKey, record.id],
         );
 
@@ -1943,7 +2667,7 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
     if (this.sqlite) {
       const result = this.sqlite
         .prepare(
-          "UPDATE webhook_events SET attempt_id = ?, attempt_number = attempt_number + 1, lease_owner = ?, lease_expires_at = ? WHERE id = ? AND status = 'pending' AND (lease_expires_at IS NULL OR lease_expires_at < ?)",
+          "UPDATE webhook_events SET attempt_id = ?, attempt_number = attempt_number + 1, lease_owner = ?, lease_expires_at = ? WHERE id = ? AND status = 'pending' AND attempt_number = 0 AND (lease_expires_at IS NULL OR lease_expires_at < ?)",
         )
         .run(input.attemptId, input.leaseOwner, input.leaseExpiresAt, input.id, now);
 
@@ -1959,7 +2683,7 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
     }
 
     const response = await this.requirePostgres().query<Record<string, unknown>>(
-      "UPDATE webhook_events SET attempt_id = $1, attempt_number = attempt_number + 1, lease_owner = $2, lease_expires_at = $3 WHERE id = $4 AND status = 'pending' AND (lease_expires_at IS NULL OR lease_expires_at < $5) RETURNING *",
+      "UPDATE webhook_events SET attempt_id = $1, attempt_number = attempt_number + 1, lease_owner = $2, lease_expires_at = $3 WHERE id = $4 AND status = 'pending' AND attempt_number = 0 AND (lease_expires_at IS NULL OR lease_expires_at < $5) RETURNING *",
       [input.attemptId, input.leaseOwner, input.leaseExpiresAt, input.id, now],
     );
 
@@ -1972,18 +2696,129 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
     leaseOwner: string;
     leaseDurationMs: number;
   }): Promise<WebhookEventRecord | null> {
-    if (!Number.isSafeInteger(input.leaseDurationMs) || input.leaseDurationMs <= 0) {
+    if (
+      !Number.isSafeInteger(input.leaseDurationMs) ||
+      input.leaseDurationMs <= 0 ||
+      input.leaseDurationMs > 86400000
+    ) {
       throw new RangeError('Webhook lease duration must be a positive safe integer');
     }
+    const attemptId = randomUUID();
+    if (this.sqlite) {
+      const row = this.sqlite
+        .prepare(
+          `UPDATE webhook_events SET attempt_id = ?, attempt_number = attempt_number + 1, lease_owner = ?,
+        lease_expires_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '+' || ? || ' seconds') WHERE id = ? AND status = 'pending'
+        AND attempt_number = 0 AND (lease_expires_at IS NULL OR lease_expires_at <= strftime('%Y-%m-%dT%H:%M:%fZ', 'now')) RETURNING *`,
+        )
+        .get(attemptId, input.leaseOwner, input.leaseDurationMs / 1000, input.id) as Record<
+        string,
+        unknown
+      > | null;
+      return row ? this.mapWebhookRow(row) : null;
+    }
+    const response = await this.requirePostgres().query<Record<string, unknown>>(
+      `UPDATE webhook_events SET attempt_id = $1, attempt_number = attempt_number + 1, lease_owner = $2,
+      lease_expires_at = clock_timestamp() + ($3 * interval '1 millisecond') WHERE id = $4 AND status = 'pending' AND attempt_number = 0
+      AND (lease_expires_at IS NULL OR lease_expires_at <= clock_timestamp()) RETURNING *`,
+      [attemptId, input.leaseOwner, input.leaseDurationMs, input.id],
+    );
+    return response.rows[0] ? this.mapWebhookRow(response.rows[0]) : null;
+  }
 
-    const now = Date.now();
-    return this.claimWebhookEventAttempt({
-      id: input.id,
-      attemptId: randomUUID(),
-      leaseOwner: input.leaseOwner,
-      leaseExpiresAt: new Date(now + input.leaseDurationMs).toISOString(),
-      nowIso: new Date(now).toISOString(),
-    });
+  public async claimWebhookRecovery(input: {
+    id: string;
+    leaseOwner: string;
+    leaseDurationMs: number;
+  }): Promise<WebhookEventRecord | null> {
+    if (
+      !input.id.trim() ||
+      !input.leaseOwner.trim() ||
+      !Number.isSafeInteger(input.leaseDurationMs) ||
+      input.leaseDurationMs < 1 ||
+      input.leaseDurationMs > 86400000
+    )
+      throw new RangeError('Invalid webhook recovery lease');
+    const attemptId = randomUUID();
+    if (this.sqlite) {
+      const row = this.sqlite
+        .prepare(
+          `UPDATE webhook_events SET status = 'unresolved', attempt_id = ?, attempt_number = attempt_number + 1, lease_owner = ?,
+        lease_expires_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '+' || ? || ' seconds')
+        WHERE id = ? AND attempt_number > 0 AND status IN ('pending', 'failed', 'unresolved')
+        AND (lease_expires_at IS NULL OR lease_expires_at <= strftime('%Y-%m-%dT%H:%M:%fZ', 'now')) RETURNING *`,
+        )
+        .get(attemptId, input.leaseOwner, input.leaseDurationMs / 1000, input.id) as Record<
+        string,
+        unknown
+      > | null;
+      return row ? this.mapWebhookRow(row) : null;
+    }
+    const response = await this.requirePostgres().query<Record<string, unknown>>(
+      `UPDATE webhook_events SET status = 'unresolved', attempt_id = $1, attempt_number = attempt_number + 1, lease_owner = $2,
+      lease_expires_at = clock_timestamp() + ($3 * interval '1 millisecond') WHERE id = $4 AND attempt_number > 0 AND status IN ('pending', 'failed', 'unresolved')
+      AND (lease_expires_at IS NULL OR lease_expires_at <= clock_timestamp()) RETURNING *`,
+      [attemptId, input.leaseOwner, input.leaseDurationMs, input.id],
+    );
+    return response.rows[0] ? this.mapWebhookRow(response.rows[0]) : null;
+  }
+
+  public async completeWebhookRecovery(input: {
+    id: string;
+    attemptId: string;
+    leaseOwner: string;
+    status: 'processed' | 'failed' | 'unresolved';
+    result: PaymentRailOperation | null;
+  }): Promise<boolean> {
+    const parsed = input.result === null ? null : parseRecoveredOperation(input.result);
+    if (
+      !['processed', 'failed', 'unresolved'].includes(input.status) ||
+      (input.result !== null && parsed === null) ||
+      (parsed === null && input.status !== 'unresolved') ||
+      (parsed?.status === 'succeeded' && input.status !== 'processed') ||
+      (parsed?.status === 'failed' && input.status !== 'failed') ||
+      ((parsed?.status === 'pending' || parsed?.status === 'unknown') &&
+        input.status !== 'unresolved')
+    ) {
+      throw new RangeError('Invalid webhook recovery result');
+    }
+    const result = parsed === null ? null : JSON.stringify(parsed);
+    if (this.sqlite) {
+      const updated = this.sqlite
+        .prepare(
+          `UPDATE webhook_events SET status = ?, recovery_result = ?, processed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
+        lease_owner = NULL, lease_expires_at = NULL WHERE id = ? AND attempt_id = ? AND lease_owner = ? AND status = 'unresolved'
+        AND lease_expires_at > strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+        AND (? IS NULL OR (COALESCE(operation_key, provider || ':' || event_id) = ? AND provider = ?))`,
+        )
+        .run(
+          input.status,
+          result,
+          input.id,
+          input.attemptId,
+          input.leaseOwner,
+          parsed?.operationId ?? null,
+          parsed?.operationId ?? null,
+          parsed?.provider ?? null,
+        );
+      return updated.changes > 0;
+    }
+    const updated = await this.requirePostgres().query<{ id: string }>(
+      `UPDATE webhook_events SET status = $1, recovery_result = $2::jsonb, processed_at = clock_timestamp(),
+      lease_owner = NULL, lease_expires_at = NULL WHERE id = $3 AND attempt_id = $4 AND lease_owner = $5 AND status = 'unresolved'
+      AND lease_expires_at > clock_timestamp()
+      AND ($6::text IS NULL OR (COALESCE(operation_key, provider || ':' || event_id) = $6 AND provider = $7)) RETURNING id`,
+      [
+        input.status,
+        result,
+        input.id,
+        input.attemptId,
+        input.leaseOwner,
+        parsed?.operationId ?? null,
+        parsed?.provider ?? null,
+      ],
+    );
+    return updated.rows.length > 0;
   }
 
   public async completeWebhookAttempt(input: {
@@ -1999,14 +2834,14 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
     if (this.sqlite) {
       const result = this.sqlite
         .prepare(
-          "UPDATE webhook_events SET status = ?, error_message = ?, processed_at = ?, lease_owner = NULL, lease_expires_at = NULL WHERE id = ? AND attempt_id = ? AND lease_owner = ? AND status = 'pending'",
+          "UPDATE webhook_events SET status = ?, error_message = ?, processed_at = ?, lease_owner = NULL, lease_expires_at = NULL WHERE id = ? AND attempt_id = ? AND lease_owner = ? AND status = 'pending' AND lease_expires_at > strftime('%Y-%m-%dT%H:%M:%fZ', 'now')",
         )
         .run(input.status, errorMessage, processedAt, input.id, input.attemptId, input.leaseOwner);
       return result.changes > 0;
     }
 
     const result = await this.requirePostgres().query<{ id: string }>(
-      "UPDATE webhook_events SET status = $1, error_message = $2, processed_at = $3, lease_owner = NULL, lease_expires_at = NULL WHERE id = $4 AND attempt_id = $5 AND lease_owner = $6 AND status = 'pending' RETURNING id",
+      "UPDATE webhook_events SET status = $1, error_message = $2, processed_at = $3, lease_owner = NULL, lease_expires_at = NULL WHERE id = $4 AND attempt_id = $5 AND lease_owner = $6 AND status = 'pending' AND lease_expires_at > clock_timestamp() RETURNING id",
       [input.status, errorMessage, processedAt, input.id, input.attemptId, input.leaseOwner],
     );
     return result.rows.length > 0;
@@ -2133,6 +2968,93 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
     return Number(response.rows[0]?.count ?? 0);
   }
 
+  public async insertRefundOperation(record: RefundRecord): Promise<void> {
+    if (!record.operationId.trim() || !['pending', 'completed', 'failed'].includes(record.status)) {
+      throw new ConfigError('Invalid refund operation');
+    }
+    serializeRefunds(record.transactionId, [{ ...record, status: 'completed' }]);
+    const values = [
+      record.operationId,
+      record.transactionId,
+      record.paymentId,
+      record.paymentIdType,
+      record.amount,
+      record.fee,
+      record.status,
+      record.transactionId,
+    ];
+    if (this.sqlite) {
+      const result = this.sqlite
+        .prepare(
+          `INSERT INTO refund_operations
+        (operation_id, transaction_id, payment_id, payment_id_type, amount, fee, status)
+        SELECT ?, ?, ?, ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM interactive_transactions WHERE id = ?)`,
+        )
+        .run(...values);
+      if (result.changes !== 1) throw new ConfigError('Refund transaction not found');
+      return;
+    }
+    const result = await this.requirePostgres().query(
+      `INSERT INTO refund_operations
+      (operation_id, transaction_id, payment_id, payment_id_type, amount, fee, status)
+      SELECT $1, $2, $3, $4, $5, $6, $7 WHERE EXISTS (SELECT 1 FROM interactive_transactions WHERE id = $8)`,
+      values,
+    );
+    if (result.rowCount !== 1) throw new ConfigError('Refund transaction not found');
+  }
+
+  public async listRefundOperations(transactionId: string): Promise<RefundRecord[]> {
+    const rows = this.sqlite
+      ? (this.sqlite
+          .prepare('SELECT * FROM refund_operations WHERE transaction_id = ? ORDER BY operation_id')
+          .all(transactionId) as Record<string, unknown>[])
+      : (
+          await this.requirePostgres().query<Record<string, unknown>>(
+            'SELECT * FROM refund_operations WHERE transaction_id = $1 ORDER BY operation_id',
+            [transactionId],
+          )
+        ).rows;
+    return rows.map((row) => {
+      const status = String(row.status);
+      const paymentIdType = String(row.payment_id_type);
+      if (
+        !['pending', 'completed', 'failed'].includes(status) ||
+        !['stellar', 'external'].includes(paymentIdType)
+      )
+        throw new ConfigError('Invalid persisted refund operation');
+      return {
+        operationId: String(row.operation_id),
+        transactionId: String(row.transaction_id),
+        paymentId: String(row.payment_id),
+        paymentIdType: paymentIdType as RefundRecord['paymentIdType'],
+        amount: String(row.amount),
+        fee: String(row.fee),
+        status: status as RefundRecord['status'],
+      };
+    });
+  }
+
+  public async finishRefundOperation(
+    operationId: string,
+    status: 'completed' | 'failed',
+  ): Promise<boolean> {
+    if (!['completed', 'failed'].includes(status)) throw new ConfigError('Invalid refund status');
+    if (this.sqlite) {
+      return (
+        this.sqlite
+          .prepare(
+            "UPDATE refund_operations SET status = ? WHERE operation_id = ? AND status = 'pending'",
+          )
+          .run(status, operationId).changes === 1
+      );
+    }
+    const result = await this.requirePostgres().query(
+      "UPDATE refund_operations SET status = $1 WHERE operation_id = $2 AND status = 'pending'",
+      [status, operationId],
+    );
+    return result.rowCount === 1;
+  }
+
   public async insertOrGetSettlementJob(input: {
     id: string;
     operationId: string;
@@ -2212,22 +3134,701 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
     return response.rows.map((row) => this.mapSettlementJobRow(row));
   }
 
-  public async updateSettlementJobStatus(input: {
+  public async listClaimableSettlementJobs(limit: number): Promise<SettlementJobRecord[]> {
+    if (!Number.isSafeInteger(limit) || limit <= 0) {
+      throw new RangeError('Settlement job limit must be a positive safe integer');
+    }
+    if (this.sqlite) {
+      const rows = this.sqlite
+        .prepare(
+          `SELECT * FROM settlement_jobs WHERE status = 'pending' OR
+        (status = 'processing' AND lease_expires_at <= strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+        ORDER BY created_at ASC, operation_id ASC LIMIT ?`,
+        )
+        .all(limit) as Record<string, unknown>[];
+      return rows.map((row) => this.mapSettlementJobRow(row));
+    }
+    const result = await this.requirePostgres().query<Record<string, unknown>>(
+      `SELECT * FROM settlement_jobs WHERE status = 'pending' OR
+      (status = 'processing' AND lease_expires_at <= clock_timestamp())
+      ORDER BY created_at ASC, operation_id ASC LIMIT $1`,
+      [limit],
+    );
+    return result.rows.map((row) => this.mapSettlementJobRow(row));
+  }
+
+  public async claimSettlementJob(input: {
+    operationId: string;
+    owner: string;
+    durationMs: number;
+  }): Promise<SettlementJobLease | null> {
+    this.validateSettlementLeaseInput(input.operationId, input.owner, input.durationMs);
+    const token = randomUUID();
+    let row: Record<string, unknown> | null;
+    if (this.sqlite) {
+      row = this.sqlite
+        .prepare(
+          `UPDATE settlement_jobs SET status = 'processing', lease_owner = ?, lease_token = ?,
+        lease_expires_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '+' || ? || ' seconds'),
+        lease_attempt = lease_attempt + 1, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+        WHERE operation_id = ? AND (status = 'pending' OR (status = 'processing' AND
+        lease_expires_at <= strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))) RETURNING *`,
+        )
+        .get(input.owner, token, input.durationMs / 1000, input.operationId) as Record<
+        string,
+        unknown
+      > | null;
+    } else {
+      const result = await this.requirePostgres().query<Record<string, unknown>>(
+        `UPDATE settlement_jobs SET status = 'processing', lease_owner = $1, lease_token = $2,
+        lease_expires_at = clock_timestamp() + ($3 * interval '1 millisecond'), lease_attempt = lease_attempt + 1,
+        updated_at = clock_timestamp() WHERE operation_id = $4 AND (status = 'pending' OR
+        (status = 'processing' AND lease_expires_at <= clock_timestamp())) RETURNING *`,
+        [input.owner, token, input.durationMs, input.operationId],
+      );
+      row = result.rows[0] ?? null;
+    }
+    if (!row) return null;
+    const expires = row.lease_expires_at;
+    return {
+      job: this.mapSettlementJobRow(row),
+      owner: input.owner,
+      token,
+      expiresAt: expires instanceof Date ? expires.toISOString() : String(expires),
+      attempt: Number(row.lease_attempt),
+    };
+  }
+
+  public async heartbeatSettlementJob(input: {
+    operationId: string;
+    token: string;
+    durationMs: number;
+  }): Promise<boolean> {
+    this.validateSettlementLeaseInput(input.operationId, input.token, input.durationMs);
+    if (this.sqlite) {
+      const result = this.sqlite
+        .prepare(
+          `UPDATE settlement_jobs SET lease_expires_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '+' || ? || ' seconds'),
+        updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE operation_id = ? AND lease_token = ?
+        AND status = 'processing' AND lease_expires_at > strftime('%Y-%m-%dT%H:%M:%fZ', 'now')`,
+        )
+        .run(input.durationMs / 1000, input.operationId, input.token);
+      return result.changes > 0;
+    }
+    const result = await this.requirePostgres().query<{ operation_id: string }>(
+      `UPDATE settlement_jobs SET lease_expires_at = clock_timestamp() + ($1 * interval '1 millisecond'),
+      updated_at = clock_timestamp() WHERE operation_id = $2 AND lease_token = $3 AND status = 'processing'
+      AND lease_expires_at > clock_timestamp() RETURNING operation_id`,
+      [input.durationMs, input.operationId, input.token],
+    );
+    return result.rows.length > 0;
+  }
+
+  public async finishSettlementJob(input: {
+    operationId: string;
+    token: string;
+    status: 'pending' | 'completed' | 'failed';
+  }): Promise<boolean> {
+    if (
+      !input.operationId.trim() ||
+      !input.token.trim() ||
+      !['pending', 'completed', 'failed'].includes(input.status)
+    ) {
+      throw new RangeError('Invalid settlement lease completion');
+    }
+    if (this.sqlite) {
+      const result = this.sqlite
+        .prepare(
+          `UPDATE settlement_jobs SET status = ?, lease_owner = NULL, lease_token = NULL, lease_expires_at = NULL,
+        updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE operation_id = ? AND lease_token = ? AND status = 'processing'
+        AND lease_expires_at > strftime('%Y-%m-%dT%H:%M:%fZ', 'now')`,
+        )
+        .run(input.status, input.operationId, input.token);
+      return result.changes > 0;
+    }
+    const result = await this.requirePostgres().query<{ operation_id: string }>(
+      `UPDATE settlement_jobs SET status = $1, lease_owner = NULL, lease_token = NULL,
+      lease_expires_at = NULL, updated_at = clock_timestamp() WHERE operation_id = $2 AND lease_token = $3
+      AND status = 'processing' AND lease_expires_at > clock_timestamp() RETURNING operation_id`,
+      [input.status, input.operationId, input.token],
+    );
+    return result.rows.length > 0;
+  }
+
+  public async reserveStellarSequence(input: {
+    accountId: string;
+    networkSequence: string;
+    operationId: string;
+    payloadHash: string;
+    owner: string;
+    durationMs: number;
+  }): Promise<StellarSequenceLease | null> {
+    const networkSequence = this.validateStellarSequenceInput(input);
+    const payloadHash = input.payloadHash.toLowerCase();
+    const token = randomUUID();
+    if (this.sqlite) {
+      const database = this.sqlite;
+      const reserve = database.transaction((): StellarSequenceLease | null => {
+        database
+          .prepare(
+            'INSERT INTO stellar_account_sequences (account_id, last_sequence) VALUES (?, ?) ON CONFLICT(account_id) DO NOTHING',
+          )
+          .run(input.accountId, input.networkSequence);
+        const account = database
+          .prepare('SELECT * FROM stellar_account_sequences WHERE account_id = ? LIMIT 1')
+          .get(input.accountId) as Record<string, unknown> | null;
+        if (!account) throw new ConfigError('Failed to reserve Stellar account sequence');
+
+        const activeOperationId = account.active_operation_id;
+        if (typeof activeOperationId === 'string') {
+          if (activeOperationId !== input.operationId) return null;
+          const operation = database
+            .prepare('SELECT * FROM stellar_sequence_operations WHERE operation_id = ? LIMIT 1')
+            .get(input.operationId) as Record<string, unknown> | null;
+          if (
+            !operation ||
+            operation.status !== 'pending' ||
+            operation.account_id !== input.accountId ||
+            operation.payload_hash !== payloadHash
+          ) {
+            throw new ConfigError('Stellar sequence operation identity was reused');
+          }
+          const updated = database
+            .prepare(
+              `UPDATE stellar_sequence_operations SET lease_owner = ?, lease_token = ?,
+                lease_expires_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '+' || (? / 1000.0) || ' seconds'),
+                lease_attempt = lease_attempt + 1 WHERE operation_id = ? AND status = 'pending'
+                AND lease_expires_at <= strftime('%Y-%m-%dT%H:%M:%fZ', 'now') RETURNING *`,
+            )
+            .get(input.owner, token, input.durationMs, input.operationId) as Record<
+            string,
+            unknown
+          > | null;
+          if (!updated) return null;
+          database
+            .prepare(
+              `UPDATE stellar_account_sequences SET lease_owner = ?, lease_token = ?,
+                lease_expires_at = ? WHERE account_id = ? AND active_operation_id = ?`,
+            )
+            .run(
+              input.owner,
+              token,
+              String(updated.lease_expires_at),
+              input.accountId,
+              input.operationId,
+            );
+          return this.mapStellarSequenceLease(updated);
+        }
+
+        const existingOperation = database
+          .prepare('SELECT * FROM stellar_sequence_operations WHERE operation_id = ? LIMIT 1')
+          .get(input.operationId) as Record<string, unknown> | null;
+        if (existingOperation) {
+          if (
+            existingOperation.account_id !== input.accountId ||
+            existingOperation.payload_hash !== payloadHash
+          ) {
+            throw new ConfigError('Stellar sequence operation identity was reused');
+          }
+          return null;
+        }
+
+        const lastSequence = BigInt(String(account.last_sequence));
+        const sequence = (networkSequence > lastSequence ? networkSequence : lastSequence) + 1n;
+        this.validateStellarSequence(sequence);
+        const operation = database
+          .prepare(
+            `INSERT INTO stellar_sequence_operations
+              (operation_id, account_id, payload_hash, sequence, status, lease_owner, lease_token, lease_expires_at, lease_attempt)
+              VALUES (?, ?, ?, ?, 'pending', ?, ?, strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '+' || (? / 1000.0) || ' seconds'), 1)
+              RETURNING *`,
+          )
+          .get(
+            input.operationId,
+            input.accountId,
+            payloadHash,
+            sequence.toString(),
+            input.owner,
+            token,
+            input.durationMs,
+          ) as Record<string, unknown> | null;
+        if (!operation) throw new ConfigError('Failed to create Stellar sequence operation');
+        database
+          .prepare(
+            `UPDATE stellar_account_sequences SET last_sequence = ?, active_operation_id = ?,
+              lease_owner = ?, lease_token = ?, lease_expires_at = ? WHERE account_id = ? AND active_operation_id IS NULL`,
+          )
+          .run(
+            sequence.toString(),
+            input.operationId,
+            input.owner,
+            token,
+            String(operation.lease_expires_at),
+            input.accountId,
+          );
+        return this.mapStellarSequenceLease(operation);
+      });
+      return reserve();
+    }
+
+    const postgres = this.requirePostgres();
+    await postgres.query('BEGIN');
+    try {
+      await postgres.query(
+        'INSERT INTO stellar_account_sequences (account_id, last_sequence) VALUES ($1, $2) ON CONFLICT(account_id) DO NOTHING',
+        [input.accountId, input.networkSequence],
+      );
+      const accountResult = await postgres.query<Record<string, unknown>>(
+        'SELECT * FROM stellar_account_sequences WHERE account_id = $1 FOR UPDATE',
+        [input.accountId],
+      );
+      const account = accountResult.rows[0];
+      if (!account) throw new ConfigError('Failed to reserve Stellar account sequence');
+
+      if (typeof account.active_operation_id === 'string') {
+        if (account.active_operation_id !== input.operationId) {
+          await postgres.query('ROLLBACK');
+          return null;
+        }
+        const updated = await postgres.query<Record<string, unknown>>(
+          `UPDATE stellar_sequence_operations SET lease_owner = $1, lease_token = $2,
+            lease_expires_at = clock_timestamp() + ($3 * interval '1 millisecond'), lease_attempt = lease_attempt + 1
+            WHERE operation_id = $4 AND account_id = $5 AND payload_hash = $6 AND status = 'pending'
+              AND lease_expires_at <= clock_timestamp() RETURNING *`,
+          [input.owner, token, input.durationMs, input.operationId, input.accountId, payloadHash],
+        );
+        const operation = updated.rows[0];
+        if (!operation) {
+          const existing = await postgres.query<Record<string, unknown>>(
+            'SELECT account_id, payload_hash, status FROM stellar_sequence_operations WHERE operation_id = $1',
+            [input.operationId],
+          );
+          const existingOperation = existing.rows[0];
+          await postgres.query('ROLLBACK');
+          if (
+            existingOperation &&
+            (existingOperation.account_id !== input.accountId ||
+              existingOperation.payload_hash !== payloadHash)
+          ) {
+            throw new ConfigError('Stellar sequence operation identity was reused');
+          }
+          return null;
+        }
+        await postgres.query(
+          'UPDATE stellar_account_sequences SET lease_owner = $1, lease_token = $2, lease_expires_at = $3 WHERE account_id = $4 AND active_operation_id = $5',
+          [input.owner, token, operation.lease_expires_at, input.accountId, input.operationId],
+        );
+        await postgres.query('COMMIT');
+        return this.mapStellarSequenceLease(operation);
+      }
+
+      const existing = await postgres.query<Record<string, unknown>>(
+        'SELECT account_id, payload_hash FROM stellar_sequence_operations WHERE operation_id = $1',
+        [input.operationId],
+      );
+      const existingOperation = existing.rows[0];
+      if (existingOperation) {
+        await postgres.query('ROLLBACK');
+        if (
+          existingOperation.account_id !== input.accountId ||
+          existingOperation.payload_hash !== payloadHash
+        ) {
+          throw new ConfigError('Stellar sequence operation identity was reused');
+        }
+        return null;
+      }
+
+      const lastSequence = BigInt(String(account.last_sequence));
+      const sequence = (networkSequence > lastSequence ? networkSequence : lastSequence) + 1n;
+      this.validateStellarSequence(sequence);
+      const inserted = await postgres.query<Record<string, unknown>>(
+        `INSERT INTO stellar_sequence_operations
+          (operation_id, account_id, payload_hash, sequence, status, lease_owner, lease_token, lease_expires_at, lease_attempt)
+          VALUES ($1, $2, $3, $4, 'pending', $5, $6, clock_timestamp() + ($7 * interval '1 millisecond'), 1)
+          RETURNING *`,
+        [
+          input.operationId,
+          input.accountId,
+          payloadHash,
+          sequence.toString(),
+          input.owner,
+          token,
+          input.durationMs,
+        ],
+      );
+      const operation = inserted.rows[0];
+      if (!operation) throw new ConfigError('Failed to create Stellar sequence operation');
+      await postgres.query(
+        `UPDATE stellar_account_sequences SET last_sequence = $1, active_operation_id = $2,
+          lease_owner = $3, lease_token = $4, lease_expires_at = $5 WHERE account_id = $6 AND active_operation_id IS NULL`,
+        [
+          sequence.toString(),
+          input.operationId,
+          input.owner,
+          token,
+          operation.lease_expires_at,
+          input.accountId,
+        ],
+      );
+      await postgres.query('COMMIT');
+      return this.mapStellarSequenceLease(operation);
+    } catch (error) {
+      await postgres.query('ROLLBACK').catch(() => undefined);
+      throw error;
+    }
+  }
+
+  public async completeStellarSequenceOperation(input: {
+    accountId: string;
+    operationId: string;
+    token: string;
+  }): Promise<boolean> {
+    if (!input.accountId.trim() || !input.operationId.trim() || !input.token.trim()) {
+      throw new RangeError('Invalid Stellar sequence completion');
+    }
+    if (this.sqlite) {
+      const database = this.sqlite;
+      const complete = database.transaction((): boolean => {
+        const updated = database
+          .prepare(
+            `UPDATE stellar_sequence_operations SET status = 'completed'
+              WHERE operation_id = ? AND account_id = ? AND lease_token = ? AND status = 'pending'
+                AND lease_expires_at > strftime('%Y-%m-%dT%H:%M:%fZ', 'now')`,
+          )
+          .run(input.operationId, input.accountId, input.token);
+        if (updated.changes === 0) return false;
+        const cleared = database
+          .prepare(
+            `UPDATE stellar_account_sequences SET active_operation_id = NULL, lease_owner = NULL,
+              lease_token = NULL, lease_expires_at = NULL WHERE account_id = ? AND active_operation_id = ? AND lease_token = ?`,
+          )
+          .run(input.accountId, input.operationId, input.token);
+        if (cleared.changes === 0)
+          throw new ConfigError('Stellar sequence lease ownership changed');
+        return true;
+      });
+      return complete();
+    }
+
+    const postgres = this.requirePostgres();
+    await postgres.query('BEGIN');
+    try {
+      await postgres.query(
+        'SELECT account_id FROM stellar_account_sequences WHERE account_id = $1 FOR UPDATE',
+        [input.accountId],
+      );
+      const updated = await postgres.query<Record<string, unknown>>(
+        `UPDATE stellar_sequence_operations SET status = 'completed'
+          WHERE operation_id = $1 AND account_id = $2 AND lease_token = $3 AND status = 'pending'
+            AND lease_expires_at > clock_timestamp() RETURNING operation_id`,
+        [input.operationId, input.accountId, input.token],
+      );
+      if (updated.rows.length === 0) {
+        await postgres.query('ROLLBACK');
+        return false;
+      }
+      const cleared = await postgres.query<Record<string, unknown>>(
+        `UPDATE stellar_account_sequences SET active_operation_id = NULL, lease_owner = NULL,
+          lease_token = NULL, lease_expires_at = NULL WHERE account_id = $1 AND active_operation_id = $2 AND lease_token = $3 RETURNING account_id`,
+        [input.accountId, input.operationId, input.token],
+      );
+      if (cleared.rows.length === 0)
+        throw new ConfigError('Stellar sequence lease ownership changed');
+      await postgres.query('COMMIT');
+      return true;
+    } catch (error) {
+      await postgres.query('ROLLBACK').catch(() => undefined);
+      throw error;
+    }
+  }
+
+  private validateStellarSequenceInput(input: {
+    accountId: string;
+    networkSequence: string;
+    operationId: string;
+    payloadHash: string;
+    owner: string;
+    durationMs: number;
+  }): bigint {
+    if (
+      !input.accountId.trim() ||
+      input.accountId.length > 128 ||
+      !input.operationId.trim() ||
+      input.operationId.length > 255 ||
+      !input.owner.trim() ||
+      input.owner.length > 255 ||
+      !/^[a-fA-F0-9]{64}$/.test(input.payloadHash) ||
+      !/^(0|[1-9]\d*)$/.test(input.networkSequence) ||
+      input.networkSequence.length > 19 ||
+      !Number.isSafeInteger(input.durationMs) ||
+      input.durationMs < 1 ||
+      input.durationMs > 86400000
+    ) {
+      throw new RangeError('Invalid Stellar sequence lease parameters');
+    }
+    const sequence = BigInt(input.networkSequence);
+    this.validateStellarSequence(sequence);
+    return sequence;
+  }
+
+  private validateStellarSequence(sequence: bigint): void {
+    if (sequence < 0n || sequence >= 9223372036854775807n) {
+      throw new RangeError('Stellar sequence must be below INT64_MAX');
+    }
+  }
+
+  private mapStellarSequenceLease(row: Record<string, unknown>): StellarSequenceLease {
+    const expiresAt = row.lease_expires_at;
+    return {
+      accountId: String(row.account_id),
+      sequence: String(row.sequence),
+      operationId: String(row.operation_id),
+      payloadHash: String(row.payload_hash),
+      owner: String(row.lease_owner),
+      token: String(row.lease_token),
+      expiresAt: expiresAt instanceof Date ? expiresAt.toISOString() : String(expiresAt),
+      attempt: Number(row.lease_attempt),
+    };
+  }
+
+  private validateSettlementLeaseInput(
+    operationId: string,
+    identity: string,
+    durationMs: number,
+  ): void {
+    if (
+      !operationId.trim() ||
+      !identity.trim() ||
+      !Number.isSafeInteger(durationMs) ||
+      durationMs < 1 ||
+      durationMs > 86400000
+    ) {
+      throw new RangeError('Invalid settlement lease parameters');
+    }
+  }
+
+  public async updateSettlementJobStatus(_input: {
     operationId: string;
     status: SettlementJobRecord['status'];
   }): Promise<boolean> {
-    const updatedAt = nowIso();
-    if (this.sqlite) {
-      const result = this.sqlite
-        .prepare('UPDATE settlement_jobs SET status = ?, updated_at = ? WHERE operation_id = ?')
-        .run(input.status, updatedAt, input.operationId);
-      return result.changes > 0;
+    throw new ConfigError('Settlement job status changes require a lease token');
+  }
+
+  public async recordReconciledRailPayment(input: {
+    transactionId: string;
+    operationId: string;
+    jobId: string;
+  }): Promise<ReconciledRailPaymentResult> {
+    if (!input.transactionId.trim() || !input.operationId.trim() || !input.jobId.trim()) {
+      throw new ConfigError('Reconciled rail payment identifiers must not be empty');
     }
-    const response = await this.requirePostgres().query<{ operation_id: string }>(
-      'UPDATE settlement_jobs SET status = $1, updated_at = $2 WHERE operation_id = $3 RETURNING operation_id',
-      [input.status, updatedAt, input.operationId],
-    );
-    return response.rows.length > 0;
+
+    const payloadRef = `transaction:${input.transactionId}`;
+    const createdAt = nowIso();
+
+    if (this.sqlite) {
+      const database = this.sqlite;
+      const record = database.transaction((): ReconciledRailPaymentResult => {
+        const transactionRow = database
+          .prepare('SELECT * FROM interactive_transactions WHERE id = ? LIMIT 1')
+          .get(input.transactionId) as Record<string, unknown> | null;
+        if (!transactionRow) {
+          return { outcome: 'conflict', reason: 'not_found', transaction: null };
+        }
+
+        const transaction = this.mapTransactionRow(transactionRow);
+        const jobRow = database
+          .prepare('SELECT * FROM settlement_jobs WHERE operation_id = ? LIMIT 1')
+          .get(input.operationId) as Record<string, unknown> | null;
+
+        if (transaction.status === 'pending_stellar') {
+          if (jobRow && String(jobRow.payload_ref) === payloadRef) {
+            return {
+              outcome: 'replayed',
+              transaction,
+              job: this.mapSettlementJobRow(jobRow),
+            };
+          }
+          return {
+            outcome: 'conflict',
+            reason: jobRow ? 'operation_reused' : 'status_mismatch',
+            transaction,
+          };
+        }
+
+        if (transaction.status !== 'pending_external') {
+          return { outcome: 'conflict', reason: 'status_mismatch', transaction };
+        }
+        if (jobRow) {
+          return {
+            outcome: 'conflict',
+            reason:
+              String(jobRow.payload_ref) === payloadRef ? 'status_mismatch' : 'operation_reused',
+            transaction,
+          };
+        }
+
+        const updatedAt = nowIso();
+        const update = database
+          .prepare(
+            "UPDATE interactive_transactions SET status = 'pending_stellar', updated_at = ? WHERE id = ? AND status = 'pending_external'",
+          )
+          .run(updatedAt, input.transactionId);
+        if (update.changes !== 1) {
+          const currentRow = database
+            .prepare('SELECT * FROM interactive_transactions WHERE id = ? LIMIT 1')
+            .get(input.transactionId) as Record<string, unknown> | null;
+          return {
+            outcome: 'conflict',
+            reason: currentRow ? 'status_mismatch' : 'not_found',
+            transaction: currentRow ? this.mapTransactionRow(currentRow) : null,
+          };
+        }
+
+        database
+          .prepare(
+            "INSERT INTO settlement_jobs (id, operation_id, payload_ref, status, created_at, updated_at) VALUES (?, ?, ?, 'pending', ?, ?)",
+          )
+          .run(input.jobId, input.operationId, payloadRef, createdAt, createdAt);
+
+        const updatedRow = database
+          .prepare('SELECT * FROM interactive_transactions WHERE id = ? LIMIT 1')
+          .get(input.transactionId) as Record<string, unknown> | null;
+        const insertedJobRow = database
+          .prepare('SELECT * FROM settlement_jobs WHERE operation_id = ? LIMIT 1')
+          .get(input.operationId) as Record<string, unknown> | null;
+        if (!updatedRow || !insertedJobRow) {
+          throw new ConfigError('Reconciled rail payment was not persisted atomically');
+        }
+
+        return {
+          outcome: 'enqueued',
+          transaction: this.mapTransactionRow(updatedRow),
+          job: this.mapSettlementJobRow(insertedJobRow),
+        };
+      });
+      return record.immediate();
+    }
+
+    const Client = this.postgresClientConstructor;
+    if (!Client) throw new ConfigError('PostgreSQL client is not connected');
+
+    const postgres = new Client({ connectionString: this.url });
+    return (async (): Promise<ReconciledRailPaymentResult> => {
+      let transactionStarted = false;
+      let operationError: unknown;
+      try {
+        await postgres.connect();
+        await postgres.query(`SET search_path TO "${this.schema ?? 'public'}"`);
+        await postgres.query('BEGIN');
+        transactionStarted = true;
+
+        const currentResponse = await postgres.query<Record<string, unknown>>(
+          'SELECT * FROM interactive_transactions WHERE id = $1 LIMIT 1 FOR UPDATE',
+          [input.transactionId],
+        );
+        const currentRow = currentResponse.rows[0];
+        if (!currentRow) {
+          await postgres.query('COMMIT');
+          transactionStarted = false;
+          return { outcome: 'conflict', reason: 'not_found', transaction: null };
+        }
+        const transaction = this.mapTransactionRow(currentRow);
+
+        const existingJobResponse = await postgres.query<Record<string, unknown>>(
+          'SELECT * FROM settlement_jobs WHERE operation_id = $1 LIMIT 1',
+          [input.operationId],
+        );
+        const existingJob = existingJobResponse.rows[0];
+        if (transaction.status === 'pending_stellar') {
+          await postgres.query('COMMIT');
+          transactionStarted = false;
+          if (existingJob && String(existingJob.payload_ref) === payloadRef) {
+            return {
+              outcome: 'replayed',
+              transaction,
+              job: this.mapSettlementJobRow(existingJob),
+            };
+          }
+          return {
+            outcome: 'conflict',
+            reason: existingJob ? 'operation_reused' : 'status_mismatch',
+            transaction,
+          };
+        }
+
+        if (transaction.status !== 'pending_external' || existingJob) {
+          await postgres.query('COMMIT');
+          transactionStarted = false;
+          return {
+            outcome: 'conflict',
+            reason:
+              transaction.status !== 'pending_external'
+                ? 'status_mismatch'
+                : existingJob && String(existingJob.payload_ref) !== payloadRef
+                  ? 'operation_reused'
+                  : 'status_mismatch',
+            transaction,
+          };
+        }
+
+        const updatedResponse = await postgres.query<Record<string, unknown>>(
+          "UPDATE interactive_transactions SET status = 'pending_stellar', updated_at = $1 WHERE id = $2 AND status = 'pending_external' RETURNING *",
+          [nowIso(), input.transactionId],
+        );
+        const updatedRow = updatedResponse.rows[0];
+        if (!updatedRow) {
+          const latestResponse = await postgres.query<Record<string, unknown>>(
+            'SELECT * FROM interactive_transactions WHERE id = $1 LIMIT 1',
+            [input.transactionId],
+          );
+          await postgres.query('COMMIT');
+          transactionStarted = false;
+          const latestRow = latestResponse.rows[0];
+          return {
+            outcome: 'conflict',
+            reason: latestRow ? 'status_mismatch' : 'not_found',
+            transaction: latestRow ? this.mapTransactionRow(latestRow) : null,
+          };
+        }
+
+        const jobResponse = await postgres.query<Record<string, unknown>>(
+          "INSERT INTO settlement_jobs (id, operation_id, payload_ref, status, created_at, updated_at) VALUES ($1, $2, $3, 'pending', $4, $4) ON CONFLICT(operation_id) DO NOTHING RETURNING *",
+          [input.jobId, input.operationId, payloadRef, createdAt],
+        );
+        const jobRow = jobResponse.rows[0];
+        if (!jobRow) {
+          throw new ConfigError('Settlement operation was already recorded before its transition');
+        }
+
+        await postgres.query('COMMIT');
+        transactionStarted = false;
+        return {
+          outcome: 'enqueued',
+          transaction: this.mapTransactionRow(updatedRow),
+          job: this.mapSettlementJobRow(jobRow),
+        };
+      } catch (error) {
+        operationError = error;
+        if (transactionStarted) {
+          try {
+            await postgres.query('ROLLBACK');
+          } catch (rollbackError) {
+            operationError = new AggregateError(
+              [error, rollbackError],
+              'Rail settlement rollback failed',
+              {
+                cause: error,
+              },
+            );
+          }
+        }
+      }
+
+      throw operationError;
+    })().finally(async () => {
+      await postgres.end();
+    });
   }
 
   public async cleanupOldRecords(cutoffIso: string): Promise<void> {
@@ -2235,6 +3836,7 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
     // while only entries strictly older than the cutoff are removed.
     if (this.sqlite) {
       this.sqlite.prepare('DELETE FROM auth_challenges WHERE expires_at < ?').run(cutoffIso);
+      this.sqlite.prepare('DELETE FROM interactive_sessions WHERE expires_at < ?').run(cutoffIso);
       this.sqlite.prepare('DELETE FROM idempotency_keys WHERE created_at < ?').run(cutoffIso);
       this.sqlite
         .prepare(
@@ -2250,6 +3852,9 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
     }
 
     await this.requirePostgres().query('DELETE FROM auth_challenges WHERE expires_at < $1', [
+      cutoffIso,
+    ]);
+    await this.requirePostgres().query('DELETE FROM interactive_sessions WHERE expires_at < $1', [
       cutoffIso,
     ]);
     await this.requirePostgres().query('DELETE FROM idempotency_keys WHERE created_at < $1', [
@@ -2293,8 +3898,30 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
           ? null
           : String(row.stellar_transaction_hash),
       status,
-      createdAt: String(row.created_at),
-      updatedAt: String(row.updated_at),
+      createdAt:
+        row.created_at instanceof Date ? row.created_at.toISOString() : String(row.created_at),
+      updatedAt:
+        row.updated_at instanceof Date ? row.updated_at.toISOString() : String(row.updated_at),
+    };
+  }
+
+  private mapInteractiveSessionRow(row: Record<string, unknown>): InteractiveSessionRecord {
+    return {
+      id: String(row.id),
+      account: String(row.account),
+      transactionId: String(row.transaction_id),
+      actions: parseJsonStringArray(row.actions, this.provider === 'sqlite'),
+      consumedActions: parseJsonStringArray(row.consumed_actions, this.provider === 'sqlite'),
+      expiresAt:
+        row.expires_at instanceof Date ? row.expires_at.toISOString() : String(row.expires_at),
+      revokedAt:
+        row.revoked_at === null || row.revoked_at === undefined
+          ? null
+          : row.revoked_at instanceof Date
+            ? row.revoked_at.toISOString()
+            : String(row.revoked_at),
+      createdAt:
+        row.created_at instanceof Date ? row.created_at.toISOString() : String(row.created_at),
     };
   }
 
@@ -2331,6 +3958,12 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
   private mapWebhookRow(row: Record<string, unknown>): WebhookEventRecord {
     const payload = parseJsonObject(row.payload, this.provider === 'sqlite');
     const status = parsePersistedWebhookStatus(row.status);
+    const recoveryResult =
+      row.recovery_result == null
+        ? null
+        : parseRecoveredOperation(parseJsonObject(row.recovery_result, this.provider === 'sqlite'));
+    if (row.recovery_result != null && recoveryResult === null)
+      throw new MalformedPersistedDataError('Invalid persisted webhook recovery result');
 
     return {
       id: String(row.id),
@@ -2338,6 +3971,7 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
       provider: String(row.provider),
       payload,
       status,
+      ...(recoveryResult === null ? {} : { recoveryResult }),
       errorMessage: row.error_message ? String(row.error_message) : null,
       processedAt: row.processed_at ? String(row.processed_at) : null,
       createdAt: String(row.created_at),

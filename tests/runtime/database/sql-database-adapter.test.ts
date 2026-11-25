@@ -39,6 +39,21 @@ describe('SqlDatabaseAdapter (sqlite)', () => {
     }
   });
 
+  it('finalizes outstanding prepared statements before disconnect', async () => {
+    const database = (adapter as unknown as { sqlite: Database }).sqlite;
+    const statement = database.prepare('SELECT 1');
+    const finalize = statement.finalize.bind(statement);
+    let finalized = false;
+    statement.finalize = () => {
+      finalized = true;
+      finalize();
+    };
+
+    await adapter.disconnect();
+
+    expect(finalized).toBe(true);
+  });
+
   it('persists and consumes auth challenges correctly', async () => {
     await adapter.insertAuthChallenge({
       id: 'challenge-1',
@@ -207,6 +222,35 @@ describe('SqlDatabaseAdapter (sqlite)', () => {
     await adapter.migrate();
     await expect(adapter.getCustomerByAccountId('GACCOUNTONE')).resolves.toEqual(first);
     await expect(adapter.getCustomerByAccountId('GACCOUNTTWO')).resolves.toEqual(second);
+  });
+
+  it('updates customer KYC data only through its associated account', async () => {
+    const customer = await adapter.insertOrGetCustomer({
+      id: 'customer-kyc-update',
+      account_id: 'GACCOUNTKYC',
+      kyc_data: { status: 'pending' },
+    });
+
+    await expect(
+      adapter.updateCustomer({
+        id: customer.id,
+        account_id: 'GOTHERACCOUNT',
+        kyc_data: { status: 'approved', first_name: 'Ada' },
+      }),
+    ).resolves.toBe(false);
+    await expect(
+      adapter.updateCustomer({
+        id: customer.id,
+        account_id: 'GACCOUNTKYC',
+        email_address: 'ada@example.com',
+        kyc_data: { status: 'approved', first_name: 'Ada' },
+      }),
+    ).resolves.toBe(true);
+    await expect(adapter.getCustomerByAccountId('GACCOUNTKYC')).resolves.toMatchObject({
+      account_id: 'GACCOUNTKYC',
+      email_address: 'ada@example.com',
+      kyc_data: { status: 'approved', first_name: 'Ada' },
+    });
   });
 
   it('updates an idempotency record without changing its identity fields', async () => {

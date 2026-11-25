@@ -1,15 +1,19 @@
 import type {
   DatabaseAdapter,
+  PaymentRailAdapter,
   WebhookCallbackContext,
   WebhookEventRecord,
   WebhookProcessor,
 } from '@/runtime/interfaces.ts';
 import type { AnchorKitConfig, AnchorKitConfigSnapshot } from '@/types/config.ts';
 import { createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
+import { parseRecoveredOperation } from './recovery-result.ts';
+import type { PaymentRailOperation } from '@/types/transaction.ts';
 
 interface DefaultWebhookProcessorOptions {
   config: AnchorKitConfigSnapshot;
   database: DatabaseAdapter;
+  paymentRailAdapters?: readonly PaymentRailAdapter[];
 }
 
 const DEFAULT_CALLBACK_TIMEOUT_MS = 30_000;
@@ -45,6 +49,7 @@ export function deriveWebhookOperationKey(provider: string, eventId: string): st
 export class DefaultWebhookProcessor implements WebhookProcessor {
   private readonly config: AnchorKitConfigSnapshot;
   private readonly database: DatabaseAdapter;
+  private readonly paymentRailAdapters?: ReadonlyMap<string, PaymentRailAdapter>;
   private readonly activeControllers = new Set<AbortController>();
   private readonly activeProcesses = new Set<Promise<{ duplicate: boolean; eventId: string }>>();
   private shuttingDown = false;
@@ -52,6 +57,16 @@ export class DefaultWebhookProcessor implements WebhookProcessor {
   constructor(options: DefaultWebhookProcessorOptions) {
     this.config = options.config;
     this.database = options.database;
+    if (options.paymentRailAdapters) {
+      const adapters = new Map<string, PaymentRailAdapter>();
+      for (const adapter of options.paymentRailAdapters) {
+        if (!adapter.provider.trim() || adapters.has(adapter.provider)) {
+          throw new Error('Payment rail provider names must be non-empty and unique');
+        }
+        adapters.set(adapter.provider, adapter);
+      }
+      this.paymentRailAdapters = adapters;
+    }
   }
 
   public async process(input: {
@@ -66,11 +81,50 @@ export class DefaultWebhookProcessor implements WebhookProcessor {
     eventId: string;
     provider: string;
     status?: WebhookEventRecord['status'];
+    recoveryResult?: PaymentRailOperation | null;
     operationKey?: string;
     attemptId?: string;
     attemptCount?: number;
   }> {
-    this.verifySignatureIfEnabled(input);
+    if (this.paymentRailAdapters) {
+      const adapter = this.paymentRailAdapters.get(input.provider);
+      if (!adapter || !adapter.capabilities.eventVerification)
+        throw new Error('Unsupported webhook provider');
+      let verified: Awaited<ReturnType<PaymentRailAdapter['verifyEvent']>>;
+      try {
+        verified = await adapter.verifyEvent({
+          rawBody: input.rawBody,
+          signature: input.signature,
+        });
+      } catch {
+        throw new Error('Webhook verification failed');
+      }
+      if (
+        !verified.supported ||
+        verified.value.provider !== input.provider ||
+        !verified.value.eventId.trim()
+      ) {
+        throw new Error('Webhook verification failed');
+      }
+      const event = verified.value;
+      input = {
+        ...input,
+        eventId: event.eventId,
+        payload: {
+          eventId: event.eventId,
+          provider: event.provider,
+          reference: event.reference,
+          ...(event.providerReference === undefined
+            ? {}
+            : { providerReference: event.providerReference }),
+          amount: { amount: event.amount.amount, currency: event.amount.currency },
+          status: event.status,
+          occurredAt: event.occurredAt,
+        },
+      };
+    } else {
+      this.verifySignatureIfEnabled(input);
+    }
 
     const operationKey = deriveWebhookOperationKey(input.provider, input.eventId);
 
@@ -88,10 +142,15 @@ export class DefaultWebhookProcessor implements WebhookProcessor {
         eventId: insertion.record.eventId,
         provider: insertion.record.provider,
         status: insertion.record.status,
+        recoveryResult: insertion.record.recoveryResult,
         operationKey: insertion.record.operationKey,
         attemptId: insertion.record.attemptId ?? undefined,
         attemptCount: insertion.record.attemptCount,
       };
+    }
+
+    if (insertion.record.attemptCount > 0) {
+      return this.reconcilePreviousAttempt(insertion.record);
     }
 
     const leaseOwner = randomUUID();
@@ -189,6 +248,86 @@ export class DefaultWebhookProcessor implements WebhookProcessor {
       operationKey: claimed.operationKey,
       attemptId: attemptId,
       attemptCount: claimed.attemptCount,
+    };
+  }
+
+  private async reconcilePreviousAttempt(record: WebhookEventRecord): Promise<{
+    duplicate: boolean;
+    eventId: string;
+    provider: string;
+    status: WebhookEventRecord['status'];
+    operationKey: string;
+    recoveryResult?: PaymentRailOperation | null;
+  }> {
+    const leaseOwner = randomUUID();
+    const claimed = await this.database.claimWebhookRecovery({
+      id: record.id,
+      leaseOwner,
+      leaseDurationMs: DEFAULT_LEASE_DURATION_MS,
+    });
+    if (!claimed || !claimed.attemptId) {
+      return {
+        duplicate: true,
+        eventId: record.eventId,
+        provider: record.provider,
+        status: record.status,
+        operationKey: record.operationKey,
+        recoveryResult: record.recoveryResult,
+      };
+    }
+
+    let recovered: PaymentRailOperation | null = null;
+    const recover = this.config.webhooks?.recoverOperation;
+    if (recover) {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        const candidate = await Promise.race([
+          Promise.resolve().then(() =>
+            recover({
+              operationKey: claimed.operationKey,
+              provider: claimed.provider,
+              eventId: claimed.eventId,
+            }),
+          ),
+          new Promise<null>((resolve) => {
+            timer = setTimeout(
+              () => resolve(null),
+              Math.min(
+                this.config.webhooks?.callbackTimeoutMs ?? DEFAULT_CALLBACK_TIMEOUT_MS,
+                DEFAULT_CALLBACK_TIMEOUT_MS,
+              ),
+            );
+          }),
+        ]);
+        const parsed = parseRecoveredOperation(candidate);
+        if (parsed?.operationId === claimed.operationKey && parsed.provider === claimed.provider)
+          recovered = parsed;
+      } catch {
+        // A failed lookup is ambiguous and must not trigger a new side effect.
+      } finally {
+        if (timer) clearTimeout(timer);
+      }
+    }
+    const status =
+      recovered?.status === 'succeeded'
+        ? 'processed'
+        : recovered?.status === 'failed'
+          ? 'failed'
+          : 'unresolved';
+    const recorded = await this.database.completeWebhookRecovery({
+      id: claimed.id,
+      attemptId: claimed.attemptId,
+      leaseOwner,
+      status,
+      result: recovered,
+    });
+    return {
+      duplicate: true,
+      eventId: claimed.eventId,
+      provider: claimed.provider,
+      status: recorded ? status : 'unresolved',
+      operationKey: claimed.operationKey,
+      recoveryResult: recorded ? recovered : null,
     };
   }
 
