@@ -150,6 +150,13 @@ This helper does not fetch account data, change transaction state, or sign a pay
 The settlement worker must fetch fresh network data, apply a guarded state transition,
 and check again before signing. Ledger state can change after a readiness check.
 
+## Rail event matching
+
+Run `bun test tests/runtime/rail-event-matching.test.ts`; all assertions should pass.
+`matchRailEvent` compares a previously verified provider event against stored
+expectations using exact decimal arithmetic. It does not verify signatures, persist
+replays, or transition a deposit. Those steps must be completed before settlement.
+
 ## Deposit form input
 
 Run `bun test tests/mvp-express.integration.test.ts`; all assertions should pass.
