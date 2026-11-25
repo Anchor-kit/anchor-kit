@@ -43,3 +43,49 @@ All variables are optional. When unset the listed default applies.
 ```bash
 curl -s http://localhost:3000/anchor/health
 ```
+
+## Wallet sign-in example
+
+`AnchorClient` accepts the wallet's signing function. It refreshes the SEP-10 token with a new challenge when the server's expiry time is reached.
+
+```tsx
+import { useState } from 'react';
+import { AnchorClient, type AnchorWalletSession } from 'anchor-kit';
+
+const client = new AnchorClient({
+  authEndpoint: 'https://anchor.example/auth',
+  transferServer: 'https://anchor.example/sep24',
+});
+
+function ConnectWallet({
+  account,
+  wallet,
+}: {
+  account: string;
+  wallet: {
+    signTransaction: (
+      transaction: string,
+      options: { networkPassphrase?: string },
+    ) => Promise<string>;
+  };
+}) {
+  const [session, setSession] = useState<AnchorWalletSession | null>(null);
+
+  async function connect() {
+    const next = await client.createWalletSession(account, ({ transaction, networkPassphrase }) =>
+      wallet.signTransaction(transaction, { networkPassphrase }),
+    );
+    setSession(next);
+  }
+
+  async function loadTransactions() {
+    if (!session) return;
+    const token = await session.getAccessToken();
+    return client.getTransaction(token, 'transaction-id');
+  }
+
+  return <button onClick={connect}>Connect wallet</button>;
+}
+```
+
+Vue apps can keep the same session in a `shallowRef` and call `session.value?.getAccessToken()` before authenticated requests. Wallet signature rejection remains an error the app can show to the user.

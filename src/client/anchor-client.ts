@@ -15,6 +15,8 @@ export interface AuthChallenge {
 }
 export interface AuthToken {
   token: string;
+  expires_in?: number;
+  expires_at?: string;
 }
 export interface DepositRequest {
   asset_code: string;
@@ -43,6 +45,43 @@ export type Sep10WalletSigner = (input: {
   transaction: string;
   networkPassphrase?: string;
 }) => Promise<string>;
+
+export class AnchorWalletSession {
+  private token: AuthToken;
+  private refreshPromise: Promise<AuthToken> | null = null;
+
+  constructor(
+    token: AuthToken,
+    private readonly refreshToken: () => Promise<AuthToken>,
+    private readonly refreshSkewMs = 30_000,
+  ) {
+    this.token = token;
+  }
+
+  async getAccessToken(): Promise<string> {
+    const expiresAt = this.token.expires_at
+      ? Date.parse(this.token.expires_at)
+      : this.token.expires_in === undefined
+        ? Number.POSITIVE_INFINITY
+        : Date.now() + this.token.expires_in * 1000;
+    if (expiresAt <= Date.now() + this.refreshSkewMs) await this.refresh();
+    return this.token.token;
+  }
+
+  async refresh(): Promise<AuthToken> {
+    if (!this.refreshPromise) {
+      this.refreshPromise = this.refreshToken().then((token) => {
+        this.token = token;
+        return token;
+      });
+    }
+    try {
+      return await this.refreshPromise;
+    } finally {
+      this.refreshPromise = null;
+    }
+  }
+}
 
 function checkedEndpoint(value: string): URL {
   const url = new URL(value);
@@ -119,8 +158,22 @@ export class AnchorClient {
         body,
       }),
     );
-    if (!result || !nonempty(result.token)) throw new AnchorClientError('invalid_response');
-    return { token: result.token };
+    if (
+      !result ||
+      !nonempty(result.token) ||
+      (result.expires_in !== undefined &&
+        (typeof result.expires_in !== 'number' ||
+          !Number.isFinite(result.expires_in) ||
+          result.expires_in < 0)) ||
+      (result.expires_at !== undefined &&
+        (typeof result.expires_at !== 'string' || !Number.isFinite(Date.parse(result.expires_at))))
+    )
+      throw new AnchorClientError('invalid_response');
+    return {
+      token: result.token,
+      ...(typeof result.expires_in === 'number' ? { expires_in: result.expires_in } : {}),
+      ...(typeof result.expires_at === 'string' ? { expires_at: result.expires_at } : {}),
+    };
   }
   /** Complete SEP-10 using an injected wallet signer; wallet errors remain visible to callers. */
   async authenticate(account: string, signChallenge: Sep10WalletSigner): Promise<AuthToken> {
@@ -133,6 +186,13 @@ export class AnchorClient {
     });
     if (!nonempty(signedTransaction)) throw new AnchorClientError('invalid_response');
     return this.exchangeChallenge(signedTransaction);
+  }
+  async createWalletSession(
+    account: string,
+    signChallenge: Sep10WalletSigner,
+  ): Promise<AnchorWalletSession> {
+    const token = await this.authenticate(account, signChallenge);
+    return new AnchorWalletSession(token, () => this.authenticate(account, signChallenge));
   }
   async initiateDeposit(token: string, input: DepositRequest): Promise<InteractiveResponse> {
     const result = object(

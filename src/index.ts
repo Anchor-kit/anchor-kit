@@ -84,7 +84,7 @@ export type {
 } from './runtime/settlement/recipient-readiness.ts';
 export { matchRailEvent } from './runtime/settlement/match-rail-event.ts';
 export type { RailMatchResult } from './runtime/settlement/match-rail-event.ts';
-export { AnchorClient, AnchorClientError } from './client/anchor-client.ts';
+export { AnchorClient, AnchorClientError, AnchorWalletSession } from './client/anchor-client.ts';
 export type {
   AnchorClientOptions,
   AuthChallenge,
