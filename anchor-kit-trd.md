@@ -29,6 +29,7 @@ Deferred work must remain labeled planned until the corresponding implementation
 
 - `bun test tests/types/transaction-status.test.ts tests/types/plugin.test.ts` — passes; checks the typed deposit transitions and plugin contracts, including compile-time rejection fixtures.
 - `bun test tests/runtime/postgres-adapter.integration.test.ts` — with `DATABASE_URL` pointing at a disposable PostgreSQL database, passes migration, persistence, and concurrent duplicate-delivery assertions. Without the variable the focused suite is skipped; CI sets it and separately fails if PostgreSQL setup or connectivity fails.
+- `bun test tests/runtime/postgres-migration-lock.integration.test.ts` — with `TEST_POSTGRES_URL` or `DATABASE_URL` pointing at a disposable PostgreSQL database, passes two-connection migration contention assertions (no duplicate migration records or partial schema) and a failed-migration retry assertion. Without either variable the focused suite is skipped; CI runs it against its disposable PostgreSQL service.
 - `bun run typecheck` — passes TypeScript and lint checks.
 
 # **Architecting the Financial Bridge: A Technical Specification for the Anchor-in-a-Box SDK**

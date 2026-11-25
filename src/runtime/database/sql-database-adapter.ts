@@ -604,6 +604,43 @@ async function withSqliteMigrationLock<T>(key: string, migrate: () => Promise<T>
 }
 
 /**
+ * Advisory lock identifiers for PostgreSQL migrations.
+ *
+ * The key is derived from the database and current schema so independent
+ * adapter connections targeting the same database serialize their migrations,
+ * while unrelated databases in the same cluster do not block each other.
+ */
+const POSTGRES_MIGRATION_LOCK_SQL =
+  "SELECT pg_advisory_lock(hashtext(current_database() || ':' || COALESCE(current_schema(), ''))::bigint)";
+const POSTGRES_MIGRATION_UNLOCK_SQL =
+  "SELECT pg_advisory_unlock(hashtext(current_database() || ':' || COALESCE(current_schema(), ''))::bigint)";
+
+/**
+ * Serializes PostgreSQL migrations across connections and processes.
+ *
+ * The lock is session scoped so it survives the per-migration BEGIN/COMMIT
+ * pairs and also covers the metadata bootstrap and post-migration DDL passes.
+ * It is always released in `finally`, including after a failed migration, so a
+ * later caller can re-read the migration records and retry the work.
+ */
+async function withPostgresMigrationLock<T>(
+  client: PostgresClient,
+  migrate: () => Promise<T>,
+): Promise<T> {
+  await client.query(POSTGRES_MIGRATION_LOCK_SQL);
+  try {
+    return await migrate();
+  } finally {
+    try {
+      await client.query(POSTGRES_MIGRATION_UNLOCK_SQL);
+    } catch {
+      // A broken connection releases session locks on its own. Never let
+      // unlock cleanup hide the original migration error.
+    }
+  }
+}
+
+/**
  * Applies the concurrency settings to a freshly opened SQLite connection.
  *
  * `busy_timeout` applies to every connection, including in-memory ones, while
@@ -970,80 +1007,82 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
 
     if (this.postgres) {
       const postgres = this.postgres;
-      await postgres.query(`
-        CREATE TABLE IF NOT EXISTS anchor_kit_migrations (
-          name TEXT PRIMARY KEY,
-          applied_at TIMESTAMPTZ NOT NULL
-        )
-      `);
-      const result = await postgres.query<{ name: string }>(
-        'SELECT name FROM anchor_kit_migrations',
-      );
-      const applied = new Set(result.rows.map((row) => row.name));
-      const context: SchemaMigrationContext = {
-        dialect: 'postgres',
-        execute: async (sql) => {
-          await postgres.query(sql);
-        },
-        hasColumn: async (table, column) => {
-          const columns = await postgres.query<{ exists: boolean }>(
-            `SELECT EXISTS (
-              SELECT 1 FROM information_schema.columns
-              WHERE table_schema = current_schema() AND table_name = $1 AND column_name = $2
-            ) AS exists`,
-            [table, column],
+      await withPostgresMigrationLock(postgres, async () => {
+        await postgres.query(`
+          CREATE TABLE IF NOT EXISTS anchor_kit_migrations (
+            name TEXT PRIMARY KEY,
+            applied_at TIMESTAMPTZ NOT NULL
+          )
+        `);
+        const result = await postgres.query<{ name: string }>(
+          'SELECT name FROM anchor_kit_migrations',
+        );
+        const applied = new Set(result.rows.map((row) => row.name));
+        const context: SchemaMigrationContext = {
+          dialect: 'postgres',
+          execute: async (sql) => {
+            await postgres.query(sql);
+          },
+          hasColumn: async (table, column) => {
+            const columns = await postgres.query<{ exists: boolean }>(
+              `SELECT EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_schema = current_schema() AND table_name = $1 AND column_name = $2
+              ) AS exists`,
+              [table, column],
+            );
+            return columns.rows[0]?.exists === true;
+          },
+        };
+        await this.applyMigrations(migrations, applied, context, {
+          begin: async () => {
+            await postgres.query('BEGIN');
+          },
+          commit: async () => {
+            await postgres.query('COMMIT');
+          },
+          rollback: async () => {
+            await postgres.query('ROLLBACK');
+          },
+          isApplied: async (name) => {
+            const existing = await postgres.query(
+              'SELECT 1 FROM anchor_kit_migrations WHERE name = $1',
+              [name],
+            );
+            return existing.rows.length > 0;
+          },
+          record: async (name) => {
+            await postgres.query(
+              'INSERT INTO anchor_kit_migrations (name, applied_at) VALUES ($1, $2)',
+              [name, nowIso()],
+            );
+          },
+        });
+        await postgres.query(`
+          CREATE TABLE IF NOT EXISTS schema_migrations (
+            version TEXT PRIMARY KEY,
+            applied_at TIMESTAMPTZ NOT NULL
           );
-          return columns.rows[0]?.exists === true;
-        },
-      };
-      await this.applyMigrations(migrations, applied, context, {
-        begin: async () => {
-          await postgres.query('BEGIN');
-        },
-        commit: async () => {
-          await postgres.query('COMMIT');
-        },
-        rollback: async () => {
-          await postgres.query('ROLLBACK');
-        },
-        isApplied: async (name) => {
-          const existing = await postgres.query(
-            'SELECT 1 FROM anchor_kit_migrations WHERE name = $1',
-            [name],
-          );
-          return existing.rows.length > 0;
-        },
-        record: async (name) => {
+        `);
+        for (const column of [
+          'amount_in TEXT',
+          'amount_out TEXT',
+          'amount_fee TEXT',
+          'currency TEXT',
+          'rail_reference TEXT',
+          'stellar_transaction_hash TEXT',
+          'stellar_signed_xdr TEXT',
+        ]) {
           await postgres.query(
-            'INSERT INTO anchor_kit_migrations (name, applied_at) VALUES ($1, $2)',
-            [name, nowIso()],
+            `ALTER TABLE interactive_transactions ADD COLUMN IF NOT EXISTS ${column}`,
           );
-        },
+        }
+        await this.upgradeLegacyWebhookDedupePostgres();
+        await this.applyWebhookAttemptMigrationPostgres();
+        for (const statement of POSTGRES_INDEX_STATEMENTS) {
+          await postgres.query(statement);
+        }
       });
-      await this.postgres.query(`
-        CREATE TABLE IF NOT EXISTS schema_migrations (
-          version TEXT PRIMARY KEY,
-          applied_at TIMESTAMPTZ NOT NULL
-        );
-      `);
-      for (const column of [
-        'amount_in TEXT',
-        'amount_out TEXT',
-        'amount_fee TEXT',
-        'currency TEXT',
-        'rail_reference TEXT',
-        'stellar_transaction_hash TEXT',
-        'stellar_signed_xdr TEXT',
-      ]) {
-        await this.postgres.query(
-          `ALTER TABLE interactive_transactions ADD COLUMN IF NOT EXISTS ${column}`,
-        );
-      }
-      await this.upgradeLegacyWebhookDedupePostgres();
-      await this.applyWebhookAttemptMigrationPostgres();
-      for (const statement of POSTGRES_INDEX_STATEMENTS) {
-        await this.postgres.query(statement);
-      }
       return;
     }
 
