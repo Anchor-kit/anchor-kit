@@ -20,7 +20,7 @@ export type PersistedStellarSubmissionRecoveryResult =
 
 /** Load the stored hash by transaction ID and reconcile it without creating a new envelope. */
 export async function recoverPersistedStellarSubmission(
-  database: Pick<DatabaseAdapter, 'getInteractiveTransactionById'>,
+  database: Pick<DatabaseAdapter, 'getInteractiveTransactionById' | 'updateTransactionStatus'>,
   network: Pick<StellarNetworkClient, 'getTransaction'>,
   transactionId: string,
 ): Promise<PersistedStellarSubmissionRecoveryResult> {
@@ -29,7 +29,11 @@ export async function recoverPersistedStellarSubmission(
   if (!transaction.stellarTransactionHash) {
     return { outcome: 'not_ready', reason: 'hash_not_persisted' };
   }
-  return recoverStellarSubmission(network, transaction.stellarTransactionHash);
+  const result = await recoverStellarSubmission(network, transaction.stellarTransactionHash);
+  if (result.outcome === 'rejected') {
+    await database.updateTransactionStatus(transaction.id, 'error', 'pending_stellar');
+  }
+  return result;
 }
 
 /** Query a previously persisted hash once; never submit a replacement envelope on uncertainty. */

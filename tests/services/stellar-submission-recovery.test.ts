@@ -59,9 +59,10 @@ describe('recoverStellarSubmission', () => {
       value: { hash, successful: true, ledger: 99 },
     });
     const getInteractiveTransactionById = vi.fn().mockResolvedValue(transaction);
+    const updateTransactionStatus = vi.fn().mockResolvedValue(true);
     await expect(
       recoverPersistedStellarSubmission(
-        { getInteractiveTransactionById },
+        { getInteractiveTransactionById, updateTransactionStatus },
         { getTransaction },
         transaction.id,
       ),
@@ -75,11 +76,29 @@ describe('recoverStellarSubmission', () => {
     });
     await expect(
       recoverPersistedStellarSubmission(
-        { getInteractiveTransactionById },
+        { getInteractiveTransactionById, updateTransactionStatus },
         { getTransaction },
         transaction.id,
       ),
     ).resolves.toEqual({ outcome: 'not_ready', reason: 'hash_not_persisted' });
     expect(getTransaction).toHaveBeenCalledTimes(1);
+
+    getInteractiveTransactionById.mockResolvedValue(transaction);
+    getTransaction.mockResolvedValue({
+      status: 'found',
+      value: { hash, successful: false, ledger: 101 },
+    });
+    await expect(
+      recoverPersistedStellarSubmission(
+        { getInteractiveTransactionById, updateTransactionStatus },
+        { getTransaction },
+        transaction.id,
+      ),
+    ).resolves.toEqual({ outcome: 'rejected', hash, ledger: 101 });
+    expect(updateTransactionStatus).toHaveBeenCalledWith(
+      transaction.id,
+      'error',
+      'pending_stellar',
+    );
   });
 });
