@@ -195,6 +195,18 @@ function makeFakeDb(rejectOnIdempotency = false): {
     async listPendingSettlementJobs() {
       return [];
     },
+    async listClaimableSettlementJobs() {
+      return [];
+    },
+    async claimSettlementJob() {
+      return null;
+    },
+    async heartbeatSettlementJob() {
+      return false;
+    },
+    async finishSettlementJob() {
+      return false;
+    },
     async updateSettlementJobStatus() {
       return false;
     },
@@ -211,6 +223,7 @@ function makeFakeDb(rejectOnIdempotency = false): {
 
 function makeContext(db: DatabaseAdapter): ExpressRouterContext {
   return {
+    isReady: () => false,
     config,
     database: db,
     webhookProcessor: {

@@ -4,6 +4,7 @@ import { InMemoryRateLimiter, type RateLimitRule } from './rate-limiter.ts';
 import type {
   DatabaseAdapter,
   KycVerificationProvider,
+  Sep10AccountLookup,
   WebhookProcessor,
 } from '@/runtime/interfaces.ts';
 import type { RouteDefinition } from '@/types/foundation.ts';
@@ -25,10 +26,12 @@ export type ExpressLikeMiddleware = (
 interface RouterDependencies {
   config: AnchorConfig;
   database: DatabaseAdapter;
+  isReady?: () => boolean;
   webhookProcessor: WebhookProcessor;
   kycVerificationProvider?: KycVerificationProvider;
   depositRequestHooks?: NonNullable<AnchorPluginHooks['onDepositRequest']>[];
   sep10ChallengeHooks?: NonNullable<AnchorPluginHooks['onSep10Challenge']>[];
+  sep10AccountLookup?: Sep10AccountLookup;
   pluginRoutes?: Array<{ pluginId: string; route: RouteDefinition }>;
 }
 
@@ -60,10 +63,12 @@ export class AnchorExpressRouter {
     this.context = {
       config,
       database: dependencies.database,
+      isReady: dependencies.isReady ?? (() => false),
       webhookProcessor: dependencies.webhookProcessor,
       kycVerificationProvider: dependencies.kycVerificationProvider,
       depositRequestHooks: dependencies.depositRequestHooks ?? [],
       sep10ChallengeHooks: dependencies.sep10ChallengeHooks ?? [],
+      sep10AccountLookup: dependencies.sep10AccountLookup,
       sep10ServerKeypair,
       networkPassphrase,
       maxBodyBytes,

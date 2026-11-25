@@ -22,6 +22,8 @@ configured custom fields, then sends complete submissions to the optional
 `kycVerificationProvider` passed to `createAnchor`. Without a provider, complete submissions stay
 in `PROCESSING`. The response reports missing fields and field status without returning submitted
 identity values. Binary document uploads are not supported by these minimal routes.
+If upstream middleware parses the request first, it must retain the original bytes as `rawBody`;
+parsed-only bodies are rejected because their original size and duplicate fields cannot be checked.
 
 `GET /customer` returns the current status and any missing required fields for the authenticated
 customer. A customer ID from another account returns `404`; a transaction owned by another account

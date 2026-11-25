@@ -67,7 +67,14 @@ describe('SEP-12 customer endpoints', () => {
       { kycVerificationProvider: provider },
     );
     await anchor.init();
-    server = createServer((req, res) => anchor.getExpressRouter()(req, res));
+    server = createServer((req, res) => {
+      if (req.headers['x-test-parsed-body'] === 'true') {
+        Object.assign(req, {
+          body: { transaction_id: transactionId, type: 'sep24', first_name: 'Ada' },
+        });
+      }
+      anchor.getExpressRouter()(req, res);
+    });
     await new Promise<void>((resolve, reject) => {
       server.once('error', reject);
       server.listen(0, '127.0.0.1', resolve);
@@ -220,5 +227,24 @@ describe('SEP-12 customer endpoints', () => {
       }),
     });
     expect(foreignCustomer.status).toBe(404);
+  });
+
+  it('rejects parsed customer bodies when upstream middleware did not retain raw bytes', async () => {
+    const verificationCallsBefore = verify.mock.calls.length;
+    const response = await fetch(`${origin}/customer`, {
+      method: 'PUT',
+      headers: {
+        authorization: `Bearer ${bearer(account)}`,
+        'content-type': 'application/json',
+        'x-test-parsed-body': 'true',
+      },
+    });
+
+    expect(response.status).toBe(400);
+    expect(await response.json()).toMatchObject({
+      error: 'invalid_request',
+      message: 'Raw request body is required for customer submissions',
+    });
+    expect(verify).toHaveBeenCalledTimes(verificationCallsBefore);
   });
 });
