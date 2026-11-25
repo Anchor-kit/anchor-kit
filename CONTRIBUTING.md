@@ -139,6 +139,19 @@ A task is considered "Done" when:
 - [ ] Documentation is updated.
 - [ ] PR is approved by a maintainer.
 
+## Public anchor client
+
+Run `bun run check:package-consumer`. The check builds and installs the package in a
+clean consumer, calls the standard auth and SEP-24 endpoints with an injected fetch,
+and checks that bearer tokens stay out of URLs. Run `bun test tests/client/anchor-client.test.ts`
+for response and error cases; all assertions should pass.
+
+`AnchorClient` formats requests and validates response shapes. It does not validate
+SEP-10 challenges or sign transactions; callers must validate the challenge and
+network before using a wallet signer. The server-side standard deposit and lookup
+endpoints are tracked separately. Transaction lookup currently exposes only ID,
+status and kind; additional standard transaction fields are not yet surfaced.
+
 ## Readiness check
 
 Run `bun test tests/readiness.integration.test.ts`. Both tests should pass, including
