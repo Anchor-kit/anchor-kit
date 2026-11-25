@@ -92,6 +92,38 @@ describe('InMemoryQueueAdapter bounded retry and failed-job handling', () => {
     expect(queue.status).toEqual({ pending: 0, active: 0 });
   });
 
+  it('counts scheduled retries against the pending-job limit', async () => {
+    const blockerStarted = deferred();
+    const fillerStarted = deferred();
+    const releaseWorkers = deferred();
+    const queue = new InMemoryQueueAdapter({
+      concurrency: 2,
+      maxPendingJobs: 1,
+      retry: { maxAttempts: 2, baseDelayMs: 100, maxDelayMs: 100 },
+    });
+    await queue.start(async (job) => {
+      const id = watcherTaskLabel(job);
+      if (id === 'waiting-retry') throw new RetryableJobError('temporary outage');
+      if (id === 'blocker') blockerStarted.resolve();
+      if (id === 'filler') fillerStarted.resolve();
+      await releaseWorkers.promise;
+    });
+    await queue.enqueue(watcherJob('waiting-retry'));
+    await queue.enqueue(watcherJob('blocker'));
+    await blockerStarted.promise;
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+
+    expect(queue.status).toMatchObject({ pending: 1, active: 1 });
+    await queue.enqueue(watcherJob('filler'));
+    await fillerStarted.promise;
+    expect(queue.status).toMatchObject({ pending: 1, active: 2 });
+    await expect(queue.enqueue(watcherJob('overflow'))).rejects.toThrow('In-memory queue is full');
+    const stopping = queue.stop();
+    releaseWorkers.resolve();
+    await stopping;
+    expect(queue.status).toMatchObject({ pending: 1, active: 0 });
+  });
+
   it('does not retry permanent failures and records them once', async () => {
     let attempts = 0;
     const failures: QueueJobFailure[] = [];

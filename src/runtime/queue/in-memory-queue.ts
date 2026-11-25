@@ -176,7 +176,7 @@ export class InMemoryQueueAdapter implements QueueAdapter {
       this.running && this.worker && this.activeWorkers < this.concurrency;
     if (
       this.maxPendingJobs !== undefined &&
-      this.jobs.length >= this.maxPendingJobs &&
+      this.jobs.length + this.waitingRetries.size >= this.maxPendingJobs &&
       !canStartImmediately
     ) {
       throw new Error('In-memory queue is full');
@@ -191,7 +191,10 @@ export class InMemoryQueueAdapter implements QueueAdapter {
    * keeps ownership so callers cannot mutate its state.
    */
   public listFailedJobs(): readonly QueueJobFailure[] {
-    return [...this.failedJobs];
+    return this.failedJobs.map((failure) => ({
+      ...failure,
+      job: structuredClone(failure.job),
+    }));
   }
 
   /**
@@ -206,7 +209,7 @@ export class InMemoryQueueAdapter implements QueueAdapter {
       this.running && this.worker && this.activeWorkers < this.concurrency;
     if (
       this.maxPendingJobs !== undefined &&
-      this.jobs.length >= this.maxPendingJobs &&
+      this.jobs.length + this.waitingRetries.size >= this.maxPendingJobs &&
       !canStartImmediately
     ) {
       throw new Error('In-memory queue is full');
