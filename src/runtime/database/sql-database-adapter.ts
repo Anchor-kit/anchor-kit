@@ -7,6 +7,7 @@ import type {
   InteractiveTransactionRecord,
   InteractiveTransactionIdentifier,
   ReconciledRailPaymentResult,
+  RefundRecord,
   TransactionTransitionResult,
   SettlementJobRecord,
   SettlementJobLease,
@@ -25,6 +26,7 @@ import type { Database } from 'bun:sqlite';
 import { randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
+import { serializeRefunds } from '@/services/refund-serialization.ts';
 
 type SqliteLike = Database;
 type SqliteStatement = ReturnType<SqliteLike['prepare']>;
@@ -390,6 +392,23 @@ const CORE_MIGRATIONS: readonly SchemaMigration[] = [
       // Existing unfinished events may already have caused an external effect.
       await execute(
         "UPDATE webhook_events SET attempt_number = 1 WHERE attempt_number = 0 AND status IN ('pending', 'failed', 'unresolved')",
+      );
+    },
+  },
+  {
+    name: 'core:006-refund-operations',
+    async up({ execute }) {
+      await execute(`CREATE TABLE IF NOT EXISTS refund_operations (
+        operation_id TEXT PRIMARY KEY,
+        transaction_id TEXT NOT NULL REFERENCES interactive_transactions(id),
+        payment_id TEXT NOT NULL,
+        payment_id_type TEXT NOT NULL CHECK (payment_id_type IN ('stellar', 'external')),
+        amount TEXT NOT NULL,
+        fee TEXT NOT NULL,
+        status TEXT NOT NULL CHECK (status IN ('pending', 'completed', 'failed'))
+      )`);
+      await execute(
+        'CREATE INDEX IF NOT EXISTS idx_refund_operations_transaction ON refund_operations (transaction_id)',
       );
     },
   },
@@ -2558,6 +2577,93 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
       "SELECT COUNT(*)::int AS count FROM watcher_tasks WHERE status = 'processed'",
     );
     return Number(response.rows[0]?.count ?? 0);
+  }
+
+  public async insertRefundOperation(record: RefundRecord): Promise<void> {
+    if (!record.operationId.trim() || !['pending', 'completed', 'failed'].includes(record.status)) {
+      throw new ConfigError('Invalid refund operation');
+    }
+    serializeRefunds(record.transactionId, [{ ...record, status: 'completed' }]);
+    const values = [
+      record.operationId,
+      record.transactionId,
+      record.paymentId,
+      record.paymentIdType,
+      record.amount,
+      record.fee,
+      record.status,
+      record.transactionId,
+    ];
+    if (this.sqlite) {
+      const result = this.sqlite
+        .prepare(
+          `INSERT INTO refund_operations
+        (operation_id, transaction_id, payment_id, payment_id_type, amount, fee, status)
+        SELECT ?, ?, ?, ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM interactive_transactions WHERE id = ?)`,
+        )
+        .run(...values);
+      if (result.changes !== 1) throw new ConfigError('Refund transaction not found');
+      return;
+    }
+    const result = await this.requirePostgres().query(
+      `INSERT INTO refund_operations
+      (operation_id, transaction_id, payment_id, payment_id_type, amount, fee, status)
+      SELECT $1, $2, $3, $4, $5, $6, $7 WHERE EXISTS (SELECT 1 FROM interactive_transactions WHERE id = $8)`,
+      values,
+    );
+    if (result.rowCount !== 1) throw new ConfigError('Refund transaction not found');
+  }
+
+  public async listRefundOperations(transactionId: string): Promise<RefundRecord[]> {
+    const rows = this.sqlite
+      ? (this.sqlite
+          .prepare('SELECT * FROM refund_operations WHERE transaction_id = ? ORDER BY operation_id')
+          .all(transactionId) as Record<string, unknown>[])
+      : (
+          await this.requirePostgres().query<Record<string, unknown>>(
+            'SELECT * FROM refund_operations WHERE transaction_id = $1 ORDER BY operation_id',
+            [transactionId],
+          )
+        ).rows;
+    return rows.map((row) => {
+      const status = String(row.status);
+      const paymentIdType = String(row.payment_id_type);
+      if (
+        !['pending', 'completed', 'failed'].includes(status) ||
+        !['stellar', 'external'].includes(paymentIdType)
+      )
+        throw new ConfigError('Invalid persisted refund operation');
+      return {
+        operationId: String(row.operation_id),
+        transactionId: String(row.transaction_id),
+        paymentId: String(row.payment_id),
+        paymentIdType: paymentIdType as RefundRecord['paymentIdType'],
+        amount: String(row.amount),
+        fee: String(row.fee),
+        status: status as RefundRecord['status'],
+      };
+    });
+  }
+
+  public async finishRefundOperation(
+    operationId: string,
+    status: 'completed' | 'failed',
+  ): Promise<boolean> {
+    if (!['completed', 'failed'].includes(status)) throw new ConfigError('Invalid refund status');
+    if (this.sqlite) {
+      return (
+        this.sqlite
+          .prepare(
+            "UPDATE refund_operations SET status = ? WHERE operation_id = ? AND status = 'pending'",
+          )
+          .run(status, operationId).changes === 1
+      );
+    }
+    const result = await this.requirePostgres().query(
+      "UPDATE refund_operations SET status = $1 WHERE operation_id = $2 AND status = 'pending'",
+      [status, operationId],
+    );
+    return result.rowCount === 1;
   }
 
   public async insertOrGetSettlementJob(input: {

@@ -33,6 +33,7 @@ import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { version } from '../../../package.json';
 import { extractClientIdentifier } from './client-identifier.ts';
+import { serializeRefunds } from '@/services/refund-serialization.ts';
 
 const SEP10_AUTH_OPERATION_SUFFIX = ' auth';
 
@@ -1999,6 +2000,10 @@ async function handleTransaction(
     created_at: transaction.createdAt,
     updated_at: transaction.updatedAt,
   };
+
+  const refunds = await context.database.listRefundOperations?.(transaction.id);
+  if (refunds && refunds.length > 0)
+    responseData.refunds = serializeRefunds(transaction.id, refunds);
 
   if (serverConfig.interactiveDomain) {
     responseData.interactive_url = buildInteractiveUrl(

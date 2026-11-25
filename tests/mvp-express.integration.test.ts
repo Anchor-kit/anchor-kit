@@ -1942,6 +1942,40 @@ describe('MVP Express-mounted integration', () => {
     expect(lookupResponse.body.amount).toBe(submittedAmount);
   });
 
+  it('includes linked completed refund payments in the authorized transaction response', async () => {
+    const id = 'refund-test-transaction';
+    const database = Reflect.get(anchor, 'database') as DatabaseAdapter;
+    await database.insertInteractiveTransaction({
+      id,
+      account: clientKeypair.publicKey(),
+      kind: 'deposit',
+      assetCode: 'USDC',
+      amount: '25',
+      status: 'completed',
+    });
+    await database.insertRefundOperation!({
+      operationId: 'refund-op-1',
+      transactionId: id,
+      paymentId: 'payment-1',
+      paymentIdType: 'external',
+      amount: '2.50',
+      fee: '0.05',
+      status: 'completed',
+    });
+    const response = await invoke({
+      method: 'GET',
+      path: `/transactions/${id}`,
+      headers: { authorization: `Bearer ${accessToken}` },
+    });
+    expect(response.status).toBe(200);
+    expect(response.headers['cache-control']).toBe('no-store');
+    expect(response.body.refunds).toEqual({
+      amount_refunded: '2.5',
+      amount_fee: '0.05',
+      payments: [{ id: 'payment-1', id_type: 'external', amount: '2.50', fee: '0.05' }],
+    });
+  });
+
   it('6b) deposit with SAME idempotency-key but DIFFERENT body is rejected', async () => {
     const response = await invoke({
       method: 'POST',

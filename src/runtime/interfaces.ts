@@ -1,5 +1,6 @@
 import type { TransactionStatus } from '@/types/transaction-status.ts';
 import type { KycData, KycVerificationDecision } from '@/types/foundation.ts';
+import type { RefundOperation } from '@/services/refund-serialization.ts';
 import type { Customer } from '@/types/customer.ts';
 import type {
   NormalizedPaymentRailEvent,
@@ -187,6 +188,10 @@ export interface SettlementJobRecord {
   updatedAt: string;
 }
 
+export interface RefundRecord extends RefundOperation {
+  operationId: string;
+}
+
 export type ConfirmSettlementResult =
   | {
       outcome: 'completed' | 'replayed';
@@ -245,6 +250,9 @@ export interface DatabaseAdapter extends SettlementLeaseAdapter {
   migrate(): Promise<void>;
   /** Check storage connectivity without exposing connection details. */
   checkReadiness?(): Promise<void>;
+  insertRefundOperation?(record: RefundRecord): Promise<void>;
+  listRefundOperations?(transactionId: string): Promise<RefundRecord[]>;
+  finishRefundOperation?(operationId: string, status: 'completed' | 'failed'): Promise<boolean>;
 
   insertAuthChallenge(input: {
     id: string;

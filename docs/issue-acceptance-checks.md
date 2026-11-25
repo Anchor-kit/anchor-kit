@@ -1,5 +1,13 @@
 # Focused issue acceptance checks
 
+For refund serialization, run:
+
+```sh
+bun test tests/services/refund-serialization.test.ts tests/runtime/database/refund-operations.test.ts tests/mvp-express.integration.test.ts
+```
+
+Expected result: all three files pass. The checks cover transaction linkage, SQLite persistence across reconnect, guarded status changes, and exact refund totals in an authorized transaction response. The tests do not send refunds. PostgreSQL coverage runs when `DATABASE_URL` points to a disposable database.
+
 For Paystack input conversion, run:
 
 ```sh

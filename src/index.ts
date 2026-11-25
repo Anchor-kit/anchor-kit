@@ -12,6 +12,8 @@ export type { CreateAnchorOptions } from './core/factory';
 export * from './core/errors';
 export { HorizonNetworkClient } from './services/horizon-network-client.ts';
 export { LocalKeypairSigner } from './services/stellar-signer.ts';
+export { serializeRefunds } from './services/refund-serialization.ts';
+export type { RefundOperation, Sep24Refunds } from './services/refund-serialization.ts';
 export { paystackSubunits, validatePaystackReference } from './services/paystack-inputs.ts';
 export { getPaystackTestStatus } from './services/paystack-status.ts';
 export { emitTransactionTrace } from './services/transaction-trace.ts';
@@ -42,6 +44,7 @@ export type {
   InteractiveTransactionIdentifier,
   KycVerificationProvider,
   PaymentRailAdapter,
+  RefundRecord,
   QueueJob,
   QueueJobErrorClassification,
   QueueJobFailure,

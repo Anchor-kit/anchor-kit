@@ -166,4 +166,35 @@ postgresTest('SqlDatabaseAdapter – PostgreSQL integration', () => {
     expect(new Set(results.map(({ record }) => record.id)).size).toBe(1);
     expect(results.every(({ record }) => record.eventId === eventId)).toBe(true);
   });
+
+  it('persists and transitions refund operations linked to a transaction', async () => {
+    const transactionId = randomUUID();
+    const operationId = randomUUID();
+    await db.insertInteractiveTransaction({
+      id: transactionId,
+      account: 'GTEST1234',
+      kind: 'deposit',
+      assetCode: 'USDC',
+      amount: '25.00',
+      status: 'completed',
+    });
+    await db.insertRefundOperation!({
+      operationId,
+      transactionId,
+      paymentId: 'refund-payment',
+      paymentIdType: 'external',
+      amount: '2.50',
+      fee: '0.05',
+      status: 'pending',
+    });
+    const results = await Promise.all([
+      db.finishRefundOperation!(operationId, 'completed'),
+      db.finishRefundOperation!(operationId, 'completed'),
+    ]);
+    expect(results.filter(Boolean)).toHaveLength(1);
+    expect(await db.finishRefundOperation!(operationId, 'failed')).toBe(false);
+    expect(await db.listRefundOperations!(transactionId)).toMatchObject([
+      { operationId, transactionId, amount: '2.50', fee: '0.05', status: 'completed' },
+    ]);
+  });
 });
