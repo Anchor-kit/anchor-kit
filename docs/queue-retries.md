@@ -16,8 +16,42 @@ terminal failures instead of treating them as successful no-ops.
 
 Retries wait outside a worker slot, so concurrency observes only the jobs currently executing. A
 waiting retry still counts in `getQueueStatus().pending`. Calling `stop()` cancels pending backoff
-timers and returns those jobs to the waiting queue, so a restart can retry them rather than losing
-financial work.
+timers and returns those jobs to the waiting queue. The same queue instance can retry that work if
+background jobs are started again.
+
+## Shutdown and process failure
+
+The queue is in memory, not a durable job store. `stopBackgroundJobs()` stops watchers and the queue;
+the queue stops dispatching jobs, preserves waiting jobs and retry attempts in that adapter, and
+waits for active handlers to finish. It does not drain the waiting queue. A later
+`startBackgroundJobs()` on the same live `AnchorInstance` can resume it.
+
+`anchor.shutdown()` performs that stop and then releases the queue adapter. If the process exits,
+crashes, or is forcibly terminated, all queue-held pending jobs, active job state and retained
+terminal-failure records are lost. An active handler may be interrupted. The queue does not replay
+these entries after a new process starts, and its retry policy does not protect against process
+failure. State independently persisted by the application or database has its own recovery
+semantics; do not infer queue replay from it.
+
+## Signals available to the host today
+
+| Signal | What it tells you | Limits |
+| ------ | ----------------- | ------ |
+| `anchor.getQueueStatus()` | `pending` (waiting jobs, including retry backoff) and `active` counts without payloads | Snapshot only; not persisted and contains no per-job age or throughput |
+| `anchor.getFailedQueueJobs()` | The in-memory terminal failures available for operator review; the newest 1000 are retained | Lost on process exit; older records are dropped when the retention limit is exceeded |
+| `framework.queue.onError` / `onFailedJob` | Host callback when a job permanently fails or exhausts retries | Callbacks are invoked only for terminal failures, not each attempt; the host must export/retain the signal |
+| `GET /health` | Lightweight liveness response | Does not indicate database or worker readiness |
+| `GET /ready` | Readiness response checks initialized state, background queue/watchers and database readiness | Does not report queue depth or guarantee job recovery |
+
+The queue logs terminal errors to the console when neither failure callback is configured; callback
+errors are also logged. The SDK does not currently export queue metrics, tracing, or Sentry/OTLP
+events. Hosts can poll the status, forward callbacks and collect process logs using their own
+monitoring stack. The `framework.monitoring` settings remain planned and unused.
+
+Durable job persistence and worker leasing are separate from these in-memory signals; see
+[#710: Persist settlement jobs independently of in-memory queue state](https://github.com/Anchor-kit/anchor-kit/issues/710)
+and [#724: Claim durable jobs with an atomic lease and ownership check](https://github.com/Anchor-kit/anchor-kit/issues/724).
+Neither queue counts nor readiness imply that pending in-memory work will survive a restart.
 
 ## Classification
 
