@@ -27,6 +27,8 @@ export type {
   PersistedStellarSubmissionRecoveryResult,
   StellarSubmissionRecoveryResult,
 } from './services/stellar-submission-recovery.ts';
+export { interactiveSessionState } from './services/interactive-session-state.ts';
+export type { InteractiveSessionState } from './services/interactive-session-state.ts';
 export type { StellarTransactionSigner } from './services/stellar-signer.ts';
 export * as utils from './utils';
 export {
@@ -92,13 +94,14 @@ export type {
 } from './runtime/settlement/recipient-readiness.ts';
 export { matchRailEvent } from './runtime/settlement/match-rail-event.ts';
 export type { RailMatchResult } from './runtime/settlement/match-rail-event.ts';
-export { AnchorClient, AnchorClientError } from './client/anchor-client.ts';
+export { AnchorClient, AnchorClientError, AnchorWalletSession } from './client/anchor-client.ts';
 export type {
   AnchorClientOptions,
   AuthChallenge,
   AuthToken,
   DepositRequest,
   InteractiveResponse,
+  Sep10WalletSigner,
   TransactionResponse,
 } from './client/anchor-client.ts';
 
