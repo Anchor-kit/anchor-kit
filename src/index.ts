@@ -12,6 +12,8 @@ export type { CreateAnchorOptions } from './core/factory';
 export * from './core/errors';
 export { HorizonNetworkClient } from './services/horizon-network-client.ts';
 export { LocalKeypairSigner } from './services/stellar-signer.ts';
+export { paystackSubunits, validatePaystackReference } from './services/paystack-inputs.ts';
+export { getPaystackTestStatus } from './services/paystack-status.ts';
 export { emitTransactionTrace } from './services/transaction-trace.ts';
 export type { TransactionTraceEvent, TransactionTraceSink } from './services/transaction-trace.ts';
 export { signedSettlementHash } from './services/settlement-identity.ts';

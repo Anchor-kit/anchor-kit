@@ -1,5 +1,13 @@
 # Focused issue acceptance checks
 
+For Paystack input conversion, run:
+
+```sh
+bun test tests/services/paystack-inputs.test.ts tests/services/paystack-status.test.ts
+```
+
+Expected result: 5 tests pass. The checks cover exact minor-unit conversion, reference validation, and test-mode status lookup using recorded responses; they make no provider requests. Callers must compare the returned amount and currency with the expected operation before acting on a payment status.
+
 For transaction trace event filtering, run:
 
 ```sh
