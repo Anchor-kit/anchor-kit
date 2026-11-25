@@ -7,64 +7,63 @@ This checklist guides an anchor host through reviewing, hardening, and verifying
 ## 1. Network Selection & Horizon Connectivity
 
 - [ ] **Target Network Selection (`network.network`)**  
-      Set explicitly to `'public'` for live production environments (or `'testnet'` / `'futurenet'` for pre-production testing). Never connect a production deployment to a test network or reuse test credentials in production.
+       Set explicitly to `'public'` for live production environments (or `'testnet'` / `'futurenet'` for pre-production testing). Never connect a production deployment to a test network or reuse test credentials in production.
 - [ ] **Horizon URL (`network.horizonUrl`)**  
-      Provide a dedicated or high-availability Horizon endpoint URL (defaults to official Horizon servers if omitted). Verify that network connectivity from anchor host instances to the Horizon service is monitored and resilient.
-- [ ] **Network Passphrase (`network.networkPassphrase`)**  
-      Leave unset to allow automatic derivation from `network.network`, or verify that it exactly matches the public network passphrase:  
-      `"Public Global Stellar Network ; September 2015"`.
+       Provide a dedicated or high-availability Horizon endpoint URL (defaults to official Horizon servers if omitted). Verify that network connectivity from anchor host instances to the Horizon service is monitored and resilient.
+- [ ] **Network Passphrase (`network.networkPassphrase`)**
+      Leave unset to allow automatic derivation from `network.network`, or verify that it exactly matches the public network passphrase `"Public Global Stellar Network ; September 2015"`.
 
 ---
 
 ## 2. Secrets Management & Key Custody
 
 - [ ] **Runtime Secret Sourcing**  
-      Load all sensitive values at startup from a secure secret manager (e.g., AWS Secrets Manager, HashiCorp Vault, Azure Key Vault, or Kubernetes Secrets). Never commit secrets to source control, bake them into container images, or expose them via CLI arguments.
+       Load all sensitive values at startup from a secure secret manager (e.g., AWS Secrets Manager, HashiCorp Vault, Azure Key Vault, or Kubernetes Secrets). Never commit secrets to source control, bake them into container images, or expose them via CLI arguments.
 - [ ] **SEP-10 Challenge Signing Key (`security.sep10SigningKey`)**  
-      Provide a secure private key (hex or base64) used to sign SEP-10 authentication challenge transactions.
+       Provide a secure private key (hex or base64) used to sign SEP-10 authentication challenge transactions.
 - [ ] **Interactive JWT Secret (`security.interactiveJwtSecret`)**  
-      Configure a cryptographically random, high-entropy secret string used to sign and verify SEP-24 interactive flow bearer tokens.
+       Configure a cryptographically random, high-entropy secret string used to sign and verify SEP-24 interactive flow bearer tokens.
 - [ ] **Distribution Account Secret (`security.distributionAccountSecret`)**  
-      Provide a valid 56-character Ed25519 secret seed (starts with `S`).  
-      _Operational Note:_ The secret is held in memory by `LocalKeypairSigner`. The SDK signs transactions but does not automatically submit them to Horizon.
+       Provide a valid 56-character Ed25519 secret seed (starts with `S`).
+
+       _Operational Note:_ The secret is held in memory by `LocalKeypairSigner`. The SDK signs transactions but does not automatically submit them to Horizon.
+
 - [ ] **Log Scrubbing & Key Custody**  
-      Verify that application loggers, APM agents, and error trackers redact all secrets, auth tokens, and credential headers. See [Local Signer Secret Handling](local-signer-secrets.md).
+       Verify that application loggers, APM agents, and error trackers redact all secrets, auth tokens, and credential headers. See [Local Signer Secret Handling](local-signer-secrets.md).
 - [ ] **Key Rotation Plan**  
-      Document operational runbooks to rotate keys by updating the secret store, updating any on-chain signers, and triggering rolling instance restarts.
+       Document operational runbooks to rotate keys by updating the secret store, updating any on-chain signers, and triggering rolling instance restarts.
 
 ---
 
 ## 3. Database & Connection Budgeting
 
 - [ ] **Production Provider (`framework.database.provider`)**  
-      Set to `'postgres'`. `sqlite` is single-connection only and permitted exclusively for local development and testing.
+       Set to `'postgres'`. `sqlite` is single-connection only and permitted exclusively for local development and testing.
 - [ ] **Connection String & TLS (`framework.database.url`)**  
-      Ensure PostgreSQL connection URLs enforce encrypted transit (e.g., `sslmode=require` or `sslmode=verify-full`).
+       Ensure PostgreSQL connection URLs enforce encrypted transit (e.g., `sslmode=require` or `sslmode=verify-full`).
 - [ ] **Schema Isolation (`framework.database.schema`)**  
-      Explicitly configure the target PostgreSQL schema (defaults to `'public'`).
+       Explicitly configure the target PostgreSQL schema (defaults to `'public'`).
 - [ ] **Connection Budget Allocation**  
-      Anchor-Kit uses a single long-lived `pg.Client` per adapter instance and creates short-lived clients for concurrent deposit transactions (`createDepositWithIdempotency`). Budget database connections according to:  
-      `connections = live adapter clients + peak concurrent deposit transactions`  
-      Ensure server-level `max_connections` and connection poolers accommodate rolling deployments and administrative reserve. See [PostgreSQL Connection Budget](postgres-connection-budget.md).
+       Anchor-Kit uses a single long-lived `pg.Client` per adapter instance and creates short-lived clients for concurrent deposit transactions (`createDepositWithIdempotency`). Budget database connections using `connections = live adapter clients + peak concurrent deposit transactions`. Ensure server-level `max_connections` and connection poolers accommodate rolling deployments and administrative reserve. See [PostgreSQL Connection Budget](postgres-connection-budget.md).
 - [ ] **Migrations & Backup Verification**  
-      Execute schema migrations during controlled deployment steps prior to serving live traffic. Validate automated Point-in-Time Recovery (PITR) procedures. See [PostgreSQL Backup and Recovery](postgres-backup-restore.md).
+       Execute schema migrations during controlled deployment steps prior to serving live traffic. Validate automated Point-in-Time Recovery (PITR) procedures. See [PostgreSQL Backup and Recovery](postgres-backup-restore.md).
 
 ---
 
 ## 4. Webhook Verification & Delivery Integrity
 
 - [ ] **Signature Verification Enabled (`security.verifyWebhookSignatures`)**  
-      Set explicitly to `true` (default). Do not disable verification in production environments.
+       Set explicitly to `true` (default). Do not disable verification in production environments.
 - [ ] **Webhook Signing Secret (`security.webhookSecret`)**  
-      Configure a strong shared secret matching the upstream payment provider. Incoming requests to `/webhooks/events` must supply a valid HMAC-SHA256 signature in the `x-anchor-signature` header.
+       Configure a strong shared secret matching the upstream payment provider. Incoming requests to `/webhooks/events` must supply a valid HMAC-SHA256 signature in the `x-anchor-signature` header.
 - [ ] **Raw Body Preservation**  
-      Ensure reverse proxies and web server middleware preserve raw request bytes prior to parsing, as HMAC verification evaluates the raw byte stream.
+       Ensure reverse proxies and web server middleware preserve raw request bytes prior to parsing, as HMAC verification evaluates the raw byte stream.
 - [ ] **Webhook Dispatch Handler (`webhooks.onEvent`)**  
-      Provide an idempotent async handler for verified events. Offload long-running business logic to avoid callback timeouts.
+       Provide an idempotent async handler for verified events. Offload long-running business logic to avoid callback timeouts.
 - [ ] **Webhook Secret Rotation Window**  
-      Because the adapter validates against a single configured secret, coordinate key rotations during scheduled maintenance or verify provider retry windows. See [Rotating Webhook Signing Secrets](webhook-secret-rotation.md).
+       Because the adapter validates against a single configured secret, coordinate key rotations during scheduled maintenance or verify provider retry windows. See [Rotating Webhook Signing Secrets](webhook-secret-rotation.md).
 - [ ] **Webhook Ingress Enablement (`operational.webhooksEnabled`)**  
-      Ensure `operational.webhooksEnabled` is `true` (default). Set to `false` only during emergency ingress shedding.
+       Ensure `operational.webhooksEnabled` is `true` (default). Set to `false` only during emergency ingress shedding.
 
 ---
 
@@ -75,29 +74,29 @@ This checklist guides an anchor host through reviewing, hardening, and verifying
   - **Direct ingress / untrusted proxy chain:** Keep set to `false`.  
     _Security Warning:_ Enabling `trustForwardedFor: true` on direct ingress allows clients to spoof IP headers and bypass rate limits. See [Trusted Proxy Rate-Limit Guidance](trusted-proxy-rate-limits.md).
 - [ ] **CORS Scoping (`server.corsOrigins`)**  
-      Restrict allowed origins to trusted wallet and host application origins. Avoid wildcard (`*`) domains when client attribution or credentials are required.
+       Restrict allowed origins to trusted wallet and host application origins. Avoid wildcard (`*`) domains when client attribution or credentials are required.
 - [ ] **Public Endpoint URLs**  
-      Set `server.interactiveDomain`, `server.webAuthEndpoint`, and `server.transferServerSep24` to valid canonical HTTPS URLs published in `/.well-known/stellar.toml`.
+       Set `server.interactiveDomain`, `server.webAuthEndpoint`, and `server.transferServerSep24` to valid canonical HTTPS URLs published in `/.well-known/stellar.toml`.
 
 ---
 
 ## 6. Runtime Limits & Queue Guardrails
 
 - [ ] **Request Size Guardrail (`framework.http.maxBodyBytes`)**  
-      Configure maximum acceptable payload bytes (defaults to `1048576` / 1 MB) to prevent denial-of-service via memory exhaustion.
+       Configure maximum acceptable payload bytes (defaults to `1048576` / 1 MB) to prevent denial-of-service via memory exhaustion.
 - [ ] **Request Timeout (`server.requestTimeout`)**  
-      Tune request timeout (default: `30000` ms) to align with upstream ingress and load-balancer timeouts.
+       Tune request timeout (default: `30000` ms) to align with upstream ingress and load-balancer timeouts.
 - [ ] **Rate Limiter Thresholds (`framework.rateLimit`)**  
-      Review per-route limits against expected production throughput:
+       Review per-route limits against expected production throughput:
   - `rateLimit.windowMs`: Sliding window duration (default `60000` ms / 1 min).
   - `rateLimit.authChallengeMax`: `/auth/challenge` limit (default: 30 requests/min).
   - `rateLimit.authTokenMax`: `/auth/token` limit (default: 30 requests/min).
   - `rateLimit.depositMax`: `/transactions/deposit/interactive` limit (default: 60 requests/min).
   - `rateLimit.webhookMax`: `/webhooks/events` limit (default: 120 requests/min).
 - [ ] **Queue Worker Limits & Retries (`framework.queue`)**  
-      Configure worker concurrency (`concurrency`, default: 1), backlog capacity (`maxPendingJobs`), and backoff parameters (`retry.maxAttempts`, `retry.baseDelayMs`, `retry.maxDelayMs`). Register `onFailedJob` or `onError` to capture permanent failures for operator review. See [Queue Retries and Failed Jobs](queue-retries.md).
+       Configure worker concurrency (`concurrency`, default: 1), backlog capacity (`maxPendingJobs`), and backoff parameters (`retry.maxAttempts`, `retry.baseDelayMs`, `retry.maxDelayMs`). Register `onFailedJob` or `onError` to capture permanent failures for operator review. See [Queue Retries and Failed Jobs](queue-retries.md).
 - [ ] **Transaction Watcher Polling (`framework.watchers`)**  
-      Verify `watchers.enabled: true`, `watchers.pollIntervalMs` (default: 15000 ms), and `watchers.transactionTimeoutMs` (default: 300000 ms). Configure cleanup data retention via `operational.transactionRetentionDays` (default: 90 days).
+       Verify `watchers.enabled: true`, `watchers.pollIntervalMs` (default: 15000 ms), and `watchers.transactionTimeoutMs` (default: 300000 ms). Configure cleanup data retention via `operational.transactionRetentionDays` (default: 90 days).
 
 ---
 

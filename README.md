@@ -35,6 +35,8 @@ The SDK does not own `listen()` and does not bind network ports.
 
 See [the trusted proxy rate-limit guidance](docs/trusted-proxy-rate-limits.md)
 before enabling trustForwardedFor.
+See [request body limit guidance](docs/request-body-limits.md) to align proxy,
+Express, and Anchor-Kit limits while preserving webhook bytes.
 
 ## Install
 

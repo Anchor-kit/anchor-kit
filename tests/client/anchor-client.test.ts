@@ -7,6 +7,70 @@ const endpoints = {
 };
 
 describe('public standard anchor client', () => {
+  it('runs challenge, injected signing, and exchange without hiding wallet rejection', async () => {
+    const fetcher = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({ transaction: 'unsigned-xdr', network_passphrase: 'Test Network' }),
+          { status: 200 },
+        ),
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ token: 'access-token' }), { status: 200 }),
+      );
+    const client = new AnchorClient({ ...endpoints, fetch: fetcher });
+    const signChallenge = vi.fn(
+      async (input: { transaction: string; networkPassphrase?: string }) => {
+        expect(input).toEqual({ transaction: 'unsigned-xdr', networkPassphrase: 'Test Network' });
+        return 'signed-xdr';
+      },
+    );
+
+    await expect(client.authenticate('GACCOUNT', signChallenge)).resolves.toEqual({
+      token: 'access-token',
+    });
+    expect(fetcher).toHaveBeenCalledTimes(2);
+    expect(fetcher.mock.calls[1]?.[1]?.body).toEqual(
+      new URLSearchParams({ transaction: 'signed-xdr' }),
+    );
+
+    const rejection = new Error('wallet rejected request');
+    fetcher.mockResolvedValueOnce(
+      new Response(JSON.stringify({ transaction: 'unsigned-xdr' }), { status: 200 }),
+    );
+    await expect(
+      client.authenticate('GACCOUNT', async () => Promise.reject(rejection)),
+    ).rejects.toBe(rejection);
+  });
+
+  it('refreshes an expired wallet session by requesting and signing a fresh challenge', async () => {
+    const fetcher = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ transaction: 'challenge-1' }), { status: 200 }),
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ token: 'expired-token', expires_in: 0 }), { status: 200 }),
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ transaction: 'challenge-2' }), { status: 200 }),
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ token: 'fresh-token', expires_in: 3600 }), { status: 200 }),
+      );
+    const client = new AnchorClient({ ...endpoints, fetch: fetcher });
+    const signer = vi.fn(
+      async ({ transaction }: { transaction: string }) => `signed-${transaction}`,
+    );
+    const session = await client.createWalletSession('GACCOUNT', signer);
+
+    await expect(session.getAccessToken()).resolves.toBe('fresh-token');
+    expect(signer).toHaveBeenNthCalledWith(1, { transaction: 'challenge-1' });
+    expect(signer).toHaveBeenNthCalledWith(2, { transaction: 'challenge-2' });
+    expect(fetcher).toHaveBeenCalledTimes(4);
+  });
+
   it('rejects malformed responses and mismatched transaction IDs', async () => {
     const fetcher = vi
       .fn<typeof fetch>()
