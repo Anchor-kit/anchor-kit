@@ -42,6 +42,7 @@ export type {
   IdempotencyRecord,
   InteractiveTransactionRecord,
   InteractiveTransactionIdentifier,
+  TransactionHistoryQuery,
   KycVerificationProvider,
   PaymentRailAdapter,
   RefundRecord,

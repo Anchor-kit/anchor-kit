@@ -102,6 +102,15 @@ export interface InteractiveTransactionRecord {
   updatedAt: string;
 }
 
+export interface TransactionHistoryQuery {
+  account: string;
+  assetCode: string;
+  limit?: number;
+  kind?: 'deposit' | 'withdrawal';
+  noOlderThan?: string;
+  pagingId?: string;
+}
+
 export type InteractiveTransactionIdentifier =
   | { kind: 'id'; value: string }
   | { kind: 'stellar_transaction_id'; value: string }
@@ -282,6 +291,7 @@ export interface DatabaseAdapter extends SettlementLeaseAdapter {
     account: string;
     identifier: InteractiveTransactionIdentifier;
   }): Promise<InteractiveTransactionRecord | null>;
+  listTransactions(input: TransactionHistoryQuery): Promise<InteractiveTransactionRecord[]>;
   listPendingTransactionsBefore(cutoffIso: string): Promise<InteractiveTransactionRecord[]>;
   updateTransactionStatus(
     id: string,
