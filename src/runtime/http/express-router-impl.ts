@@ -334,17 +334,53 @@ async function parsePostJsonBody(
   }
 }
 
-function parseUrlEncodedBody(rawBody: RawBodyValue): Record<string, unknown> {
-  const body = Object.create(null) as Record<string, unknown>;
-  for (const [key, value] of new URLSearchParams(toUtf8String(rawBody))) {
-    if (Object.hasOwn(body, key)) {
-      throw new ValidationError('Form fields must not be repeated');
+/** JSON.parse accepts duplicate object keys, so check the top-level deposit fields too. */
+function hasDuplicateDepositJsonKeys(rawBody: RawBodyValue): boolean {
+  const text = toUtf8String(rawBody);
+  let index = text.indexOf('{') + 1;
+  const seen = new Set<string>();
+  const whitespace = () => {
+    while (/\s/.test(text[index] ?? '') && index < text.length) index++;
+  };
+  const skipString = () => {
+    const start = index++;
+    while (index < text.length) {
+      if (text[index] === '\\') {
+        index += 2;
+        continue;
+      }
+      if (text[index++] === '"') return text.slice(start, index);
     }
-    body[key] = value;
+    throw new Error('invalid JSON string');
+  };
+  while (index < text.length) {
+    whitespace();
+    if (text[index] === '}') break;
+    const key = JSON.parse(skipString()) as string;
+    if (seen.has(key)) return true;
+    seen.add(key);
+    whitespace();
+    index++; // colon; syntax has already been validated by JSON.parse
+    let depth = 0;
+    while (index < text.length) {
+      const char = text[index];
+      if (char === '"') {
+        skipString();
+        continue;
+      }
+      if (char === '{' || char === '[') depth++;
+      else if (char === '}' || char === ']') {
+        if (depth === 0) break;
+        depth--;
+      } else if (char === ',' && depth === 0) break;
+      index++;
+    }
+    if (text[index] === ',') index++;
   }
-  return body;
+  return false;
 }
 
+/** Parse deposit fields only after enforcing the raw byte limit and duplicate checks. */
 async function parseDepositRequestBody(
   req: IncomingMessage,
   res: ServerResponse,
@@ -356,11 +392,41 @@ async function parseDepositRequestBody(
 } | null> {
   const contentType = firstNonEmptyString(req.headers['content-type']);
   const mediaType = contentType?.split(';', 1)[0]?.trim().toLowerCase();
-  if (mediaType !== 'application/x-www-form-urlencoded') {
+  if (mediaType === 'application/json') {
+    const request = req as IncomingRequestWithRawBody;
+    if (
+      request.rawBody === undefined &&
+      request.body !== undefined &&
+      typeof request.body !== 'string'
+    ) {
+      sendJson(res, 400, {
+        error: 'invalid_request',
+        message: 'Raw JSON body is required',
+      });
+      return null;
+    }
     const parsed = await parsePostJsonBody(req, res, maxBodyBytes);
+    if (parsed && hasDuplicateDepositJsonKeys(parsed.rawBody)) {
+      sendJson(res, 400, { error: 'invalid_request', message: 'Duplicate deposit fields' });
+      return null;
+    }
     return parsed ? { ...parsed, isStandardSep24: false } : null;
   }
-
+  if (mediaType !== 'application/x-www-form-urlencoded' && mediaType !== 'multipart/form-data') {
+    sendJson(res, 400, { error: 'invalid_request', message: 'Unsupported deposit Content-Type' });
+    return null;
+  }
+  // Framework-parsed objects have lost duplicate fields and their original byte size.
+  const request = req as IncomingRequestWithRawBody;
+  if (
+    request.rawBody === undefined &&
+    request.body !== undefined &&
+    typeof request.body !== 'string'
+  ) {
+    sendJson(res, 400, { error: 'invalid_request', message: 'Raw form body is required' });
+    return null;
+  }
+  // URL encoded and multipart forms preserve the raw field list for duplicate checks.
   let rawBody: RawBodyValue;
   try {
     rawBody = await readRawBody(req, maxBodyBytes);
@@ -374,15 +440,34 @@ async function parseDepositRequestBody(
     }
     throw error;
   }
-
   try {
-    return { rawBody, body: parseUrlEncodedBody(rawBody), isStandardSep24: true };
-  } catch (error) {
-    if (error instanceof ValidationError) {
-      sendJson(res, 400, { error: 'invalid_request', message: error.message });
-      return null;
+    const bytes = typeof rawBody === 'string' ? Buffer.from(rawBody, 'utf8') : Buffer.from(rawBody);
+    const body: Record<string, unknown> = Object.create(null) as Record<string, unknown>;
+    if (mediaType === 'application/x-www-form-urlencoded') {
+      const text = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+      // URLSearchParams tolerates invalid escapes; reject them before normalization.
+      for (const part of text.split('&')) {
+        for (const field of part.split('=')) decodeURIComponent(field.replace(/\+/g, ' '));
+      }
+      for (const [key, value] of new URLSearchParams(text)) {
+        if (Object.hasOwn(body, key)) throw new Error('duplicate');
+        body[key] = value;
+      }
+    } else {
+      const form = await new Request('http://localhost/', {
+        method: 'POST',
+        headers: { 'content-type': contentType! },
+        body: new Uint8Array(bytes),
+      }).formData();
+      form.forEach((value, key) => {
+        if (Object.hasOwn(body, key) || typeof value !== 'string') throw new Error('invalid field');
+        body[key] = value;
+      });
     }
-    throw error;
+    return { rawBody, body, isStandardSep24: true };
+  } catch {
+    sendJson(res, 400, { error: 'invalid_request', message: 'Invalid or duplicate form fields' });
+    return null;
   }
 }
 
@@ -403,7 +488,6 @@ async function createStandardSep24Initiation(
     url: url.toString(),
   });
 }
-
 function sha256(input: string | Buffer | Uint8Array): string {
   return createHash('sha256').update(input).digest('hex');
 }

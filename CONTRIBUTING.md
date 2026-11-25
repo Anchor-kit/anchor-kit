@@ -139,6 +139,15 @@ A task is considered "Done" when:
 - [ ] Documentation is updated.
 - [ ] PR is approved by a maintainer.
 
+## Deposit form input
+
+Run `bun test tests/mvp-express.integration.test.ts`; all assertions should pass.
+The deposit handler accepts JSON, URL-encoded forms, and text-only multipart forms.
+Form bodies must reach the handler as raw bytes (or as `rawBody`) so duplicate fields
+and byte limits can be checked. File uploads are rejected. Existing JSON middleware
+should retain `rawBody` to allow duplicate JSON fields to be detected; if it supplies
+only a parsed object, the original field duplication can no longer be determined.
+
 ## Public anchor client
 
 Run `bun run check:package-consumer`. The check builds and installs the package in a
