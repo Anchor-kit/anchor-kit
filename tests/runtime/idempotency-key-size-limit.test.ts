@@ -110,6 +110,15 @@ function makeFakeDb(rejectOnIdempotency = false): {
     async updateTransactionStatus() {
       return true;
     },
+    async insertOrGetCustomer(): Promise<never> {
+      throw new Error('Unexpected customer database call');
+    },
+    async getCustomerByAccountId() {
+      return null;
+    },
+    async updateCustomer() {
+      return false;
+    },
     async getIdempotencyRecord() {
       return null;
     },
@@ -233,6 +242,7 @@ function makeContext(db: DatabaseAdapter): ExpressRouterContext {
       auth_token: { windowMs: 60000, max: 1000 },
       webhook: { windowMs: 60000, max: 1000 },
       deposit: { windowMs: 60000, max: 1000 },
+      customer: { windowMs: 60000, max: 1000 },
     },
   };
 }
