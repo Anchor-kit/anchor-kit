@@ -1,6 +1,7 @@
 import { createAnchor, makeSqliteDbUrlForTests } from '@/index.ts';
 import { SqlDatabaseAdapter } from '@/runtime/database/sql-database-adapter.ts';
 import type { SchemaMigration } from '@/types/foundation.ts';
+import type { AnchorPlugin } from '@/types/plugin.ts';
 import { Database } from 'bun:sqlite';
 import { unlinkSync } from 'node:fs';
 import { Keypair } from '@stellar/stellar-sdk';
@@ -180,12 +181,12 @@ describe('versioned database migrations', () => {
     }
   });
 
-  it('registers plugin migrations through the public factory', async () => {
+  it('applies ordered migrations from two plugins to an existing core database', async () => {
     const url = makeSqliteDbUrlForTests();
     const path = url.slice('file:'.length);
     const key = Keypair.random().secret();
-    const anchor = createAnchor({
-      network: { network: 'testnet' },
+    const config = {
+      network: { network: 'testnet' as const },
       server: { homeDomain: 'anchor.example.com', interactiveDomain: 'https://anchor.example.com' },
       security: {
         sep10SigningKey: key,
@@ -201,45 +202,136 @@ describe('versioned database migrations', () => {
         ],
       },
       framework: {
-        database: { provider: 'sqlite', url },
+        database: { provider: 'sqlite' as const, url },
         watchers: { enabled: false },
       },
-    });
-    anchor.use({
-      id: 'ledger',
-      schema: {
-        migrations: [
-          {
-            name: '001-ledger-entries',
-            async up({ execute }) {
-              await execute(
-                'CREATE TABLE ledger_entries (id TEXT PRIMARY KEY, reference TEXT NOT NULL)',
-              );
+    };
+    const plugins: AnchorPlugin[] = [
+      {
+        id: 'ledger',
+        schema: {
+          migrations: [
+            {
+              name: '001-ledger-entries',
+              async up({ execute }) {
+                await execute(`
+                  CREATE TABLE IF NOT EXISTS plugin_migration_order (
+                    sequence INTEGER PRIMARY KEY,
+                    plugin_id TEXT NOT NULL
+                  );
+                  INSERT INTO plugin_migration_order (sequence, plugin_id)
+                  SELECT COALESCE(MAX(sequence), 0) + 1, 'ledger' FROM plugin_migration_order;
+                  CREATE TABLE ledger_entries (
+                    id TEXT PRIMARY KEY,
+                    reference TEXT NOT NULL
+                  );
+                  INSERT INTO ledger_entries (id, reference)
+                  VALUES ('ledger-fixture', 'preserve-ledger-data');
+                `);
+              },
             },
-          },
-        ],
+          ],
+        },
       },
-    });
+      {
+        id: 'audit',
+        schema: {
+          migrations: [
+            {
+              name: '001-audit-events',
+              async up({ execute }) {
+                await execute(`
+                  CREATE TABLE IF NOT EXISTS plugin_migration_order (
+                    sequence INTEGER PRIMARY KEY,
+                    plugin_id TEXT NOT NULL
+                  );
+                  INSERT INTO plugin_migration_order (sequence, plugin_id)
+                  SELECT COALESCE(MAX(sequence), 0) + 1, 'audit' FROM plugin_migration_order;
+                  CREATE TABLE audit_events (
+                    id TEXT PRIMARY KEY,
+                    detail TEXT NOT NULL
+                  );
+                  INSERT INTO audit_events (id, detail)
+                  VALUES ('audit-fixture', 'preserve-audit-data');
+                `);
+              },
+            },
+          ],
+        },
+      },
+    ];
+    const anchor = createAnchor(config);
+    for (const plugin of plugins) anchor.use(plugin);
+    const coreAdapter = new SqlDatabaseAdapter({ provider: 'sqlite', url });
+    let repeatAdapter: SqlDatabaseAdapter | undefined;
 
     try {
-      await anchor.init();
-      const database = new Database(path);
+      await coreAdapter.connect();
+      await coreAdapter.migrate();
+      await coreAdapter.disconnect();
+
+      const existingCoreDatabase = new Database(path);
       try {
-        expect(
-          database
-            .prepare('SELECT name FROM anchor_kit_migrations WHERE name = ?')
-            .get('plugin:ledger:001-ledger-entries'),
-        ).toEqual({ name: 'plugin:ledger:001-ledger-entries' });
-        expect(
-          database
-            .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?")
-            .get('ledger_entries'),
-        ).toEqual({ name: 'ledger_entries' });
+        existingCoreDatabase
+          .prepare(
+            `INSERT INTO auth_challenges
+              (id, account, challenge, expires_at, consumed_at, created_at)
+             VALUES (?, ?, ?, ?, ?, ?)`,
+          )
+          .run(
+            'existing-core-challenge',
+            'GABC',
+            'core-challenge',
+            '2099-01-01',
+            null,
+            '2025-01-01',
+          );
       } finally {
-        database.close();
+        existingCoreDatabase.close();
       }
-    } finally {
+
+      await anchor.init();
       await anchor.shutdown();
+
+      const pluginMigrations = plugins.flatMap((plugin) =>
+        (plugin.schema?.migrations ?? []).map((migration) => ({
+          ...migration,
+          name: `plugin:${encodeURIComponent(plugin.id)}:${encodeURIComponent(migration.name)}`,
+        })),
+      );
+      repeatAdapter = new SqlDatabaseAdapter({ provider: 'sqlite', url }, pluginMigrations);
+      await repeatAdapter.connect();
+      await repeatAdapter.migrate();
+
+      const database = (repeatAdapter as unknown as { sqlite: Database }).sqlite;
+      expect(
+        database.prepare('SELECT plugin_id FROM plugin_migration_order ORDER BY sequence').all(),
+      ).toEqual([{ plugin_id: 'ledger' }, { plugin_id: 'audit' }]);
+      expect(
+        database
+          .prepare('SELECT name FROM anchor_kit_migrations WHERE name LIKE ? ORDER BY name')
+          .all('plugin:%'),
+      ).toEqual([
+        { name: 'plugin:audit:001-audit-events' },
+        { name: 'plugin:ledger:001-ledger-entries' },
+      ]);
+      expect(database.prepare('SELECT id, reference FROM ledger_entries').get()).toEqual({
+        id: 'ledger-fixture',
+        reference: 'preserve-ledger-data',
+      });
+      expect(database.prepare('SELECT id, detail FROM audit_events').get()).toEqual({
+        id: 'audit-fixture',
+        detail: 'preserve-audit-data',
+      });
+      expect(
+        database
+          .prepare('SELECT id, challenge FROM auth_challenges WHERE id = ?')
+          .get('existing-core-challenge'),
+      ).toEqual({ id: 'existing-core-challenge', challenge: 'core-challenge' });
+    } finally {
+      await repeatAdapter?.disconnect();
+      await anchor.shutdown();
+      await coreAdapter.disconnect();
       removeSqliteFile(path);
     }
   });
