@@ -103,6 +103,9 @@ class ControllableFakeDatabaseAdapter implements DatabaseAdapter {
   async insertInteractiveTransaction(): Promise<never> {
     throw new Error('Not implemented');
   }
+  async listTransactions() {
+    return [];
+  }
   async findInteractiveTransaction() {
     return null;
   }

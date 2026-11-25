@@ -1,4 +1,5 @@
-import { ConfigError, MalformedPersistedDataError } from '../../core/errors.ts';
+import { validateTransactionHistory } from './transaction-history.ts';
+import { ConfigError, MalformedPersistedDataError, ValidationError } from '../../core/errors.ts';
 import type {
   AuthChallengeRecord,
   ConfirmSettlementResult,
@@ -6,6 +7,7 @@ import type {
   IdempotencyRecord,
   InteractiveTransactionRecord,
   InteractiveTransactionIdentifier,
+  TransactionHistoryQuery,
   ReconciledRailPaymentResult,
   RefundRecord,
   TransactionTransitionResult,
@@ -1458,6 +1460,45 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
       [input.account, input.identifier.value],
     );
     return result.rows.length === 1 ? this.mapTransactionRow(result.rows[0]) : null;
+  }
+
+  public async listTransactions(
+    input: TransactionHistoryQuery,
+  ): Promise<InteractiveTransactionRecord[]> {
+    validateTransactionHistory(input);
+    const values: Array<string | number> = [input.account, input.assetCode];
+    const bind = (value: string | number) => {
+      values.push(value);
+      return this.sqlite ? '?' : `$${values.length}`;
+    };
+    const where = [
+      this.sqlite ? 'account = ?' : 'account = $1',
+      this.sqlite ? 'asset_code = ?' : 'asset_code = $2',
+    ];
+    if (input.kind !== undefined) where.push(`kind = ${bind(input.kind)}`);
+    if (input.noOlderThan !== undefined)
+      where.push(`created_at >= ${bind(new Date(input.noOlderThan).toISOString())}`);
+    if (input.pagingId !== undefined) {
+      const cursor = await this.findInteractiveTransaction({
+        account: input.account,
+        identifier: { kind: 'id', value: input.pagingId },
+      });
+      if (
+        !cursor ||
+        cursor.assetCode !== input.assetCode ||
+        (input.kind !== undefined && cursor.kind !== input.kind)
+      ) {
+        throw new ValidationError('Invalid transaction history cursor');
+      }
+      where.push(
+        `(created_at < ${bind(cursor.createdAt)} OR (created_at = ${bind(cursor.createdAt)} AND id < ${bind(cursor.id)}))`,
+      );
+    }
+    const sql = `SELECT * FROM interactive_transactions WHERE ${where.join(' AND ')} ORDER BY created_at DESC, id DESC LIMIT ${bind(input.limit ?? 10)}`;
+    const rows = this.sqlite
+      ? (this.sqlite.prepare(sql).all(...values) as Record<string, unknown>[])
+      : (await this.requirePostgres().query<Record<string, unknown>>(sql, values)).rows;
+    return rows.map((row) => this.mapTransactionRow(row));
   }
 
   public async listPendingTransactionsBefore(
