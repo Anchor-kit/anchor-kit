@@ -1,24 +1,30 @@
 # PostgreSQL connection budget
 
-The SQL database adapter creates one `pg.Client` and opens it when the adapter
-connects. It does not configure a connection pool. Each adapter instance keeps
-that client until it closes. Budget one connection for every live adapter
-instance across API and worker processes.
+The SQL database adapter opens one long-lived `pg.Client` per adapter instance.
+It does not configure a connection pool. `createDepositWithIdempotency` also
+opens a short-lived client for each concurrent PostgreSQL deposit transaction.
+Budget for both the live adapter clients and the peak number of overlapping
+deposit transactions across API and worker processes.
 
 ## Calculate the application maximum
 
 Use this formula:
 
-`connections = API replicas × API processes per replica × API adapters per process + worker replicas × worker processes per replica × worker adapters per process`
+`connections = live adapter clients + peak concurrent PostgreSQL deposit transactions`
+
+Calculate live adapter clients as:
+
+`API replicas × API processes per replica × API adapters per process + worker replicas × worker processes per replica × worker adapters per process`
 
 Count every service that uses the same PostgreSQL database. Include deployment
 surge capacity when rolling updates can run old and new replicas at once.
 
-For example, suppose a fictional database allows 100 connections. An
-application runs 3 API replicas and 2 worker replicas, with one process and one
-adapter in each. It can use up to `(3 × 1 × 1) + (2 × 1 × 1) = 5` connections.
-If a rolling deployment temporarily doubles each service, the application may
-use 10. Multiple processes or adapters per process multiply the count.
+For example, an application runs 3 API replicas and 2 worker replicas, with one
+process and one adapter in each. Those adapters use 5 long-lived connections.
+If up to 4 PostgreSQL deposit transactions can overlap, budget 9 application
+connections. A rolling deployment that doubles the replicas and the expected
+transaction concurrency can raise that peak to 18. Multiple processes or
+adapters per process multiply the long-lived client count.
 
 Reserve connections for migrations, administration, monitoring, other
 applications, and failover or deployment overlap. For example, if the database
