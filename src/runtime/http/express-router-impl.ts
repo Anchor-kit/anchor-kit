@@ -47,6 +47,7 @@ export const ACCESS_TOKEN_AUDIENCE = 'anchor-api';
 export interface ExpressRouterContext {
   config: AnchorConfig;
   database: DatabaseAdapter;
+  isReady: () => boolean;
   webhookProcessor: WebhookProcessor;
   sep10ServerKeypair: Keypair;
   networkPassphrase: string;
@@ -542,6 +543,7 @@ function endpointPath(req: IncomingMessage): string {
 
 const BUILT_IN_PATHS = new Set([
   '/health',
+  '/ready',
   '/info',
   '/auth',
   '/auth/challenge',
@@ -941,6 +943,47 @@ async function handleHealth(res: ServerResponse, method = 'GET'): Promise<void> 
   sendJson(res, 200, { status: 'ok', version }, method);
 }
 
+const READINESS_TIMEOUT_MS = 1000;
+const readinessProbes = new WeakMap<DatabaseAdapter, Promise<boolean>>();
+
+async function handleReadiness(
+  context: ExpressRouterContext,
+  res: ServerResponse,
+  method: string,
+): Promise<void> {
+  let ready = false;
+  if (context.isReady() && context.database.checkReadiness) {
+    let probe = readinessProbes.get(context.database);
+    if (!probe) {
+      probe = Promise.resolve()
+        .then(() => context.database.checkReadiness!())
+        .then(
+          () => true,
+          () => false,
+        );
+      readinessProbes.set(context.database, probe);
+      void probe.then(() => {
+        if (readinessProbes.get(context.database) === probe)
+          readinessProbes.delete(context.database);
+      });
+    }
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      ready = await Promise.race([
+        probe,
+        new Promise<boolean>((resolve) => {
+          timer = setTimeout(() => resolve(false), READINESS_TIMEOUT_MS);
+        }),
+      ]);
+      ready = ready && context.isReady();
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
+  res.setHeader('cache-control', 'no-store');
+  sendJson(res, ready ? 200 : 503, { status: ready ? 'ready' : 'not_ready' }, method);
+}
+
 async function handleInfo(context: ExpressRouterContext, res: ServerResponse): Promise<void> {
   const fullConfig = context.config.getConfig();
   const metadata = fullConfig.metadata;
@@ -1028,7 +1071,8 @@ async function handleInfo(context: ExpressRouterContext, res: ServerResponse): P
 
 function allowedMethodsForPath(path: string): readonly string[] | undefined {
   if (path === '/auth') return ['GET', 'POST'];
-  if (path === '/health' || path === '/info' || path === '/auth/challenge') return ['GET'];
+  if (path === '/health' || path === '/ready' || path === '/info' || path === '/auth/challenge')
+    return ['GET'];
   if (
     path === '/auth/token' ||
     path === '/transactions/deposit/interactive' ||
@@ -1929,6 +1973,7 @@ const TRANSACTION_PATH_RE = /^\/transactions\/([^/]*)$/;
 
 const KNOWN_ROUTES: Record<string, string[]> = {
   '/health': ['GET'],
+  '/ready': ['GET'],
   '/info': ['GET'],
   '/auth': ['GET', 'POST'],
   '/auth/challenge': ['GET'],
@@ -1969,6 +2014,11 @@ export async function handleExpressRouterRequest(
   // Skip timeout for health endpoint (should always respond quickly)
   if ((method === 'GET' || method === 'HEAD') && path === '/health') {
     await handleHealth(res, method);
+    return;
+  }
+
+  if ((method === 'GET' || method === 'HEAD') && path === '/ready') {
+    await handleReadiness(context, res, method);
     return;
   }
 
