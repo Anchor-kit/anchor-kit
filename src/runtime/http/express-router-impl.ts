@@ -379,6 +379,18 @@ async function parseDepositBody(
   const contentType = firstNonEmptyString(req.headers['content-type']);
   const mediaType = contentType?.split(';', 1)[0]?.trim().toLowerCase();
   if (mediaType === 'application/json') {
+    const request = req as IncomingRequestWithRawBody;
+    if (
+      request.rawBody === undefined &&
+      request.body !== undefined &&
+      typeof request.body !== 'string'
+    ) {
+      sendJson(res, 400, {
+        error: 'invalid_request',
+        message: 'Raw JSON body is required',
+      });
+      return null;
+    }
     const parsed = await parsePostJsonBody(req, res, maxBodyBytes);
     if (parsed && hasDuplicateDepositJsonKeys(parsed.rawBody)) {
       sendJson(res, 400, { error: 'invalid_request', message: 'Duplicate deposit fields' });
@@ -392,7 +404,11 @@ async function parseDepositBody(
   }
   // Framework-parsed objects have lost duplicate fields and their original byte size.
   const request = req as IncomingRequestWithRawBody;
-  if (request.rawBody === undefined && request.body !== undefined) {
+  if (
+    request.rawBody === undefined &&
+    request.body !== undefined &&
+    typeof request.body !== 'string'
+  ) {
     sendJson(res, 400, { error: 'invalid_request', message: 'Raw form body is required' });
     return null;
   }

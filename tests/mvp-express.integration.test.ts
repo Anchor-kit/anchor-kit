@@ -1702,6 +1702,24 @@ describe('MVP Express-mounted integration', () => {
     expect(response.body.message).toBe('Raw form body is required');
   });
 
+  it('rejects a framework-parsed JSON body when the raw bytes are unavailable', async () => {
+    const requestStream = Object.assign(Readable.from([]), {
+      body: { asset_code: 'USDC', amount: '5' },
+    });
+    const response = await invoke({
+      method: 'POST',
+      path: '/transactions/deposit/interactive',
+      headers: {
+        authorization: `Bearer ${accessToken}`,
+        'x-forwarded-for': '10.0.2.5',
+        'content-type': 'application/json',
+      },
+      requestStream,
+    });
+    expect(response.status).toBe(400);
+    expect(response.body.message).toBe('Raw JSON body is required');
+  });
+
   it('6a) decimal deposit amounts preserve their exact string formatting through create, persist, and lookup', async () => {
     const submittedAmount = '25.5000';
     const createResponse = await invoke({
