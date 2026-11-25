@@ -403,12 +403,40 @@ export type QueueJob =
   | { type: 'process_watcher_task'; payload: { watcherTaskId: string } }
   | { type: 'cleanup_records'; payload: { retentionDays: number } };
 
-export interface QueueDrainStatus {
-  readonly pending: number;
-  readonly active: number;
+/**
+ * Classification of a queue failure. Retryable failures are attempted again until the
+ * configured attempt limit; permanent failures are recorded once and never retried.
+ */
+export type QueueJobErrorClassification = 'retryable' | 'permanent';
+
+/** Bounded retry policy for the in-memory queue. */
+export interface QueueJobRetryOptions {
+  /** Total attempts including the first. Defaults to 3. */
+  maxAttempts?: number;
+  /** First retry delay in milliseconds, doubled per attempt. Defaults to 250. */
+  baseDelayMs?: number;
+  /** Upper bound for any single retry delay. Defaults to 30000. */
+  maxDelayMs?: number;
+}
+
+/**
+ * Terminal failure record retained for operator review. Retries that are still in
+ * progress are not failures; only permanent or attempt-exhausted work is recorded here.
+ */
+export interface QueueJobFailure {
+  /** Stable identity of the original queue job, usable with `requeueFailedJob`. */
+  readonly id: string;
+  readonly job: QueueJob;
+  /** Number of attempts made before the failure became terminal. */
+  readonly attempts: number;
+  /** `permanent` when not retryable; `exhausted` when the attempt limit was reached. */
+  readonly outcome: 'permanent' | 'exhausted';
+  readonly error: unknown;
+  readonly failedAt: string;
 }
 
 export interface QueueDrainStatus {
+  /** Waiting jobs, including jobs currently scheduled for a bounded retry. */
   readonly pending: number;
   readonly active: number;
 }
@@ -419,6 +447,10 @@ export interface QueueAdapter {
   enqueue(job: QueueJob): Promise<void>;
   start(worker: (job: QueueJob) => Promise<void>): Promise<void>;
   stop(): Promise<void>;
+  /** Terminal failures retained for operator review, newest last. */
+  listFailedJobs?(): readonly QueueJobFailure[];
+  /** Re-enqueue a terminal failure with a fresh attempt budget. Returns false if unknown. */
+  requeueFailedJob?(id: string): Promise<boolean>;
 }
 
 export interface Watcher {

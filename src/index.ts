@@ -33,6 +33,9 @@ export type {
   KycVerificationProvider,
   PaymentRailAdapter,
   QueueJob,
+  QueueJobErrorClassification,
+  QueueJobFailure,
+  QueueJobRetryOptions,
   QueueDrainStatus,
   QueueAdapter,
   ReconciledRailPaymentResult,
@@ -48,6 +51,11 @@ export type {
   TransactionTransitionResult,
 } from './runtime/interfaces.ts';
 export { MockKycVerificationProvider } from './runtime/kyc/mock-provider.ts';
+export {
+  classifyQueueJobError,
+  PermanentJobError,
+  RetryableJobError,
+} from './runtime/queue/in-memory-queue.ts';
 export type { ExpressLikeMiddleware } from './runtime/http/express-router.ts';
 
 export { AnchorClient, AnchorClientError } from './client/anchor-client.ts';
