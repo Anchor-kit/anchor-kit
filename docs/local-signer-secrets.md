@@ -4,13 +4,13 @@ This guide covers the trust boundary, configuration, and operational practices f
 
 ## Trust Boundary
 
-| Concern | Anchor-Kit Responsibility | Host Responsibility |
-|---------|---------------------------|---------------------|
-| Secret storage | None — secret is held only in process memory after construction | Provide the secret at startup; choose source (env var, secret manager, HSM) |
-| Secret logging | Never logs the secret or derived keypair material | Ensure your logging pipeline never captures the secret |
-| Transaction submission | **Does not submit** — only returns signed XDR | Submit signed transactions to Horizon; handle retries and sequencing |
-| Key rotation | Not implemented — signer instance is created once at `init()` | Plan and execute rotation; rebuild the signer with a new secret |
-| Remote signing | Not bundled — `StellarTransactionSigner` is an interface | Implement a remote signer (HSM, KMS, hosted service) against the same interface |
+| Concern                | Anchor-Kit Responsibility                                       | Host Responsibility                                                             |
+| ---------------------- | --------------------------------------------------------------- | ------------------------------------------------------------------------------- |
+| Secret storage         | None — secret is held only in process memory after construction | Provide the secret at startup; choose source (env var, secret manager, HSM)     |
+| Secret logging         | Never logs the secret or derived keypair material               | Ensure your logging pipeline never captures the secret                          |
+| Transaction submission | **Does not submit** — only returns signed XDR                   | Submit signed transactions to Horizon; handle retries and sequencing            |
+| Key rotation           | Not implemented — signer instance is created once at `init()`   | Plan and execute rotation; rebuild the signer with a new secret                 |
+| Remote signing         | Not bundled — `StellarTransactionSigner` is an interface        | Implement a remote signer (HSM, KMS, hosted service) against the same interface |
 
 **Key custody and access control are entirely the host's responsibility.** Anchor-Kit does not persist, rotate, or enforce policies on the distribution account secret.
 
@@ -36,12 +36,12 @@ const anchor = createAnchor({
 
 Do not hardcode the secret. Load it at runtime from a source you control:
 
-| Source | Example |
-|--------|---------|
-| Environment variable | `process.env.DISTRIBUTION_ACCOUNT_SECRET` |
-| Cloud secret manager (AWS Secrets Manager, GCP Secret Manager, Azure Key Vault) | Fetch at startup, inject into config |
-| HashiCorp Vault | Read from Vault path during app initialization |
-| File (dev only) | `fs.readFileSync('/run/secrets/distribution-secret', 'utf8').trim()` |
+| Source                                                                          | Example                                                              |
+| ------------------------------------------------------------------------------- | -------------------------------------------------------------------- |
+| Environment variable                                                            | `process.env.DISTRIBUTION_ACCOUNT_SECRET`                            |
+| Cloud secret manager (AWS Secrets Manager, GCP Secret Manager, Azure Key Vault) | Fetch at startup, inject into config                                 |
+| HashiCorp Vault                                                                 | Read from Vault path during app initialization                       |
+| File (dev only)                                                                 | `fs.readFileSync('/run/secrets/distribution-secret', 'utf8').trim()` |
 
 The secret must be a valid Stellar Ed25519 secret seed (starts with `S` and is 56 characters). Anchor-Kit validates the format at startup and throws `CryptoError` if invalid.
 
@@ -109,6 +109,7 @@ The secret is held in the `LocalKeypairSigner`'s private `#keypair` field for th
 Anchor-Kit does not implement automatic rotation. To rotate the distribution account secret:
 
 1. **Generate a new Stellar keypair** offline or via a secure tool:
+
    ```bash
    # Example using stellar-sdk CLI (not included in anchor-kit)
    npx @stellar/stellar-sdk gen-keypair
@@ -170,13 +171,13 @@ const anchor = createAnchor({
 
 ### Migration Considerations
 
-| Aspect | Local Signer | Remote Signer |
-|--------|--------------|---------------|
-| Latency | Sub-millisecond (in-process) | Network round-trip (ms to 100s of ms) |
-| Availability | Tied to process uptime | Depends on HSM/KMS SLA |
-| Audit trail | Application logs only | HSM/KMS native audit logs |
-| Key extraction | Possible from memory dump | Not possible (keys never leave HSM) |
-| Cost | Free | Per-operation or dedicated hardware |
+| Aspect         | Local Signer                 | Remote Signer                         |
+| -------------- | ---------------------------- | ------------------------------------- |
+| Latency        | Sub-millisecond (in-process) | Network round-trip (ms to 100s of ms) |
+| Availability   | Tied to process uptime       | Depends on HSM/KMS SLA                |
+| Audit trail    | Application logs only        | HSM/KMS native audit logs             |
+| Key extraction | Possible from memory dump    | Not possible (keys never leave HSM)   |
+| Cost           | Free                         | Per-operation or dedicated hardware   |
 
 Design your transaction flow to tolerate signer latency (e.g., async signing, queue buffering). The SDK's `signTransaction` is already `async`; no signature change is needed.
 
