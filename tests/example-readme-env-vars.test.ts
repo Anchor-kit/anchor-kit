@@ -11,6 +11,7 @@ describe('example README documents all env vars', () => {
       'DATABASE_URL',
       'ANCHOR_HOME_DOMAIN',
       'INTERACTIVE_DOMAIN',
+      'INTERACTIVE_CALLBACK_ORIGINS',
       'SEP10_SIGNING_KEY',
       'INTERACTIVE_JWT_SECRET',
       'DISTRIBUTION_ACCOUNT_SECRET',
