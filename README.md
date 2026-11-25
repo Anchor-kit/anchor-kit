@@ -159,6 +159,8 @@ Example duplicate response:
 }
 ```
 
+See [the webhook duplicate delivery operational guide](docs/webhook-duplicate-delivery.md) for provider scoping, lease recovery, and duplicate response troubleshooting.
+
 Example failure response when verification or processing fails:
 
 ```json
@@ -338,6 +340,7 @@ curl -s \
 ## Docs
 
 - [Configuration Reference](./docs/configuration-reference.md) – Complete guide to all configuration options, their status, and usage
+- [Webhook Duplicate Delivery Guide](./docs/webhook-duplicate-delivery.md) – Operational guide for provider-scoped deduplication, replay responses, and troubleshooting
 - [Database Migrations and Recovery](./docs/database-migrations.md)
 - [Architecture Overview](./ARCHITECTURE.md)
 - [Contributing Guide](./CONTRIBUTING.md)
