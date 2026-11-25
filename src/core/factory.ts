@@ -9,8 +9,10 @@ import { validatePluginRoutes } from '../runtime/http/express-router-impl.ts';
 import type {
   DatabaseAdapter,
   InteractiveTransactionRecord,
+  KycVerificationProvider,
   QueueAdapter,
   QueueDrainStatus,
+  Sep10AccountLookup,
   Watcher,
   WebhookProcessor,
 } from '@/runtime/interfaces.ts';
@@ -27,6 +29,16 @@ export interface CreateAnchorOptions {
    * disconnect during shutdown; do not share it with another active instance.
    */
   databaseAdapter?: DatabaseAdapter;
+  /** KYC provider used by authenticated SEP-12 customer submissions. */
+  kycVerificationProvider?: KycVerificationProvider;
+
+  /**
+   * Injectable SEP-10 client account lookup used to verify challenge
+   * signatures. Resolve `null` for accounts that do not exist on the network and
+   * throw for upstream failures. Without a lookup, the router keeps its legacy
+   * single-key account-signature check.
+   */
+  sep10AccountLookup?: Sep10AccountLookup;
 }
 
 /**
@@ -40,6 +52,8 @@ export class AnchorInstance {
 
   private database: DatabaseAdapter | null = null;
   private readonly injectedDatabaseAdapter?: DatabaseAdapter;
+  private readonly kycVerificationProvider?: KycVerificationProvider;
+  private readonly injectedSep10AccountLookup?: Sep10AccountLookup;
   private queue: QueueAdapter | null = null;
   private webhookProcessor: WebhookProcessor | null = null;
   private watchers: Watcher[] = [];
@@ -56,6 +70,8 @@ export class AnchorInstance {
     this.config = new AnchorConfig(config);
     this.config.validate();
     this.injectedDatabaseAdapter = options.databaseAdapter;
+    this.kycVerificationProvider = options.kycVerificationProvider;
+    this.injectedSep10AccountLookup = options.sep10AccountLookup;
   }
 
   /**
@@ -144,9 +160,20 @@ export class AnchorInstance {
           config: this.config,
           database: this.database,
           webhookProcessor: this.webhookProcessor,
+          kycVerificationProvider: this.kycVerificationProvider,
           depositRequestHooks,
           sep10ChallengeHooks,
+          sep10AccountLookup: this.injectedSep10AccountLookup,
           pluginRoutes,
+          isReady: () =>
+            this.initialized &&
+            !this.initPromise &&
+            !this.shutdownPromise &&
+            !this.backgroundJobsPromise &&
+            !this.backgroundJobsStopPromise &&
+            this.backgroundJobsRunning &&
+            this.queue?.isRunning === true &&
+            this.watchers.every((watcher) => watcher.isRunning === true),
         }).getMiddleware();
 
         this.initialized = true;

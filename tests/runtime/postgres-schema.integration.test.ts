@@ -65,6 +65,86 @@ describe('PostgreSQL schema isolation', () => {
           stellarTransactionHash: 'stellar-hash-pg',
         });
         expect(await second.getInteractiveTransactionById(transactionId)).toBeNull();
+
+        const reservedId = randomUUID();
+        await first.reserveIdempotencyRecord({
+          id: randomUUID(),
+          scope: 'schema-test',
+          idempotencyKey: reservedId,
+          requestHash: 'hash',
+        });
+        await first.createDepositWithIdempotency({
+          transaction: {
+            id: reservedId,
+            account: 'GTEST',
+            kind: 'deposit',
+            assetCode: 'USDC',
+            amount: '2',
+            status: 'pending_user_transfer_start',
+            createdAt: new Date().toISOString(),
+          },
+          idempotency: {
+            scope: 'schema-test',
+            idempotencyKey: reservedId,
+            requestHash: 'hash',
+            statusCode: 201,
+            responseBody: '{}',
+          },
+        });
+        expect(await first.getInteractiveTransactionById(reservedId)).not.toBeNull();
+        expect(await second.getInteractiveTransactionById(reservedId)).toBeNull();
+
+        const railTransactionId = randomUUID();
+        const railOperationId = randomUUID();
+        const railJobId = randomUUID();
+        await first.insertInteractiveTransaction({
+          id: railTransactionId,
+          account: 'GTEST',
+          kind: 'deposit',
+          assetCode: 'USDC',
+          amount: '3.00',
+          status: 'pending_external',
+        });
+        await expect(
+          first.recordReconciledRailPayment({
+            transactionId: railTransactionId,
+            operationId: railOperationId,
+            jobId: railJobId,
+          }),
+        ).resolves.toMatchObject({
+          outcome: 'enqueued',
+          transaction: { id: railTransactionId, status: 'pending_stellar' },
+          job: { id: railJobId, operationId: railOperationId },
+        });
+        expect(await second.getInteractiveTransactionById(railTransactionId)).toBeNull();
+        expect(await second.getSettlementJobByOperationId(railOperationId)).toBeNull();
+
+        const confirmedTransactionId = randomUUID();
+        const transactionHash = 'c'.repeat(64);
+        await first.insertInteractiveTransaction({
+          id: confirmedTransactionId,
+          account: 'GTEST',
+          kind: 'deposit',
+          assetCode: 'USDC',
+          amount: '4.00',
+          status: 'pending_stellar',
+        });
+        await expect(
+          first.confirmSettlement({
+            transactionId: confirmedTransactionId,
+            transactionHash,
+            amount: '4',
+            recipient: 'GTEST',
+          }),
+        ).resolves.toMatchObject({
+          outcome: 'completed',
+          transaction: { id: confirmedTransactionId, status: 'completed' },
+        });
+        expect(await first.getInteractiveTransactionById(confirmedTransactionId)).toMatchObject({
+          status: 'completed',
+          stellarTransactionHash: transactionHash,
+        });
+        expect(await second.getInteractiveTransactionById(confirmedTransactionId)).toBeNull();
       } finally {
         await first.disconnect();
         await second.disconnect();
