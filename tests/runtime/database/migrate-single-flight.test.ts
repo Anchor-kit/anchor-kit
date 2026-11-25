@@ -11,22 +11,33 @@ interface FakePostgresQuery {
   values?: unknown[];
 }
 
+/** Advisory lock traffic is tracked separately from migration SQL. */
+function isAdvisoryLockQuery(sql: string): boolean {
+  return sql.includes('pg_advisory_lock') || sql.includes('pg_advisory_unlock');
+}
+
 /**
  * A delayed fake PostgreSQL client. Each query records itself and resolves after
  * a short delay so concurrent migration sequences would visibly interleave.
  */
 function createDelayedFakePostgres(delayMs = 5) {
   const queries: FakePostgresQuery[] = [];
+  const advisoryQueries: string[] = [];
   const appliedMigrations = new Set<string>();
   let inFlight = 0;
   let maxInFlight = 0;
 
   return {
     queries,
+    advisoryQueries,
     get maxInFlight() {
       return maxInFlight;
     },
     async query(sql: string, values?: unknown[]) {
+      if (isAdvisoryLockQuery(sql)) {
+        advisoryQueries.push(sql);
+        return { rows: [] };
+      }
       queries.push({ sql, values });
       inFlight += 1;
       maxInFlight = Math.max(maxInFlight, inFlight);
@@ -49,14 +60,20 @@ function createDelayedFakePostgres(delayMs = 5) {
 /** A fake PostgreSQL client whose next migration query rejects on demand. */
 function createFailingFakePostgres() {
   const queries: FakePostgresQuery[] = [];
+  const advisoryQueries: string[] = [];
   let failure: Error | null = null;
 
   return {
     queries,
+    advisoryQueries,
     failNextMigration(error: Error) {
       failure = error;
     },
     async query(sql: string, values?: unknown[]) {
+      if (isAdvisoryLockQuery(sql)) {
+        advisoryQueries.push(sql);
+        return { rows: [] };
+      }
       queries.push({ sql, values });
       if (failure) {
         const error = failure;
@@ -210,5 +227,41 @@ describe('Concurrent database migrations (#600)', () => {
         query.sql.startsWith('SELECT name FROM anchor_kit_migrations'),
       ),
     ).toHaveLength(2);
+  });
+
+  it('holds one PostgreSQL advisory lock around the whole migration sequence', async () => {
+    const adapter = new SqlDatabaseAdapter({
+      provider: 'postgres',
+      url: 'postgres://fake',
+    });
+    const client = createDelayedFakePostgres();
+    attachPostgresClient(adapter, client);
+
+    await Promise.all(Array.from({ length: 3 }, () => adapter.migrate()));
+
+    expect(client.advisoryQueries).toHaveLength(2);
+    expect(client.advisoryQueries[0]).toContain('pg_advisory_lock');
+    expect(client.advisoryQueries[1]).toContain('pg_advisory_unlock');
+    expect(client.queries[0]?.sql).toContain('CREATE TABLE IF NOT EXISTS anchor_kit_migrations');
+  });
+
+  it('releases the PostgreSQL advisory lock after a failed migration', async () => {
+    const adapter = new SqlDatabaseAdapter({
+      provider: 'postgres',
+      url: 'postgres://fake',
+    });
+    const client = createFailingFakePostgres();
+    attachPostgresClient(adapter, client);
+    client.failNextMigration(new Error('transient failure'));
+
+    await expect(adapter.migrate()).rejects.toThrow('transient failure');
+    expect(client.advisoryQueries).toHaveLength(2);
+    expect(client.advisoryQueries[0]).toContain('pg_advisory_lock');
+    expect(client.advisoryQueries[1]).toContain('pg_advisory_unlock');
+
+    await expect(adapter.migrate()).resolves.toBeUndefined();
+    expect(client.advisoryQueries).toHaveLength(4);
+    expect(client.advisoryQueries[2]).toContain('pg_advisory_lock');
+    expect(client.advisoryQueries[3]).toContain('pg_advisory_unlock');
   });
 });
