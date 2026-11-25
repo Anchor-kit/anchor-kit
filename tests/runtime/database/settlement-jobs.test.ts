@@ -82,6 +82,92 @@ describe('durable settlement job records', () => {
     ).rejects.toThrow('different payload reference');
   });
 
+  it('completes only a matching confirmed amount, recipient, and hash and replays once', async () => {
+    const url = makeSqliteDbUrlForTests();
+    dbPath = url.slice('file:'.length);
+    adapter = new SqlDatabaseAdapter({ provider: 'sqlite', url });
+    await adapter.connect();
+    await adapter.migrate();
+    const transactionId = 'confirmed-settlement-tx';
+    const transactionHash = 'a'.repeat(64);
+    await adapter.insertInteractiveTransaction({
+      id: transactionId,
+      account: 'GTEST1234',
+      kind: 'deposit',
+      assetCode: 'USDC',
+      amount: '25.00',
+      amountOut: '22.50',
+      status: 'pending_stellar',
+    });
+
+    const first = await adapter.confirmSettlement({
+      transactionId,
+      transactionHash,
+      amount: '22.5000000',
+      recipient: 'GTEST1234',
+    });
+    const replay = await adapter.confirmSettlement({
+      transactionId,
+      transactionHash: transactionHash.toUpperCase(),
+      amount: '22.5',
+      recipient: 'GTEST1234',
+    });
+    expect(first).toMatchObject({
+      outcome: 'completed',
+      transaction: {
+        id: transactionId,
+        status: 'completed',
+        stellarTransactionHash: transactionHash,
+      },
+    });
+    expect(replay).toMatchObject({
+      outcome: 'replayed',
+      transaction: {
+        id: transactionId,
+        status: 'completed',
+        stellarTransactionHash: transactionHash,
+      },
+    });
+  });
+
+  it('leaves a settlement pending when the confirmed amount or recipient differs', async () => {
+    const url = makeSqliteDbUrlForTests();
+    dbPath = url.slice('file:'.length);
+    adapter = new SqlDatabaseAdapter({ provider: 'sqlite', url });
+    await adapter.connect();
+    await adapter.migrate();
+    const transactionId = 'mismatched-settlement-tx';
+    await adapter.insertInteractiveTransaction({
+      id: transactionId,
+      account: 'GTEST1234',
+      kind: 'deposit',
+      assetCode: 'USDC',
+      amount: '25.00',
+      status: 'pending_stellar',
+    });
+
+    await expect(
+      adapter.confirmSettlement({
+        transactionId,
+        transactionHash: 'b'.repeat(64),
+        amount: '24.99',
+        recipient: 'GTEST1234',
+      }),
+    ).resolves.toMatchObject({ outcome: 'conflict', reason: 'confirmation_mismatch' });
+    await expect(
+      adapter.confirmSettlement({
+        transactionId,
+        transactionHash: 'b'.repeat(64),
+        amount: '25.00',
+        recipient: 'GOTHER1234',
+      }),
+    ).resolves.toMatchObject({ outcome: 'conflict', reason: 'confirmation_mismatch' });
+    await expect(adapter.getInteractiveTransactionById(transactionId)).resolves.toMatchObject({
+      status: 'pending_stellar',
+      stellarTransactionHash: null,
+    });
+  });
+
   it('commits a reconciled rail transition and settlement job together and replays once', async () => {
     const url = makeSqliteDbUrlForTests();
     dbPath = url.slice('file:'.length);
@@ -107,7 +193,6 @@ describe('durable settlement job records', () => {
         SELECT RAISE(ABORT, 'simulated crash before settlement job insert');
       END;
     `);
-
     try {
       await expect(
         adapter.recordReconciledRailPayment({
@@ -135,7 +220,6 @@ describe('durable settlement job records', () => {
       operationId: 'rail-operation-1',
       jobId: 'a-different-retry-id',
     });
-
     expect(first).toMatchObject({
       outcome: 'enqueued',
       transaction: { id: transactionId, status: 'pending_stellar' },
@@ -163,7 +247,6 @@ describe('durable settlement job records', () => {
       amount: '25.00',
       status: 'pending_user_transfer_start',
     });
-
     await expect(
       adapter.recordReconciledRailPayment({
         transactionId: 'not-reconciled-tx',

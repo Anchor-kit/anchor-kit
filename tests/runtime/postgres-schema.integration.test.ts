@@ -118,6 +118,33 @@ describe('PostgreSQL schema isolation', () => {
         });
         expect(await second.getInteractiveTransactionById(railTransactionId)).toBeNull();
         expect(await second.getSettlementJobByOperationId(railOperationId)).toBeNull();
+
+        const confirmedTransactionId = randomUUID();
+        const transactionHash = 'c'.repeat(64);
+        await first.insertInteractiveTransaction({
+          id: confirmedTransactionId,
+          account: 'GTEST',
+          kind: 'deposit',
+          assetCode: 'USDC',
+          amount: '4.00',
+          status: 'pending_stellar',
+        });
+        await expect(
+          first.confirmSettlement({
+            transactionId: confirmedTransactionId,
+            transactionHash,
+            amount: '4',
+            recipient: 'GTEST',
+          }),
+        ).resolves.toMatchObject({
+          outcome: 'completed',
+          transaction: { id: confirmedTransactionId, status: 'completed' },
+        });
+        expect(await first.getInteractiveTransactionById(confirmedTransactionId)).toMatchObject({
+          status: 'completed',
+          stellarTransactionHash: transactionHash,
+        });
+        expect(await second.getInteractiveTransactionById(confirmedTransactionId)).toBeNull();
       } finally {
         await first.disconnect();
         await second.disconnect();

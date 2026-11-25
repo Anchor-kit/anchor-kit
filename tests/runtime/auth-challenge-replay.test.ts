@@ -177,6 +177,9 @@ class ControllableFakeDatabaseAdapter implements DatabaseAdapter {
   async recordReconciledRailPayment(): Promise<never> {
     throw new Error('Unexpected database call');
   }
+  async confirmSettlement(): Promise<never> {
+    throw new Error('Unexpected database call');
+  }
   async cleanupOldRecords(): Promise<void> {}
 }
 

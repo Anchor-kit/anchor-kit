@@ -180,6 +180,17 @@ export interface SettlementJobRecord {
   updatedAt: string;
 }
 
+export type ConfirmSettlementResult =
+  | {
+      outcome: 'completed' | 'replayed';
+      transaction: InteractiveTransactionRecord;
+    }
+  | {
+      outcome: 'conflict';
+      reason: 'not_found' | 'status_mismatch' | 'confirmation_mismatch' | 'hash_mismatch';
+      transaction: InteractiveTransactionRecord | null;
+    };
+
 export type ReconciledRailPaymentResult =
   | {
       outcome: 'enqueued' | 'replayed';
@@ -373,6 +384,12 @@ export interface DatabaseAdapter extends SettlementLeaseAdapter {
     operationId: string;
     status: SettlementJobRecord['status'];
   }): Promise<boolean>;
+  confirmSettlement(input: {
+    transactionId: string;
+    transactionHash: string;
+    amount: string;
+    recipient: string;
+  }): Promise<ConfirmSettlementResult>;
   recordReconciledRailPayment(input: {
     transactionId: string;
     operationId: string;
