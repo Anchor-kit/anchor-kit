@@ -41,6 +41,12 @@ class ControllableFakeDatabaseAdapter implements DatabaseAdapter {
   async connect(): Promise<void> {}
   async disconnect(): Promise<void> {}
   async migrate(): Promise<void> {}
+  async reserveStellarSequence(): Promise<null> {
+    return null;
+  }
+  async completeStellarSequenceOperation(): Promise<boolean> {
+    return false;
+  }
 
   async insertAuthChallenge(input: {
     id: string;

@@ -57,6 +57,8 @@ export type {
   SettlementJobRecord,
   SettlementJobLease,
   SettlementLeaseAdapter,
+  StellarSequenceLease,
+  StellarSequenceLeaseAdapter,
   Watcher,
   WebhookEventRecord,
   WebhookProcessor,
