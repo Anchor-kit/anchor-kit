@@ -1,4 +1,8 @@
-import type { QueueJob } from '@/runtime/interfaces.ts';
+import type {
+  QueueJob,
+  QueueJobErrorClassification,
+  QueueJobFailure,
+} from '@/runtime/interfaces.ts';
 import type { PaymentRailOperation } from '@/types/transaction.ts';
 
 /**
@@ -480,7 +484,37 @@ export interface FrameworkConfig {
     /** Maximum number of jobs waiting for a worker; in-flight jobs are excluded. Defaults to unlimited. */
     maxPendingJobs?: number;
 
-    /** Called when a queue worker fails. Errors from this callback are ignored. */
+    /**
+     * Bounded retry policy for retryable job failures. Defaults to 3 attempts with
+     * exponential backoff from 250 ms, capped at 30 s.
+     */
+    retry?: {
+      /** Total attempts including the first. Defaults to 3. */
+      maxAttempts?: number;
+      /** First retry delay in milliseconds, doubled per attempt. Defaults to 250. */
+      baseDelayMs?: number;
+      /** Upper bound for any single retry delay. Defaults to 30000. */
+      maxDelayMs?: number;
+    };
+
+    /**
+     * Classify a worker failure as retryable or permanent. Defaults to the SDK classifier,
+     * which honours `PermanentJobError`/`RetryableJobError`, `ConfigError`, deterministic
+     * database error codes and an optional `retryable` flag on the error.
+     */
+    classifyError?: (error: unknown) => QueueJobErrorClassification;
+
+    /**
+     * Called once when a job fails permanently or exhausts its attempt limit. Errors from
+     * this callback are logged and ignored. Without a handler the failure is logged and
+     * retained for operator review.
+     */
+    onFailedJob?: (failure: QueueJobFailure) => void | Promise<void>;
+
+    /**
+     * Called with the failed job and its final error when retries are exhausted or the
+     * failure is permanent. Errors from this callback are ignored.
+     */
     onError?: (job: QueueJob, error: unknown) => void | Promise<void>;
   };
 

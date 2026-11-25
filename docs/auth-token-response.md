@@ -29,6 +29,11 @@ shared secret is the same:
 | scope | `anchor_api`    | Access scope required by the SDK route handlers. |
 | typ   | `access_token`  | Token type expected by bearer authentication.    |
 
+The `sub` claim keeps the full SEP-10 identity: a classic account (`G...`), a
+classic account with an ID memo (`G...:memo`), or a muxed account (`M...`).
+Authenticated transaction access uses that full value, so a memo-scoped session
+cannot read a transaction created by the unscoped account session.
+
 Bearer authentication requires `iss` to equal `anchor-kit` and `aud` to equal
 `anchor-api`. Tokens with a missing or mismatched `iss` or `aud` are rejected
 with HTTP 401 and the `unauthorized` error code.
@@ -44,3 +49,28 @@ Example response:
   "token_type": "Bearer"
 }
 ```
+
+## Rotating the signing secret
+
+The signing key is configured as `security.interactiveJwtSecret` (the example
+application reads it from `INTERACTIVE_JWT_SECRET`). Bearer verification uses
+the currently configured value to verify the JWT signature. Tokens signed with
+the previous value therefore fail verification after the new value is loaded;
+active clients must obtain a new token through the SEP-10 challenge flow.
+
+To rotate the key:
+
+1. Generate a new high-entropy secret using your organization's approved secret
+   manager or key-generation process.
+2. Update the deployment's `INTERACTIVE_JWT_SECRET` secret value and deploy the
+   configuration change. Do not put the value in source control, command
+   arguments, tickets, or logs.
+3. Tell users and operators that existing interactive sessions will require
+   reauthentication after the rotation.
+4. Confirm that a newly issued token authenticates successfully and that a
+   token issued before rotation is rejected. Never print either token or secret
+   while checking logs.
+
+Use a placeholder such as `<new-secret>` in runbooks and examples. This
+configuration supports one active signing key, so rotation interrupts existing
+sessions; schedule the change accordingly.
