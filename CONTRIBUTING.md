@@ -151,6 +151,17 @@ Return the original `PaymentRailOperation` when found, or `null` when its outcom
 unknown. Unresolved events require operator action; a retry does not execute the
 webhook callback again.
 
+## Issued-asset recipient checks
+
+Run `bun test tests/recipient-readiness.test.ts`; all assertions should pass.
+`assessIssuedAssetRecipient` evaluates an account snapshot for a matching authorized
+trustline and available capacity. A missing account or trustline returns
+`pending_trust`; unavailable or malformed data returns `unavailable`.
+
+This helper does not fetch account data, change transaction state, or sign a payment.
+The settlement worker must fetch fresh network data, apply a guarded state transition,
+and check again before signing. Ledger state can change after a readiness check.
+
 ## Rail event matching
 
 Run `bun test tests/runtime/rail-event-matching.test.ts`; all assertions should pass.
