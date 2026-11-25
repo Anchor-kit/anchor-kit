@@ -309,18 +309,28 @@ framework: {
     backend: 'memory',           // currently only 'memory' supported
     concurrency?: number,        // optional, defaults to 1
     maxPendingJobs?: number,     // optional, defaults to unlimited
+    retry?: {
+      maxAttempts?: number,      // optional, defaults to 3 (total attempts)
+      baseDelayMs?: number,      // optional, defaults to 250
+      maxDelayMs?: number,       // optional, defaults to 30000
+    },
+    classifyError?: (error) => 'retryable' | 'permanent',
+    onFailedJob?: (failure) => void | Promise<void>,
     onError?: (job, error) => void | Promise<void>,
   },
   // ...
 }
 ```
 
-| Field                  | Type       | Default    | Status         | Notes                                                                                                                                                      |
-| ---------------------- | ---------- | ---------- | -------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `queue.backend`        | `'memory'` | `'memory'` | ✅ Implemented | In-process task queue; retains at most 10,000 active task buckets                                                                                          |
-| `queue.concurrency`    | `number`   | `1`        | ✅ Implemented | Number of concurrent background workers; scales up to handle webhook and watcher loads                                                                     |
-| `queue.maxPendingJobs` | `number`   | unlimited  | ✅ Implemented | Maximum waiting jobs; running jobs do not count toward the limit. Must be a positive safe integer.                                                         |
-| `queue.onError`        | function   | —          | ✅ Implemented | Called with the failed job and error when a worker throws. Without a handler, or if the handler throws, the queue logs the error and continues processing. |
+| Field                  | Type       | Default     | Status         | Notes                                                                                                                                                                                                                                          |
+| ---------------------- | ---------- | ----------- | -------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `queue.backend`        | `'memory'` | `'memory'`  | ✅ Implemented | In-process task queue; retains at most 10,000 active task buckets                                                                                                                                                                              |
+| `queue.concurrency`    | `number`   | `1`         | ✅ Implemented | Number of concurrent background workers; scales up to handle webhook and watcher loads                                                                                                                                                         |
+| `queue.maxPendingJobs` | `number`   | unlimited   | ✅ Implemented | Maximum waiting jobs; running jobs do not count toward the limit. Must be a positive safe integer.                                                                                                                                             |
+| `queue.retry`          | object     | see below   | ✅ Implemented | Bounded retry policy for retryable failures: `maxAttempts` (default `3`), `baseDelayMs` (default `250`) and `maxDelayMs` (default `30000`). Backoff is exponential and capped.                                                                 |
+| `queue.classifyError`  | function   | SDK default | ✅ Implemented | Returns `'retryable'` or `'permanent'` for a worker error. The default classifier honours the exported `RetryableJobError`/`PermanentJobError`, `ConfigError`, deterministic database error codes and a boolean `retryable` flag on the error. |
+| `queue.onFailedJob`    | function   | —           | ✅ Implemented | Called once with a `QueueJobFailure` after a permanent failure or exhausted retries. Failures are also retained in memory for `getFailedQueueJobs()` review.                                                                                   |
+| `queue.onError`        | function   | —           | ✅ Implemented | Called with the failed job and its final error after a permanent failure or exhausted retries. Without a handler, or if the handler throws, the queue logs the error and continues processing.                                                 |
 
 **Example:**
 
@@ -330,13 +340,19 @@ framework: {
     backend: 'memory',
     concurrency: 5,
     maxPendingJobs: 100,
+    retry: { maxAttempts: 3, baseDelayMs: 250, maxDelayMs: 30000 },
+    onFailedJob: (failure) =>
+      logger.error(
+        { jobType: failure.job.type, attempts: failure.attempts, outcome: failure.outcome },
+        'Background job requires operator review',
+      ),
     onError: (job, error) => logger.error({ job, error }, 'Background job failed'),
   },
   // ...
 }
 ```
 
-Focused check: `bun test tests/core/factory-background-startup.test.ts`. It must pass the public-factory assertions that enforce the configured pending limit and invoke `onError` after a worker failure.
+Focused check: `bun test tests/runtime/queue-retry.test.ts tests/core/factory-background-startup.test.ts`. It must prove that transient jobs retry within their bounds, permanent or exhausted jobs are recorded and handed to `onFailedJob`, and the public factory forwards the retry options. See [Queue retries and failed jobs](queue-retries.md) for the acceptance gate and recovery API.
 
 ---
 
