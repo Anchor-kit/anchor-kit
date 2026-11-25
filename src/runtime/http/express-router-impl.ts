@@ -1479,7 +1479,7 @@ async function handleDepositInteractive(
     const responseBody = {
       id: transactionId,
       kind: 'deposit',
-      status: 'pending_user_transfer_start',
+      status: 'incomplete',
       amount,
       asset_code: assetCode,
       asset_issuer: selectedAsset.issuer,
@@ -1498,7 +1498,7 @@ async function handleDepositInteractive(
           kind: 'deposit',
           assetCode,
           amount,
-          status: 'pending_user_transfer_start',
+          status: 'incomplete',
           createdAt,
         },
         idempotency: {
@@ -1528,7 +1528,7 @@ async function handleDepositInteractive(
     kind: 'deposit',
     assetCode,
     amount,
-    status: 'pending_user_transfer_start',
+    status: 'incomplete',
   });
 
   sendJson(res, 201, {
