@@ -1,5 +1,6 @@
 import type {
   DatabaseAdapter,
+  PaymentRailAdapter,
   WebhookCallbackContext,
   WebhookEventRecord,
   WebhookProcessor,
@@ -12,6 +13,7 @@ import type { PaymentRailOperation } from '@/types/transaction.ts';
 interface DefaultWebhookProcessorOptions {
   config: AnchorKitConfigSnapshot;
   database: DatabaseAdapter;
+  paymentRailAdapters?: readonly PaymentRailAdapter[];
 }
 
 const DEFAULT_CALLBACK_TIMEOUT_MS = 30_000;
@@ -47,6 +49,7 @@ export function deriveWebhookOperationKey(provider: string, eventId: string): st
 export class DefaultWebhookProcessor implements WebhookProcessor {
   private readonly config: AnchorKitConfigSnapshot;
   private readonly database: DatabaseAdapter;
+  private readonly paymentRailAdapters?: ReadonlyMap<string, PaymentRailAdapter>;
   private readonly activeControllers = new Set<AbortController>();
   private readonly activeProcesses = new Set<Promise<{ duplicate: boolean; eventId: string }>>();
   private shuttingDown = false;
@@ -54,6 +57,16 @@ export class DefaultWebhookProcessor implements WebhookProcessor {
   constructor(options: DefaultWebhookProcessorOptions) {
     this.config = options.config;
     this.database = options.database;
+    if (options.paymentRailAdapters) {
+      const adapters = new Map<string, PaymentRailAdapter>();
+      for (const adapter of options.paymentRailAdapters) {
+        if (!adapter.provider.trim() || adapters.has(adapter.provider)) {
+          throw new Error('Payment rail provider names must be non-empty and unique');
+        }
+        adapters.set(adapter.provider, adapter);
+      }
+      this.paymentRailAdapters = adapters;
+    }
   }
 
   public async process(input: {
@@ -73,7 +86,45 @@ export class DefaultWebhookProcessor implements WebhookProcessor {
     attemptId?: string;
     attemptCount?: number;
   }> {
-    this.verifySignatureIfEnabled(input);
+    if (this.paymentRailAdapters) {
+      const adapter = this.paymentRailAdapters.get(input.provider);
+      if (!adapter || !adapter.capabilities.eventVerification)
+        throw new Error('Unsupported webhook provider');
+      let verified: Awaited<ReturnType<PaymentRailAdapter['verifyEvent']>>;
+      try {
+        verified = await adapter.verifyEvent({
+          rawBody: input.rawBody,
+          signature: input.signature,
+        });
+      } catch {
+        throw new Error('Webhook verification failed');
+      }
+      if (
+        !verified.supported ||
+        verified.value.provider !== input.provider ||
+        !verified.value.eventId.trim()
+      ) {
+        throw new Error('Webhook verification failed');
+      }
+      const event = verified.value;
+      input = {
+        ...input,
+        eventId: event.eventId,
+        payload: {
+          eventId: event.eventId,
+          provider: event.provider,
+          reference: event.reference,
+          ...(event.providerReference === undefined
+            ? {}
+            : { providerReference: event.providerReference }),
+          amount: { amount: event.amount.amount, currency: event.amount.currency },
+          status: event.status,
+          occurredAt: event.occurredAt,
+        },
+      };
+    } else {
+      this.verifySignatureIfEnabled(input);
+    }
 
     const operationKey = deriveWebhookOperationKey(input.provider, input.eventId);
 

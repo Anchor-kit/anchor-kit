@@ -9,6 +9,7 @@ import { validatePluginRoutes } from '../runtime/http/express-router-impl.ts';
 import type {
   DatabaseAdapter,
   InteractiveTransactionRecord,
+  PaymentRailAdapter,
   KycVerificationProvider,
   QueueAdapter,
   QueueDrainStatus,
@@ -30,6 +31,7 @@ export interface CreateAnchorOptions {
    * disconnect during shutdown; do not share it with another active instance.
    */
   databaseAdapter?: DatabaseAdapter;
+  paymentRailAdapters?: readonly PaymentRailAdapter[];
   /** KYC provider used by authenticated SEP-12 customer submissions. */
   kycVerificationProvider?: KycVerificationProvider;
 
@@ -53,6 +55,7 @@ export class AnchorInstance {
 
   private database: DatabaseAdapter | null = null;
   private readonly injectedDatabaseAdapter?: DatabaseAdapter;
+  private readonly paymentRailAdapters?: readonly PaymentRailAdapter[];
   private readonly kycVerificationProvider?: KycVerificationProvider;
   private readonly injectedSep10AccountLookup?: Sep10AccountLookup;
   private queue: QueueAdapter | null = null;
@@ -71,6 +74,7 @@ export class AnchorInstance {
     this.config = new AnchorConfig(config);
     this.config.validate();
     this.injectedDatabaseAdapter = options.databaseAdapter;
+    this.paymentRailAdapters = options.paymentRailAdapters;
     this.kycVerificationProvider = options.kycVerificationProvider;
     this.injectedSep10AccountLookup = options.sep10AccountLookup;
   }
@@ -135,6 +139,7 @@ export class AnchorInstance {
         this.webhookProcessor = new DefaultWebhookProcessor({
           config: this.config.getConfig(),
           database: this.database,
+          paymentRailAdapters: this.paymentRailAdapters,
         });
 
         const watchersEnabled = frameworkConfig.watchers?.enabled ?? true;

@@ -1,5 +1,13 @@
 # Focused issue acceptance checks
 
+For registered payment rail webhook verification, run:
+
+```sh
+bun test tests/runtime/webhooks/default-webhook-processor.test.ts
+```
+
+Expected result: 10 tests pass. When `paymentRailAdapters` is supplied to `createAnchor`, unknown providers and failed verification are rejected before persistence. Existing hosts that do not supply adapters retain the generic webhook behavior.
+
 For refund serialization, run:
 
 ```sh
