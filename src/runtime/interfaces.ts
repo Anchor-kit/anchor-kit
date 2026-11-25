@@ -76,6 +76,20 @@ export interface Sep10AccountLookup {
   load(accountId: string): Promise<Sep10AccountSigners | null>;
 }
 
+/** Signer keys, weights and thresholds for a Stellar account as reported by a lookup provider. */
+export type AccountSignerConfiguration = Sep10AccountSigners;
+
+/** Outcome of an account lookup. Not-found and upstream errors are distinct and must not be conflated. */
+export type AccountLookupResult =
+  | { outcome: 'found'; account: AccountSignerConfiguration }
+  | { outcome: 'not_found' }
+  | { outcome: 'unavailable'; reason?: string };
+
+/** Injectable boundary for loading an account's configured signers and thresholds. */
+export interface AccountLookupProvider {
+  lookupAccount(publicKey: string): Promise<AccountLookupResult>;
+}
+
 export interface AuthChallengeRecord {
   id: string;
   account: string;
