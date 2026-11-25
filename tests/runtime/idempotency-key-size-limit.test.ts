@@ -101,6 +101,9 @@ function makeFakeDb(rejectOnIdempotency = false): {
         updatedAt: now,
       };
     },
+    async listTransactions() {
+      return [];
+    },
     async findInteractiveTransaction() {
       return null;
     },
@@ -226,6 +229,12 @@ function makeFakeDb(rejectOnIdempotency = false): {
       return false;
     },
     async finishSettlementJob() {
+      return false;
+    },
+    async reserveStellarSequence() {
+      return null;
+    },
+    async completeStellarSequenceOperation() {
       return false;
     },
     async updateSettlementJobStatus() {

@@ -1,11 +1,14 @@
+import { validateTransactionHistory } from '@/runtime/database/transaction-history.ts';
 import type { AnchorConfig } from '@/core/config.ts';
 import { ConfigError, PayloadTooLargeError, ValidationError } from '@/core/errors.ts';
 import { InMemoryRateLimiter, type RateLimitRule } from '@/runtime/http/rate-limiter.ts';
 import type {
+  AccountLookupProvider,
   AccountSigner,
   DatabaseAdapter,
   InteractiveTransactionIdentifier,
   InteractiveTransactionRecord,
+  TransactionHistoryQuery,
   KycVerificationProvider,
   Sep10AccountLookup,
   Sep10AccountSigners,
@@ -59,6 +62,7 @@ export interface ExpressRouterContext {
   config: AnchorConfig;
   database: DatabaseAdapter;
   isReady: () => boolean;
+  accountLookup?: AccountLookupProvider;
   webhookProcessor: WebhookProcessor;
   kycVerificationProvider?: KycVerificationProvider;
   sep10ServerKeypair: Keypair;
@@ -645,6 +649,7 @@ const BUILT_IN_PATHS = new Set([
   '/customer',
   '/transactions/deposit/interactive',
   '/transaction',
+  '/transactions',
   '/webhooks/events',
 ]);
 const BUILT_IN_TRANSACTION_PATH = /^\/transactions\/[^/]+$/;
@@ -905,6 +910,7 @@ export async function authorizeSep10AccountSignatures(
     account: string;
     serverPublicKey: string;
     lookup?: Sep10AccountLookup;
+    accountLookup?: AccountLookupProvider;
     additionalSigners?: readonly string[];
   },
 ): Promise<Sep10AccountAuthorization> {
@@ -912,13 +918,19 @@ export async function authorizeSep10AccountSignatures(
     StrKey.isValidEd25519PublicKey(key),
   );
 
-  if (!input.lookup) {
+  if (!input.lookup && !input.accountLookup) {
     return hasValidSignature(transaction, input.account) ? 'authorized' : 'rejected';
   }
 
   let account: Sep10AccountSigners | null;
   try {
-    account = await input.lookup.load(input.account);
+    if (input.accountLookup) {
+      const result = await input.accountLookup.lookupAccount(input.account);
+      if (result.outcome === 'unavailable') return 'lookup_failed';
+      account = result.outcome === 'not_found' ? null : result.account;
+    } else {
+      account = (await input.lookup?.load(input.account)) ?? null;
+    }
   } catch {
     return 'lookup_failed';
   }
@@ -1249,7 +1261,8 @@ function allowedMethodsForPath(path: string): readonly string[] | undefined {
     path === '/ready' ||
     path === '/info' ||
     path === '/auth/challenge' ||
-    path === '/transaction'
+    path === '/transaction' ||
+    path === '/transactions'
   )
     return ['GET'];
   if (path === '/customer') return ['GET', 'PUT'];
@@ -1593,6 +1606,7 @@ async function handleAuthToken(
     account: identity.signer,
     serverPublicKey: context.sep10ServerKeypair.publicKey(),
     lookup: context.sep10AccountLookup,
+    accountLookup: context.accountLookup,
     additionalSigners:
       securityConfig.enableClientAttribution && securityConfig.clientDomainSigningKey
         ? [securityConfig.clientDomainSigningKey]
@@ -2581,27 +2595,83 @@ async function handleSep24Transaction(
     sendJson(res, 404, { error: 'not_found', message: 'Transaction not found' });
     return;
   }
+  sendJson(res, 200, { transaction: serializeSep24Transaction(context, transaction) });
+}
+
+function serializeSep24Transaction(
+  context: ExpressRouterContext,
+  transaction: InteractiveTransactionRecord,
+) {
   const interactiveDomain = context.config.get('server').interactiveDomain;
-  sendJson(res, 200, {
-    transaction: {
-      id: transaction.id,
-      kind: transaction.kind,
-      status: transaction.status,
-      started_at: transaction.createdAt,
-      ...(transaction.amountIn == null ? {} : { amount_in: transaction.amountIn }),
-      ...(transaction.amountOut == null ? {} : { amount_out: transaction.amountOut }),
-      ...(transaction.amountFee == null ? {} : { amount_fee: transaction.amountFee }),
-      ...(transaction.stellarTransactionHash == null
-        ? {}
-        : { stellar_transaction_id: transaction.stellarTransactionHash }),
-      ...(transaction.railReference == null
-        ? {}
-        : { external_transaction_id: transaction.railReference }),
-      ...(interactiveDomain
-        ? { more_info_url: buildInteractiveUrl(interactiveDomain, transaction.id) }
-        : {}),
-    },
-  });
+  return {
+    id: transaction.id,
+    kind: transaction.kind,
+    status: transaction.status,
+    started_at: transaction.createdAt,
+    ...(transaction.amountIn == null ? {} : { amount_in: transaction.amountIn }),
+    ...(transaction.amountOut == null ? {} : { amount_out: transaction.amountOut }),
+    ...(transaction.amountFee == null ? {} : { amount_fee: transaction.amountFee }),
+    ...(transaction.stellarTransactionHash == null
+      ? {}
+      : { stellar_transaction_id: transaction.stellarTransactionHash }),
+    ...(transaction.railReference == null
+      ? {}
+      : { external_transaction_id: transaction.railReference }),
+    ...(interactiveDomain
+      ? { more_info_url: buildInteractiveUrl(interactiveDomain, transaction.id) }
+      : {}),
+  };
+}
+
+async function handleSep24History(
+  context: ExpressRouterContext,
+  req: IncomingMessage,
+  res: ServerResponse,
+): Promise<void> {
+  res.setHeader('Cache-Control', 'no-store');
+  const auth = authenticate(context, req);
+  if (!auth) {
+    sendJsonUnauthorized(res, {
+      error: 'unauthorized',
+      message: 'Missing or invalid bearer token',
+    });
+    return;
+  }
+  const params = parseUrl(req).searchParams;
+  const fields = ['asset_code', 'kind', 'limit', 'no_older_than', 'paging_id'] as const;
+  const kind = params.get('kind');
+  const limit = params.get('limit');
+  if (
+    fields.some((field) => params.getAll(field).length > 1) ||
+    (kind !== null && kind !== 'deposit' && kind !== 'withdrawal') ||
+    (limit !== null && !/^[1-9]\d{0,2}$/.test(limit))
+  ) {
+    sendJson(res, 400, {
+      error: 'invalid_request',
+      message: 'Invalid or repeated transaction history filters',
+    });
+    return;
+  }
+  const input: TransactionHistoryQuery = {
+    account: auth.account,
+    assetCode: params.get('asset_code') ?? '',
+    ...(kind === null ? {} : { kind }),
+    ...(limit === null ? {} : { limit: Number(limit) }),
+    ...(params.has('no_older_than') ? { noOlderThan: params.get('no_older_than')! } : {}),
+    ...(params.has('paging_id') ? { pagingId: params.get('paging_id')! } : {}),
+  };
+  try {
+    validateTransactionHistory(input);
+    const transactions = await context.database.listTransactions(input);
+    sendJson(res, 200, {
+      transactions: transactions
+        .filter((transaction) => transaction.account === auth.account)
+        .map((transaction) => serializeSep24Transaction(context, transaction)),
+    });
+  } catch (error) {
+    if (!(error instanceof ValidationError)) throw error;
+    sendJson(res, 400, { error: 'invalid_request', message: error.message });
+  }
 }
 
 const MAX_PROVIDER_IDENTIFIER_LENGTH = 64;
@@ -2757,6 +2827,7 @@ const KNOWN_ROUTES: Record<string, string[]> = {
   '/ready': ['GET'],
   '/info': ['GET'],
   '/transaction': ['GET'],
+  '/transactions': ['GET'],
   '/customer': ['GET', 'PUT'],
   '/auth': ['GET', 'POST'],
   '/auth/challenge': ['GET'],
@@ -2842,6 +2913,11 @@ export async function handleExpressRouterRequest(
 
       if (method === 'POST' && path === '/transactions/deposit/interactive') {
         await handleDepositInteractive(context, req, res);
+        return;
+      }
+
+      if (method === 'GET' && path === '/transactions') {
+        await handleSep24History(context, req, res);
         return;
       }
 

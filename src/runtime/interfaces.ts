@@ -76,6 +76,20 @@ export interface Sep10AccountLookup {
   load(accountId: string): Promise<Sep10AccountSigners | null>;
 }
 
+/** Signer keys, weights and thresholds for a Stellar account as reported by a lookup provider. */
+export type AccountSignerConfiguration = Sep10AccountSigners;
+
+/** Outcome of an account lookup. Not-found and upstream errors are distinct and must not be conflated. */
+export type AccountLookupResult =
+  | { outcome: 'found'; account: AccountSignerConfiguration }
+  | { outcome: 'not_found' }
+  | { outcome: 'unavailable'; reason?: string };
+
+/** Injectable boundary for loading an account's configured signers and thresholds. */
+export interface AccountLookupProvider {
+  lookupAccount(publicKey: string): Promise<AccountLookupResult>;
+}
+
 export interface AuthChallengeRecord {
   id: string;
   account: string;
@@ -122,6 +136,15 @@ export type InteractiveSessionRejection =
   | 'session_expired'
   | 'action_not_permitted'
   | 'action_already_consumed';
+
+export interface TransactionHistoryQuery {
+  account: string;
+  assetCode: string;
+  limit?: number;
+  kind?: 'deposit' | 'withdrawal';
+  noOlderThan?: string;
+  pagingId?: string;
+}
 
 export type InteractiveTransactionIdentifier =
   | { kind: 'id'; value: string }
@@ -245,6 +268,18 @@ export interface SettlementJobLease {
   attempt: number;
 }
 
+/** A fenced reservation for one Stellar account sequence and payment intent. */
+export interface StellarSequenceLease {
+  accountId: string;
+  sequence: string;
+  operationId: string;
+  payloadHash: string;
+  owner: string;
+  token: string;
+  expiresAt: string;
+  attempt: number;
+}
+
 export interface SettlementLeaseAdapter {
   /** Lists pending jobs and expired leases; claim remains the ownership gate. */
   listClaimableSettlementJobs(limit: number): Promise<SettlementJobRecord[]>;
@@ -265,7 +300,29 @@ export interface SettlementLeaseAdapter {
   }): Promise<boolean>;
 }
 
-export interface DatabaseAdapter extends SettlementLeaseAdapter {
+export interface StellarSequenceLeaseAdapter {
+  /**
+   * Reserves one sequence for one immutable operation. Expired leases may only be
+   * reclaimed by the same operation with the same payload hash; other operations
+   * remain blocked until the reserved transaction is confirmed.
+   */
+  reserveStellarSequence(input: {
+    accountId: string;
+    networkSequence: string;
+    operationId: string;
+    payloadHash: string;
+    owner: string;
+    durationMs: number;
+  }): Promise<StellarSequenceLease | null>;
+  /** Release a reservation only after Horizon confirms its transaction. */
+  completeStellarSequenceOperation(input: {
+    accountId: string;
+    operationId: string;
+    token: string;
+  }): Promise<boolean>;
+}
+
+export interface DatabaseAdapter extends SettlementLeaseAdapter, StellarSequenceLeaseAdapter {
   connect(): Promise<void>;
   disconnect(): Promise<void>;
   migrate(): Promise<void>;
@@ -303,6 +360,7 @@ export interface DatabaseAdapter extends SettlementLeaseAdapter {
     account: string;
     identifier: InteractiveTransactionIdentifier;
   }): Promise<InteractiveTransactionRecord | null>;
+  listTransactions(input: TransactionHistoryQuery): Promise<InteractiveTransactionRecord[]>;
   listPendingTransactionsBefore(cutoffIso: string): Promise<InteractiveTransactionRecord[]>;
 
   insertInteractiveSession(input: {

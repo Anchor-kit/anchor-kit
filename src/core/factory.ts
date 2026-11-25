@@ -8,6 +8,7 @@ import { AnchorExpressRouter, type ExpressLikeMiddleware } from '../runtime/http
 import { validatePluginRoutes } from '../runtime/http/express-router-impl.ts';
 import type {
   DatabaseAdapter,
+  AccountLookupProvider,
   InteractiveTransactionRecord,
   PaymentRailAdapter,
   KycVerificationProvider,
@@ -42,6 +43,8 @@ export interface CreateAnchorOptions {
    * single-key account-signature check.
    */
   sep10AccountLookup?: Sep10AccountLookup;
+  /** Typed SEP-10 account lookup with explicit not-found and upstream outcomes. */
+  accountLookup?: AccountLookupProvider;
 }
 
 /**
@@ -58,6 +61,7 @@ export class AnchorInstance {
   private readonly paymentRailAdapters?: readonly PaymentRailAdapter[];
   private readonly kycVerificationProvider?: KycVerificationProvider;
   private readonly injectedSep10AccountLookup?: Sep10AccountLookup;
+  private readonly injectedAccountLookup?: AccountLookupProvider;
   private queue: QueueAdapter | null = null;
   private webhookProcessor: WebhookProcessor | null = null;
   private watchers: Watcher[] = [];
@@ -77,6 +81,7 @@ export class AnchorInstance {
     this.paymentRailAdapters = options.paymentRailAdapters;
     this.kycVerificationProvider = options.kycVerificationProvider;
     this.injectedSep10AccountLookup = options.sep10AccountLookup;
+    this.injectedAccountLookup = options.accountLookup;
   }
 
   /**
@@ -173,6 +178,7 @@ export class AnchorInstance {
           depositRequestHooks,
           sep10ChallengeHooks,
           sep10AccountLookup: this.injectedSep10AccountLookup,
+          accountLookup: this.injectedAccountLookup,
           pluginRoutes,
           isReady: () =>
             this.initialized &&

@@ -1,4 +1,5 @@
-import { ConfigError, MalformedPersistedDataError } from '../../core/errors.ts';
+import { validateTransactionHistory } from './transaction-history.ts';
+import { ConfigError, MalformedPersistedDataError, ValidationError } from '../../core/errors.ts';
 import type {
   AuthChallengeRecord,
   ConfirmSettlementResult,
@@ -7,11 +8,13 @@ import type {
   InteractiveSessionRecord,
   InteractiveTransactionRecord,
   InteractiveTransactionIdentifier,
+  TransactionHistoryQuery,
   ReconciledRailPaymentResult,
   RefundRecord,
   TransactionTransitionResult,
   SettlementJobRecord,
   SettlementJobLease,
+  StellarSequenceLease,
   WatcherTaskRecord,
   WebhookEventRecord,
 } from '@/runtime/interfaces.ts';
@@ -443,7 +446,90 @@ const CORE_MIGRATIONS: readonly SchemaMigration[] = [
     },
   },
   {
-    name: 'core:007-interactive-sessions',
+    name: 'core:007-stellar-sequence-leases',
+    async up({ dialect, execute }) {
+      await execute(
+        dialect === 'sqlite'
+          ? `CREATE TABLE IF NOT EXISTS stellar_sequence_leases (
+              account_id TEXT PRIMARY KEY,
+              last_sequence INTEGER NOT NULL CHECK (last_sequence > 0),
+              operation_id TEXT,
+              payload_hash TEXT,
+              lease_owner TEXT,
+              lease_token TEXT,
+              lease_expires_at TEXT,
+              lease_attempt INTEGER NOT NULL DEFAULT 0,
+              CHECK ((operation_id IS NULL AND payload_hash IS NULL AND lease_owner IS NULL AND lease_token IS NULL AND lease_expires_at IS NULL) OR
+                (operation_id IS NOT NULL AND payload_hash IS NOT NULL AND lease_owner IS NOT NULL AND lease_token IS NOT NULL AND lease_expires_at IS NOT NULL))
+            )`
+          : `CREATE TABLE IF NOT EXISTS stellar_sequence_leases (
+              account_id TEXT PRIMARY KEY,
+              last_sequence BIGINT NOT NULL CHECK (last_sequence > 0),
+              operation_id TEXT,
+              payload_hash TEXT,
+              lease_owner TEXT,
+              lease_token TEXT,
+              lease_expires_at TIMESTAMPTZ,
+              lease_attempt INTEGER NOT NULL DEFAULT 0,
+              CHECK ((operation_id IS NULL AND payload_hash IS NULL AND lease_owner IS NULL AND lease_token IS NULL AND lease_expires_at IS NULL) OR
+                (operation_id IS NOT NULL AND payload_hash IS NOT NULL AND lease_owner IS NOT NULL AND lease_token IS NOT NULL AND lease_expires_at IS NOT NULL))
+            )`,
+      );
+      await execute(
+        'CREATE UNIQUE INDEX IF NOT EXISTS idx_stellar_sequence_operation ON stellar_sequence_leases (operation_id) WHERE operation_id IS NOT NULL',
+      );
+    },
+  },
+  {
+    name: 'core:008-stellar-sequence-operations',
+    async up({ dialect, execute }) {
+      await execute(
+        dialect === 'sqlite'
+          ? `CREATE TABLE IF NOT EXISTS stellar_account_sequences (
+              account_id TEXT PRIMARY KEY,
+              last_sequence INTEGER NOT NULL CHECK (last_sequence >= 0),
+              active_operation_id TEXT,
+              lease_owner TEXT,
+              lease_token TEXT,
+              lease_expires_at TEXT
+            );
+            CREATE TABLE IF NOT EXISTS stellar_sequence_operations (
+              operation_id TEXT PRIMARY KEY,
+              account_id TEXT NOT NULL REFERENCES stellar_account_sequences(account_id),
+              payload_hash TEXT NOT NULL,
+              sequence INTEGER NOT NULL,
+              status TEXT NOT NULL CHECK (status IN ('pending', 'completed')),
+              lease_owner TEXT NOT NULL,
+              lease_token TEXT NOT NULL,
+              lease_expires_at TEXT NOT NULL,
+              lease_attempt INTEGER NOT NULL DEFAULT 1
+            );
+            CREATE INDEX IF NOT EXISTS idx_stellar_sequence_operations_account ON stellar_sequence_operations (account_id, sequence);`
+          : `CREATE TABLE IF NOT EXISTS stellar_account_sequences (
+              account_id TEXT PRIMARY KEY,
+              last_sequence BIGINT NOT NULL CHECK (last_sequence >= 0),
+              active_operation_id TEXT,
+              lease_owner TEXT,
+              lease_token TEXT,
+              lease_expires_at TIMESTAMPTZ
+            );
+            CREATE TABLE IF NOT EXISTS stellar_sequence_operations (
+              operation_id TEXT PRIMARY KEY,
+              account_id TEXT NOT NULL REFERENCES stellar_account_sequences(account_id),
+              payload_hash TEXT NOT NULL,
+              sequence BIGINT NOT NULL,
+              status TEXT NOT NULL CHECK (status IN ('pending', 'completed')),
+              lease_owner TEXT NOT NULL,
+              lease_token TEXT NOT NULL,
+              lease_expires_at TIMESTAMPTZ NOT NULL,
+              lease_attempt INTEGER NOT NULL DEFAULT 1
+            );
+            CREATE INDEX IF NOT EXISTS idx_stellar_sequence_operations_account ON stellar_sequence_operations (account_id, sequence);`,
+      );
+    },
+  },
+  {
+    name: 'core:009-interactive-sessions',
     async up({ dialect, execute }) {
       await execute(
         dialect === 'sqlite'
@@ -1566,6 +1652,45 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
       [input.account, input.identifier.value],
     );
     return result.rows.length === 1 ? this.mapTransactionRow(result.rows[0]) : null;
+  }
+
+  public async listTransactions(
+    input: TransactionHistoryQuery,
+  ): Promise<InteractiveTransactionRecord[]> {
+    validateTransactionHistory(input);
+    const values: Array<string | number> = [input.account, input.assetCode];
+    const bind = (value: string | number) => {
+      values.push(value);
+      return this.sqlite ? '?' : `$${values.length}`;
+    };
+    const where = [
+      this.sqlite ? 'account = ?' : 'account = $1',
+      this.sqlite ? 'asset_code = ?' : 'asset_code = $2',
+    ];
+    if (input.kind !== undefined) where.push(`kind = ${bind(input.kind)}`);
+    if (input.noOlderThan !== undefined)
+      where.push(`created_at >= ${bind(new Date(input.noOlderThan).toISOString())}`);
+    if (input.pagingId !== undefined) {
+      const cursor = await this.findInteractiveTransaction({
+        account: input.account,
+        identifier: { kind: 'id', value: input.pagingId },
+      });
+      if (
+        !cursor ||
+        cursor.assetCode !== input.assetCode ||
+        (input.kind !== undefined && cursor.kind !== input.kind)
+      ) {
+        throw new ValidationError('Invalid transaction history cursor');
+      }
+      where.push(
+        `(created_at < ${bind(cursor.createdAt)} OR (created_at = ${bind(cursor.createdAt)} AND id < ${bind(cursor.id)}))`,
+      );
+    }
+    const sql = `SELECT * FROM interactive_transactions WHERE ${where.join(' AND ')} ORDER BY created_at DESC, id DESC LIMIT ${bind(input.limit ?? 10)}`;
+    const rows = this.sqlite
+      ? (this.sqlite.prepare(sql).all(...values) as Record<string, unknown>[])
+      : (await this.requirePostgres().query<Record<string, unknown>>(sql, values)).rows;
+    return rows.map((row) => this.mapTransactionRow(row));
   }
 
   public async listPendingTransactionsBefore(
@@ -3089,6 +3214,342 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
       [input.status, input.operationId, input.token],
     );
     return result.rows.length > 0;
+  }
+
+  public async reserveStellarSequence(input: {
+    accountId: string;
+    networkSequence: string;
+    operationId: string;
+    payloadHash: string;
+    owner: string;
+    durationMs: number;
+  }): Promise<StellarSequenceLease | null> {
+    const networkSequence = this.validateStellarSequenceInput(input);
+    const payloadHash = input.payloadHash.toLowerCase();
+    const token = randomUUID();
+    if (this.sqlite) {
+      const database = this.sqlite;
+      const reserve = database.transaction((): StellarSequenceLease | null => {
+        database
+          .prepare(
+            'INSERT INTO stellar_account_sequences (account_id, last_sequence) VALUES (?, ?) ON CONFLICT(account_id) DO NOTHING',
+          )
+          .run(input.accountId, input.networkSequence);
+        const account = database
+          .prepare('SELECT * FROM stellar_account_sequences WHERE account_id = ? LIMIT 1')
+          .get(input.accountId) as Record<string, unknown> | null;
+        if (!account) throw new ConfigError('Failed to reserve Stellar account sequence');
+
+        const activeOperationId = account.active_operation_id;
+        if (typeof activeOperationId === 'string') {
+          if (activeOperationId !== input.operationId) return null;
+          const operation = database
+            .prepare('SELECT * FROM stellar_sequence_operations WHERE operation_id = ? LIMIT 1')
+            .get(input.operationId) as Record<string, unknown> | null;
+          if (
+            !operation ||
+            operation.status !== 'pending' ||
+            operation.account_id !== input.accountId ||
+            operation.payload_hash !== payloadHash
+          ) {
+            throw new ConfigError('Stellar sequence operation identity was reused');
+          }
+          const updated = database
+            .prepare(
+              `UPDATE stellar_sequence_operations SET lease_owner = ?, lease_token = ?,
+                lease_expires_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '+' || (? / 1000.0) || ' seconds'),
+                lease_attempt = lease_attempt + 1 WHERE operation_id = ? AND status = 'pending'
+                AND lease_expires_at <= strftime('%Y-%m-%dT%H:%M:%fZ', 'now') RETURNING *`,
+            )
+            .get(input.owner, token, input.durationMs, input.operationId) as Record<
+            string,
+            unknown
+          > | null;
+          if (!updated) return null;
+          database
+            .prepare(
+              `UPDATE stellar_account_sequences SET lease_owner = ?, lease_token = ?,
+                lease_expires_at = ? WHERE account_id = ? AND active_operation_id = ?`,
+            )
+            .run(
+              input.owner,
+              token,
+              String(updated.lease_expires_at),
+              input.accountId,
+              input.operationId,
+            );
+          return this.mapStellarSequenceLease(updated);
+        }
+
+        const existingOperation = database
+          .prepare('SELECT * FROM stellar_sequence_operations WHERE operation_id = ? LIMIT 1')
+          .get(input.operationId) as Record<string, unknown> | null;
+        if (existingOperation) {
+          if (
+            existingOperation.account_id !== input.accountId ||
+            existingOperation.payload_hash !== payloadHash
+          ) {
+            throw new ConfigError('Stellar sequence operation identity was reused');
+          }
+          return null;
+        }
+
+        const lastSequence = BigInt(String(account.last_sequence));
+        const sequence = (networkSequence > lastSequence ? networkSequence : lastSequence) + 1n;
+        this.validateStellarSequence(sequence);
+        const operation = database
+          .prepare(
+            `INSERT INTO stellar_sequence_operations
+              (operation_id, account_id, payload_hash, sequence, status, lease_owner, lease_token, lease_expires_at, lease_attempt)
+              VALUES (?, ?, ?, ?, 'pending', ?, ?, strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '+' || (? / 1000.0) || ' seconds'), 1)
+              RETURNING *`,
+          )
+          .get(
+            input.operationId,
+            input.accountId,
+            payloadHash,
+            sequence.toString(),
+            input.owner,
+            token,
+            input.durationMs,
+          ) as Record<string, unknown> | null;
+        if (!operation) throw new ConfigError('Failed to create Stellar sequence operation');
+        database
+          .prepare(
+            `UPDATE stellar_account_sequences SET last_sequence = ?, active_operation_id = ?,
+              lease_owner = ?, lease_token = ?, lease_expires_at = ? WHERE account_id = ? AND active_operation_id IS NULL`,
+          )
+          .run(
+            sequence.toString(),
+            input.operationId,
+            input.owner,
+            token,
+            String(operation.lease_expires_at),
+            input.accountId,
+          );
+        return this.mapStellarSequenceLease(operation);
+      });
+      return reserve();
+    }
+
+    const postgres = this.requirePostgres();
+    await postgres.query('BEGIN');
+    try {
+      await postgres.query(
+        'INSERT INTO stellar_account_sequences (account_id, last_sequence) VALUES ($1, $2) ON CONFLICT(account_id) DO NOTHING',
+        [input.accountId, input.networkSequence],
+      );
+      const accountResult = await postgres.query<Record<string, unknown>>(
+        'SELECT * FROM stellar_account_sequences WHERE account_id = $1 FOR UPDATE',
+        [input.accountId],
+      );
+      const account = accountResult.rows[0];
+      if (!account) throw new ConfigError('Failed to reserve Stellar account sequence');
+
+      if (typeof account.active_operation_id === 'string') {
+        if (account.active_operation_id !== input.operationId) {
+          await postgres.query('ROLLBACK');
+          return null;
+        }
+        const updated = await postgres.query<Record<string, unknown>>(
+          `UPDATE stellar_sequence_operations SET lease_owner = $1, lease_token = $2,
+            lease_expires_at = clock_timestamp() + ($3 * interval '1 millisecond'), lease_attempt = lease_attempt + 1
+            WHERE operation_id = $4 AND account_id = $5 AND payload_hash = $6 AND status = 'pending'
+              AND lease_expires_at <= clock_timestamp() RETURNING *`,
+          [input.owner, token, input.durationMs, input.operationId, input.accountId, payloadHash],
+        );
+        const operation = updated.rows[0];
+        if (!operation) {
+          const existing = await postgres.query<Record<string, unknown>>(
+            'SELECT account_id, payload_hash, status FROM stellar_sequence_operations WHERE operation_id = $1',
+            [input.operationId],
+          );
+          const existingOperation = existing.rows[0];
+          await postgres.query('ROLLBACK');
+          if (
+            existingOperation &&
+            (existingOperation.account_id !== input.accountId ||
+              existingOperation.payload_hash !== payloadHash)
+          ) {
+            throw new ConfigError('Stellar sequence operation identity was reused');
+          }
+          return null;
+        }
+        await postgres.query(
+          'UPDATE stellar_account_sequences SET lease_owner = $1, lease_token = $2, lease_expires_at = $3 WHERE account_id = $4 AND active_operation_id = $5',
+          [input.owner, token, operation.lease_expires_at, input.accountId, input.operationId],
+        );
+        await postgres.query('COMMIT');
+        return this.mapStellarSequenceLease(operation);
+      }
+
+      const existing = await postgres.query<Record<string, unknown>>(
+        'SELECT account_id, payload_hash FROM stellar_sequence_operations WHERE operation_id = $1',
+        [input.operationId],
+      );
+      const existingOperation = existing.rows[0];
+      if (existingOperation) {
+        await postgres.query('ROLLBACK');
+        if (
+          existingOperation.account_id !== input.accountId ||
+          existingOperation.payload_hash !== payloadHash
+        ) {
+          throw new ConfigError('Stellar sequence operation identity was reused');
+        }
+        return null;
+      }
+
+      const lastSequence = BigInt(String(account.last_sequence));
+      const sequence = (networkSequence > lastSequence ? networkSequence : lastSequence) + 1n;
+      this.validateStellarSequence(sequence);
+      const inserted = await postgres.query<Record<string, unknown>>(
+        `INSERT INTO stellar_sequence_operations
+          (operation_id, account_id, payload_hash, sequence, status, lease_owner, lease_token, lease_expires_at, lease_attempt)
+          VALUES ($1, $2, $3, $4, 'pending', $5, $6, clock_timestamp() + ($7 * interval '1 millisecond'), 1)
+          RETURNING *`,
+        [
+          input.operationId,
+          input.accountId,
+          payloadHash,
+          sequence.toString(),
+          input.owner,
+          token,
+          input.durationMs,
+        ],
+      );
+      const operation = inserted.rows[0];
+      if (!operation) throw new ConfigError('Failed to create Stellar sequence operation');
+      await postgres.query(
+        `UPDATE stellar_account_sequences SET last_sequence = $1, active_operation_id = $2,
+          lease_owner = $3, lease_token = $4, lease_expires_at = $5 WHERE account_id = $6 AND active_operation_id IS NULL`,
+        [
+          sequence.toString(),
+          input.operationId,
+          input.owner,
+          token,
+          operation.lease_expires_at,
+          input.accountId,
+        ],
+      );
+      await postgres.query('COMMIT');
+      return this.mapStellarSequenceLease(operation);
+    } catch (error) {
+      await postgres.query('ROLLBACK').catch(() => undefined);
+      throw error;
+    }
+  }
+
+  public async completeStellarSequenceOperation(input: {
+    accountId: string;
+    operationId: string;
+    token: string;
+  }): Promise<boolean> {
+    if (!input.accountId.trim() || !input.operationId.trim() || !input.token.trim()) {
+      throw new RangeError('Invalid Stellar sequence completion');
+    }
+    if (this.sqlite) {
+      const database = this.sqlite;
+      const complete = database.transaction((): boolean => {
+        const updated = database
+          .prepare(
+            `UPDATE stellar_sequence_operations SET status = 'completed'
+              WHERE operation_id = ? AND account_id = ? AND lease_token = ? AND status = 'pending'
+                AND lease_expires_at > strftime('%Y-%m-%dT%H:%M:%fZ', 'now')`,
+          )
+          .run(input.operationId, input.accountId, input.token);
+        if (updated.changes === 0) return false;
+        const cleared = database
+          .prepare(
+            `UPDATE stellar_account_sequences SET active_operation_id = NULL, lease_owner = NULL,
+              lease_token = NULL, lease_expires_at = NULL WHERE account_id = ? AND active_operation_id = ? AND lease_token = ?`,
+          )
+          .run(input.accountId, input.operationId, input.token);
+        if (cleared.changes === 0)
+          throw new ConfigError('Stellar sequence lease ownership changed');
+        return true;
+      });
+      return complete();
+    }
+
+    const postgres = this.requirePostgres();
+    await postgres.query('BEGIN');
+    try {
+      await postgres.query(
+        'SELECT account_id FROM stellar_account_sequences WHERE account_id = $1 FOR UPDATE',
+        [input.accountId],
+      );
+      const updated = await postgres.query<Record<string, unknown>>(
+        `UPDATE stellar_sequence_operations SET status = 'completed'
+          WHERE operation_id = $1 AND account_id = $2 AND lease_token = $3 AND status = 'pending'
+            AND lease_expires_at > clock_timestamp() RETURNING operation_id`,
+        [input.operationId, input.accountId, input.token],
+      );
+      if (updated.rows.length === 0) {
+        await postgres.query('ROLLBACK');
+        return false;
+      }
+      const cleared = await postgres.query<Record<string, unknown>>(
+        `UPDATE stellar_account_sequences SET active_operation_id = NULL, lease_owner = NULL,
+          lease_token = NULL, lease_expires_at = NULL WHERE account_id = $1 AND active_operation_id = $2 AND lease_token = $3 RETURNING account_id`,
+        [input.accountId, input.operationId, input.token],
+      );
+      if (cleared.rows.length === 0)
+        throw new ConfigError('Stellar sequence lease ownership changed');
+      await postgres.query('COMMIT');
+      return true;
+    } catch (error) {
+      await postgres.query('ROLLBACK').catch(() => undefined);
+      throw error;
+    }
+  }
+
+  private validateStellarSequenceInput(input: {
+    accountId: string;
+    networkSequence: string;
+    operationId: string;
+    payloadHash: string;
+    owner: string;
+    durationMs: number;
+  }): bigint {
+    if (
+      !input.accountId.trim() ||
+      input.accountId.length > 128 ||
+      !input.operationId.trim() ||
+      input.operationId.length > 255 ||
+      !input.owner.trim() ||
+      input.owner.length > 255 ||
+      !/^[a-fA-F0-9]{64}$/.test(input.payloadHash) ||
+      !/^(0|[1-9]\d*)$/.test(input.networkSequence) ||
+      input.networkSequence.length > 19 ||
+      !Number.isSafeInteger(input.durationMs) ||
+      input.durationMs < 1 ||
+      input.durationMs > 86400000
+    ) {
+      throw new RangeError('Invalid Stellar sequence lease parameters');
+    }
+    const sequence = BigInt(input.networkSequence);
+    this.validateStellarSequence(sequence);
+    return sequence;
+  }
+
+  private validateStellarSequence(sequence: bigint): void {
+    if (sequence < 0n || sequence >= 9223372036854775807n) {
+      throw new RangeError('Stellar sequence must be below INT64_MAX');
+    }
+  }
+
+  private mapStellarSequenceLease(row: Record<string, unknown>): StellarSequenceLease {
+    const expiresAt = row.lease_expires_at;
+    return {
+      accountId: String(row.account_id),
+      sequence: String(row.sequence),
+      operationId: String(row.operation_id),
+      payloadHash: String(row.payload_hash),
+      owner: String(row.lease_owner),
+      token: String(row.lease_token),
+      expiresAt: expiresAt instanceof Date ? expiresAt.toISOString() : String(expiresAt),
+      attempt: Number(row.lease_attempt),
+    };
   }
 
   private validateSettlementLeaseInput(
