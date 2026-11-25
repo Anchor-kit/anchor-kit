@@ -33,11 +33,12 @@ placeholder. Keep the database connection read-only where the SQLite client supp
 
 ## Verify the scope
 
-Before saving the result, verify that every returned row has the requested `customers.id`, that
-the customer appears once, and that the only account IDs are rows linked through that customer's
-`customer_accounts` records. A customer with no linked account still produces one row with a
-null account ID because the query uses a left join. Stop and escalate if the result includes a
-different customer, duplicates the customer unexpectedly, or conflicts with the approved request.
+Before saving the result, verify that every row has the requested `customers.id` and that each
+non-null account ID belongs to that customer's `customer_accounts` records. Multiple rows are
+expected when a customer has multiple linked accounts; they share one distinct `customers.id`.
+A customer with no linked account produces one row with a null account ID because the query uses
+a left join. Stop and escalate if another customer ID appears, an account is not linked to the
+requested customer, or the result conflicts with the approved request.
 
 Use fictional values for any review or example. For instance, `customer_demo_17` with
 `GABC...DEMO` is illustrative only; it is not a real customer or account.
