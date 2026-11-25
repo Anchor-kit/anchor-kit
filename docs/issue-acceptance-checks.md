@@ -56,6 +56,14 @@ bun test tests/example-express-app.test.ts
 
 Expected result: 18 tests pass. The deposit URL returns a non-cacheable unavailable page. It does not yet collect fields or complete a deposit.
 
+For interactive session-state serialization, run:
+
+```sh
+bun test tests/services/interactive-session-state.test.ts
+```
+
+Expected result: 2 tests pass. The serializer checks the transaction binding and emits only status, actions, and required fields. The caller must verify session claims before calling it; this check does not exercise an HTTP endpoint.
+
 Run the focused tests from the repository root:
 
 ```sh
