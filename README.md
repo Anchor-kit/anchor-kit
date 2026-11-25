@@ -338,6 +338,7 @@ curl -s \
 ## Docs
 
 - [Configuration Reference](./docs/configuration-reference.md) – Complete guide to all configuration options, their status, and usage
+- [Staging-to-production Network Isolation Check](./docs/network-isolation-check.md) – Pre-deploy gate for network, passphrase, signer, issuer, and Horizon values
 - [Database Migrations and Recovery](./docs/database-migrations.md)
 - [Architecture Overview](./ARCHITECTURE.md)
 - [Contributing Guide](./CONTRIBUTING.md)
