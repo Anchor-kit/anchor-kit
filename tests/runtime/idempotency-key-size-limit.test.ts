@@ -214,6 +214,7 @@ function makeFakeDb(rejectOnIdempotency = false): {
 
 function makeContext(db: DatabaseAdapter): ExpressRouterContext {
   return {
+    isReady: () => false,
     config,
     database: db,
     webhookProcessor: {

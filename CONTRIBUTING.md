@@ -139,6 +139,19 @@ A task is considered "Done" when:
 - [ ] Documentation is updated.
 - [ ] PR is approved by a maintainer.
 
+## Readiness check
+
+Run `bun test tests/readiness.integration.test.ts`. Both tests should pass, including
+checks for unavailable storage, stopped workers, and a stalled probe.
+
+`GET /health` is a lightweight liveness check. `GET /ready` returns 200 only after
+initialization and background workers have started and the database probe succeeds;
+it returns 503 otherwise. Start workers with `startBackgroundJobs()` before routing
+traffic. Custom database adapters must implement `checkReadiness()` for readiness
+to succeed. Probes have a one-second response limit and share an in-flight request;
+a probe that never settles keeps readiness unavailable until it settles or the
+process restarts. Responses do not include database errors or connection details.
+
 ## License
 
 By contributing, you agree that your contributions will be licensed under its MIT License.
