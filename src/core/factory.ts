@@ -11,6 +11,7 @@ import type {
   InteractiveTransactionRecord,
   QueueAdapter,
   QueueDrainStatus,
+  Sep10AccountLookup,
   Watcher,
   WebhookProcessor,
 } from '@/runtime/interfaces.ts';
@@ -27,6 +28,14 @@ export interface CreateAnchorOptions {
    * disconnect during shutdown; do not share it with another active instance.
    */
   databaseAdapter?: DatabaseAdapter;
+
+  /**
+   * Injectable SEP-10 client account lookup used to verify challenge
+   * signatures. Resolve `null` for accounts that do not exist on the network and
+   * throw for upstream failures. Without a lookup, the router keeps its legacy
+   * single-key account-signature check.
+   */
+  sep10AccountLookup?: Sep10AccountLookup;
 }
 
 /**
@@ -40,6 +49,7 @@ export class AnchorInstance {
 
   private database: DatabaseAdapter | null = null;
   private readonly injectedDatabaseAdapter?: DatabaseAdapter;
+  private readonly injectedSep10AccountLookup?: Sep10AccountLookup;
   private queue: QueueAdapter | null = null;
   private webhookProcessor: WebhookProcessor | null = null;
   private watchers: Watcher[] = [];
@@ -56,6 +66,7 @@ export class AnchorInstance {
     this.config = new AnchorConfig(config);
     this.config.validate();
     this.injectedDatabaseAdapter = options.databaseAdapter;
+    this.injectedSep10AccountLookup = options.sep10AccountLookup;
   }
 
   /**
@@ -146,6 +157,7 @@ export class AnchorInstance {
           webhookProcessor: this.webhookProcessor,
           depositRequestHooks,
           sep10ChallengeHooks,
+          sep10AccountLookup: this.injectedSep10AccountLookup,
           pluginRoutes,
         }).getMiddleware();
 

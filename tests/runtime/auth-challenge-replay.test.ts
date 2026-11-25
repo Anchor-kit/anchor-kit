@@ -147,6 +147,18 @@ class ControllableFakeDatabaseAdapter implements DatabaseAdapter {
   async listPendingSettlementJobs(): Promise<never[]> {
     return [];
   }
+  async listClaimableSettlementJobs() {
+    return [];
+  }
+  async claimSettlementJob() {
+    return null;
+  }
+  async heartbeatSettlementJob() {
+    return false;
+  }
+  async finishSettlementJob() {
+    return false;
+  }
   async updateSettlementJobStatus(): Promise<boolean> {
     return false;
   }

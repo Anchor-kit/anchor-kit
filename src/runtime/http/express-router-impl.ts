@@ -1,10 +1,18 @@
 import type { AnchorConfig } from '@/core/config.ts';
 import { ConfigError, PayloadTooLargeError, ValidationError } from '@/core/errors.ts';
 import { InMemoryRateLimiter, type RateLimitRule } from '@/runtime/http/rate-limiter.ts';
-import type { AccountSigner, DatabaseAdapter, WebhookProcessor } from '@/runtime/interfaces.ts';
+import type {
+  AccountSigner,
+  DatabaseAdapter,
+  Sep10AccountLookup,
+  Sep10AccountSigners,
+  WebhookProcessor,
+} from '@/runtime/interfaces.ts';
 import type { PluginRouteContext, RouteDefinition } from '@/types/foundation.ts';
 import type { AnchorPluginHooks, DepositRequestBody } from '@/types/plugin.ts';
 import { IdempotencyUtils } from '../../utils/idempotency.ts';
+import { createInteractiveInitiationResponse } from '@/core/sep24/interactive-response.ts';
+import { createInteractiveSession } from '@/utils/interactive-session.ts';
 import Big from 'big.js';
 import {
   Account,
@@ -49,6 +57,7 @@ export interface ExpressRouterContext {
   rateRules: Record<'auth_challenge' | 'auth_token' | 'webhook' | 'deposit', RateLimitRule>;
   depositRequestHooks?: NonNullable<AnchorPluginHooks['onDepositRequest']>[];
   sep10ChallengeHooks?: NonNullable<AnchorPluginHooks['onSep10Challenge']>[];
+  sep10AccountLookup?: Sep10AccountLookup;
   pluginRoutes?: Array<{ pluginId: string; route: RouteDefinition }>;
 }
 
@@ -371,11 +380,15 @@ function hasDuplicateDepositJsonKeys(rawBody: RawBodyValue): boolean {
 }
 
 /** Parse deposit fields only after enforcing the raw byte limit and duplicate checks. */
-async function parseDepositBody(
+async function parseDepositRequestBody(
   req: IncomingMessage,
   res: ServerResponse,
   maxBodyBytes: number,
-): Promise<{ body: Record<string, unknown> } | null> {
+): Promise<{
+  rawBody: RawBodyValue;
+  body: Record<string, unknown>;
+  isStandardSep24: boolean;
+} | null> {
   const contentType = firstNonEmptyString(req.headers['content-type']);
   const mediaType = contentType?.split(';', 1)[0]?.trim().toLowerCase();
   if (mediaType === 'application/json') {
@@ -396,7 +409,7 @@ async function parseDepositBody(
       sendJson(res, 400, { error: 'invalid_request', message: 'Duplicate deposit fields' });
       return null;
     }
-    return parsed;
+    return parsed ? { ...parsed, isStandardSep24: false } : null;
   }
   if (mediaType !== 'application/x-www-form-urlencoded' && mediaType !== 'multipart/form-data') {
     sendJson(res, 400, { error: 'invalid_request', message: 'Unsupported deposit Content-Type' });
@@ -412,12 +425,16 @@ async function parseDepositBody(
     sendJson(res, 400, { error: 'invalid_request', message: 'Raw form body is required' });
     return null;
   }
+  // URL encoded and multipart forms preserve the raw field list for duplicate checks.
   let rawBody: RawBodyValue;
   try {
     rawBody = await readRawBody(req, maxBodyBytes);
   } catch (error) {
     if (error instanceof PayloadTooLargeError) {
-      sendJson(res, 413, { error: 'payload_too_large', message: error.message });
+      sendJson(res, 413, {
+        error: 'payload_too_large',
+        message: error.message,
+      });
       return null;
     }
     throw error;
@@ -446,13 +463,30 @@ async function parseDepositBody(
         body[key] = value;
       });
     }
-    return { body };
+    return { rawBody, body, isStandardSep24: true };
   } catch {
     sendJson(res, 400, { error: 'invalid_request', message: 'Invalid or duplicate form fields' });
     return null;
   }
 }
 
+async function createStandardSep24Initiation(
+  context: ExpressRouterContext,
+  interactiveDomain: string,
+  account: string,
+  transactionId: string,
+) {
+  const session = await createInteractiveSession(
+    { account, transactionId, actions: ['deposit'] },
+    context.config.get('security').interactiveJwtSecret,
+  );
+  const url = new URL(buildInteractiveUrl(interactiveDomain, transactionId));
+  url.searchParams.set('token', session);
+  return createInteractiveInitiationResponse({
+    id: transactionId,
+    url: url.toString(),
+  });
+}
 function sha256(input: string | Buffer | Uint8Array): string {
   return createHash('sha256').update(input).digest('hex');
 }
@@ -670,6 +704,132 @@ export function hasSufficientSignerWeight(
   }
 
   return false;
+}
+
+function countValidSignatures(transaction: Transaction, publicKey: string): number {
+  const keypair = Keypair.fromPublicKey(publicKey);
+  const hash = transaction.hash();
+  let count = 0;
+
+  for (const signature of transaction.signatures) {
+    try {
+      if (keypair.verify(hash, signature.signature())) {
+        count += 1;
+      }
+    } catch {
+      // Ignore malformed signature entries.
+    }
+  }
+
+  return count;
+}
+
+/**
+ * SEP-10 requires every signature on a challenge to belong to a key the anchor
+ * can account for: the server account, an authorized account signer, or the
+ * configured client-domain signing key. Unaccounted or malformed entries reject.
+ */
+export function hasOnlyAuthorizedSep10Signatures(
+  transaction: Transaction,
+  authorizedKeys: readonly string[],
+): boolean {
+  const hash = transaction.hash();
+  const keypairs: Keypair[] = [];
+  for (const key of authorizedKeys) {
+    if (!StrKey.isValidEd25519PublicKey(key)) continue;
+    try {
+      keypairs.push(Keypair.fromPublicKey(key));
+    } catch {
+      // Ignore malformed signer keys; they cannot produce a valid signature.
+    }
+  }
+
+  for (const signature of transaction.signatures) {
+    const matched = keypairs.some((keypair) => {
+      try {
+        return keypair.verify(hash, signature.signature());
+      } catch {
+        return false;
+      }
+    });
+    if (!matched) return false;
+  }
+
+  return true;
+}
+
+/**
+ * SEP-10 nonexistent-account branch: the signed challenge must carry exactly one
+ * valid master-key signature for the client account, and no signature from a key
+ * outside `authorizedKeys`. Extra, duplicated, or invalid signatures reject.
+ */
+export function hasSingleMasterSignature(
+  transaction: Transaction,
+  account: string,
+  authorizedKeys: readonly string[],
+): boolean {
+  if (!StrKey.isValidEd25519PublicKey(account)) return false;
+  if (countValidSignatures(transaction, account) !== 1) return false;
+  return hasOnlyAuthorizedSep10Signatures(transaction, [account, ...authorizedKeys]);
+}
+
+export type Sep10AccountAuthorization = 'authorized' | 'rejected' | 'lookup_failed';
+
+/**
+ * Resolve the client account's signing requirements and verify the challenge
+ * against them.
+ *
+ * The lookup is optional for backwards compatibility: without one, the anchor
+ * keeps its legacy single-key check. With a lookup, a `null` result selects the
+ * SEP-10 nonexistent-account branch (one master-key signature, using the
+ * protocol's implicit weight and threshold of 1), while a thrown lookup error is
+ * reported as `lookup_failed` so transport outages are never mistaken for a
+ * missing account.
+ */
+export async function authorizeSep10AccountSignatures(
+  transaction: Transaction,
+  input: {
+    account: string;
+    serverPublicKey: string;
+    lookup?: Sep10AccountLookup;
+    additionalSigners?: readonly string[];
+  },
+): Promise<Sep10AccountAuthorization> {
+  const additionalSigners = (input.additionalSigners ?? []).filter((key) =>
+    StrKey.isValidEd25519PublicKey(key),
+  );
+
+  if (!input.lookup) {
+    return hasValidSignature(transaction, input.account) ? 'authorized' : 'rejected';
+  }
+
+  let account: Sep10AccountSigners | null;
+  try {
+    account = await input.lookup.load(input.account);
+  } catch {
+    return 'lookup_failed';
+  }
+
+  if (account === null) {
+    return hasSingleMasterSignature(transaction, input.account, [
+      input.serverPublicKey,
+      ...additionalSigners,
+    ])
+      ? 'authorized'
+      : 'rejected';
+  }
+
+  if (!hasSufficientSignerWeight(transaction, account.signers, account.thresholds.medium)) {
+    return 'rejected';
+  }
+
+  return hasOnlyAuthorizedSep10Signatures(transaction, [
+    input.serverPublicKey,
+    ...additionalSigners,
+    ...account.signers.map((signer) => signer.publicKey),
+  ])
+    ? 'authorized'
+    : 'rejected';
 }
 
 function hasValidClientDomainSignature(
@@ -1174,7 +1334,24 @@ async function handleAuthToken(
     return;
   }
 
-  if (!hasValidSignature(transaction, account)) {
+  const securityConfig = context.config.get('security');
+  const accountAuthorization = await authorizeSep10AccountSignatures(transaction, {
+    account,
+    serverPublicKey: context.sep10ServerKeypair.publicKey(),
+    lookup: context.sep10AccountLookup,
+    additionalSigners:
+      securityConfig.enableClientAttribution && securityConfig.clientDomainSigningKey
+        ? [securityConfig.clientDomainSigningKey]
+        : [],
+  });
+  if (accountAuthorization === 'lookup_failed') {
+    sendJson(res, 502, {
+      error: 'account_lookup_failed',
+      message: 'Client account signer lookup failed',
+    });
+    return;
+  }
+  if (accountAuthorization !== 'authorized') {
     sendJson(res, 401, {
       error: 'invalid_challenge',
       message: 'Challenge is missing account signature',
@@ -1182,7 +1359,6 @@ async function handleAuthToken(
     return;
   }
 
-  const securityConfig = context.config.get('security');
   if (
     securityConfig.enableClientAttribution &&
     (!securityConfig.clientDomain ||
@@ -1287,7 +1463,7 @@ async function handleDepositInteractive(
     return;
   }
 
-  const parsedBody = await parseDepositBody(req, res, context.maxBodyBytes);
+  const parsedBody = await parseDepositRequestBody(req, res, context.maxBodyBytes);
   if (!parsedBody) {
     return;
   }
@@ -1447,6 +1623,33 @@ async function handleDepositInteractive(
         return;
       }
 
+      if (parsedBody.isStandardSep24) {
+        if (typeof responseBody.id !== 'string') {
+          res.setHeader('Retry-After', '1');
+          sendJson(res, 503, {
+            error: 'idempotency_response_unavailable',
+            message: 'The saved response is unavailable; retry this request',
+          });
+          return;
+        }
+        try {
+          const standardResponse = await createStandardSep24Initiation(
+            context,
+            serverConfig.interactiveDomain,
+            auth.account,
+            responseBody.id,
+          );
+          res.setHeader('Cache-Control', 'no-store');
+          sendJson(res, 200, { ...standardResponse });
+        } catch {
+          sendJson(res, 500, {
+            error: 'server_misconfigured',
+            message: 'SEP-24 interactive sessions could not be created',
+          });
+        }
+        return;
+      }
+
       sendJson(res, idempotencyRecord.statusCode, {
         ...responseBody,
         idempotency_replay: true,
@@ -1456,10 +1659,10 @@ async function handleDepositInteractive(
 
     const transactionId = randomUUID();
     const createdAt = new Date().toISOString();
-    const responseBody = {
+    const legacyResponseBody = {
       id: transactionId,
       kind: 'deposit',
-      status: 'pending_user_transfer_start',
+      status: 'incomplete',
       amount,
       asset_code: assetCode,
       asset_issuer: selectedAsset.issuer,
@@ -1468,8 +1671,19 @@ async function handleDepositInteractive(
       created_at: createdAt,
       updated_at: createdAt,
     };
+    let responseBody: Record<string, unknown> = legacyResponseBody;
 
     try {
+      if (parsedBody.isStandardSep24) {
+        responseBody = {
+          ...(await createStandardSep24Initiation(
+            context,
+            serverConfig.interactiveDomain,
+            auth.account,
+            transactionId,
+          )),
+        };
+      }
       throwIfRequestAborted(req);
       await context.database.createDepositWithIdempotency({
         transaction: {
@@ -1478,14 +1692,14 @@ async function handleDepositInteractive(
           kind: 'deposit',
           assetCode,
           amount,
-          status: 'pending_user_transfer_start',
+          status: 'incomplete',
           createdAt,
         },
         idempotency: {
           scope,
           idempotencyKey,
           requestHash,
-          statusCode: 201,
+          statusCode: parsedBody.isStandardSep24 ? 200 : 201,
           responseBody: JSON.stringify(responseBody),
         },
       });
@@ -1496,11 +1710,29 @@ async function handleDepositInteractive(
       throw error;
     }
 
-    sendJson(res, 201, responseBody);
+    if (parsedBody.isStandardSep24) res.setHeader('Cache-Control', 'no-store');
+    sendJson(res, parsedBody.isStandardSep24 ? 200 : 201, responseBody);
     return;
   }
 
   const transactionId = randomUUID();
+  let standardResponse: ReturnType<typeof createInteractiveInitiationResponse> | null = null;
+  if (parsedBody.isStandardSep24) {
+    try {
+      standardResponse = await createStandardSep24Initiation(
+        context,
+        serverConfig.interactiveDomain,
+        auth.account,
+        transactionId,
+      );
+    } catch {
+      sendJson(res, 500, {
+        error: 'server_misconfigured',
+        message: 'SEP-24 interactive sessions could not be created',
+      });
+      return;
+    }
+  }
   throwIfRequestAborted(req);
   const created = await context.database.insertInteractiveTransaction({
     id: transactionId,
@@ -1508,10 +1740,10 @@ async function handleDepositInteractive(
     kind: 'deposit',
     assetCode,
     amount,
-    status: 'pending_user_transfer_start',
+    status: 'incomplete',
   });
 
-  sendJson(res, 201, {
+  const legacyResponseBody = {
     id: created.id,
     kind: created.kind,
     status: created.status,
@@ -1522,7 +1754,13 @@ async function handleDepositInteractive(
     interactive_url: buildInteractiveUrl(serverConfig.interactiveDomain, created.id),
     created_at: created.createdAt,
     updated_at: created.updatedAt,
-  });
+  };
+  if (standardResponse) {
+    res.setHeader('Cache-Control', 'no-store');
+    sendJson(res, 200, { ...standardResponse });
+  } else {
+    sendJson(res, 201, legacyResponseBody);
+  }
 }
 
 async function handleTransaction(

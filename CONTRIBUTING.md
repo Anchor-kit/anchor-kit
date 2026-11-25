@@ -151,3 +151,16 @@ only a parsed object, the original field duplication can no longer be determined
 ## License
 
 By contributing, you agree that your contributions will be licensed under its MIT License.
+
+## Settlement lease check
+
+Run `DATABASE_URL=<postgres-url> bun test tests/runtime/database/settlement-leases.test.ts`
+against a disposable PostgreSQL database. Both the SQLite and PostgreSQL cases
+should pass. Without `DATABASE_URL`, the PostgreSQL case is skipped.
+
+Use `claimSettlementJob` before processing and pass its token to heartbeat and
+finish calls. The legacy `updateSettlementJobStatus` method rejects because it
+cannot verify ownership. Existing processing jobs without lease metadata need
+operator reconciliation before they can be retried. A lease cannot stop a
+worker that continues after expiry; external payment operations also need an
+idempotency or fencing mechanism.

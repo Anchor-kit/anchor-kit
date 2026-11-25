@@ -33,7 +33,11 @@ export type {
   QueueJob,
   QueueDrainStatus,
   QueueAdapter,
+  Sep10AccountLookup,
+  Sep10AccountSigners,
   SettlementJobRecord,
+  SettlementJobLease,
+  SettlementLeaseAdapter,
   Watcher,
   WebhookEventRecord,
   WebhookProcessor,
@@ -42,3 +46,6 @@ export type {
 } from './runtime/interfaces.ts';
 export { MockKycVerificationProvider } from './runtime/kyc/mock-provider.ts';
 export type { ExpressLikeMiddleware } from './runtime/http/express-router.ts';
+
+export { createInteractiveInitiationResponse } from './core/sep24/interactive-response.ts';
+export type { InteractiveInitiationResponse } from './core/sep24/interactive-response.ts';
