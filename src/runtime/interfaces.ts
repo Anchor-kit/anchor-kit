@@ -25,6 +25,12 @@ export interface PaymentRailAdapter {
     statusLookup: boolean;
     recovery: boolean;
   }>;
+  /**
+   * Initiates one provider operation. Implementations must treat `operationId`
+   * as an idempotency key: replaying the same request after a timeout or
+   * process restart must return the original operation instead of creating a
+   * second charge. A different payload for an existing operationId must fail.
+   */
   initiate(
     input: PaymentRailInitiationRequest,
   ): Promise<RailCapabilityResult<PaymentRailOperation>>;
