@@ -1,4 +1,5 @@
 # Anchor-Kit Product Scope and Runtime Decisions
+# Anchor-Kit Product Scope and Runtime Decisions
 
 This section is the authoritative current scope for contributors. The design material below is retained as a long-term reference; examples and future-state descriptions in it are not evidence that a feature is implemented.
 

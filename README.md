@@ -1,4 +1,4 @@
-# Anchor-Kit
+# Anchor-Kit -
 
 ![CI](https://github.com/0xNgoo/anchor-kit/actions/workflows/ci.yml/badge.svg)
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
