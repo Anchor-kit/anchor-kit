@@ -12,6 +12,7 @@ import type {
   KycVerificationProvider,
   Sep10AccountLookup,
   Sep10AccountSigners,
+  TransactionTransitionResult,
   WebhookProcessor,
 } from '@/runtime/interfaces.ts';
 import type { Customer } from '@/types/customer.ts';
@@ -23,6 +24,7 @@ import { createInteractiveInitiationResponse } from '@/core/sep24/interactive-re
 import {
   createInteractiveSession,
   INTERACTIVE_SESSION_TTL_SECONDS,
+  verifyInteractiveSession,
 } from '@/utils/interactive-session.ts';
 import {
   evaluateInteractiveSession,
@@ -654,6 +656,7 @@ const BUILT_IN_PATHS = new Set([
   '/auth/token',
   '/customer',
   '/transactions/deposit/interactive',
+  '/interactive/deposit',
   '/transaction',
   '/transactions',
   '/webhooks/events',
@@ -698,7 +701,8 @@ export function validatePluginRoutes(
       BUILT_IN_PATHS.has(route.path) ||
       BUILT_IN_TRANSACTION_PATH.test(route.path) ||
       BUILT_IN_TRANSACTION_COMPLETE_PATH.test(route.path) ||
-      BUILT_IN_TRANSACTION_STATE_PATH.test(route.path)
+      BUILT_IN_TRANSACTION_STATE_PATH.test(route.path) ||
+      INTERACTIVE_SESSION_PATH_RE.test(route.path)
     ) {
       throw new ConfigError(
         `Plugin "${pluginId}" route "${route.method} ${route.path}" conflicts with a built-in endpoint`,
@@ -1280,6 +1284,9 @@ function allowedMethodsForPath(path: string): readonly string[] | undefined {
     path === '/webhooks/events'
   ) {
     return ['POST'];
+  }
+  if (INTERACTIVE_SESSION_PATH_RE.test(path)) {
+    return path.endsWith('/complete') ? ['POST'] : ['GET'];
   }
   if (TRANSACTION_COMPLETE_PATH_RE.test(path)) return ['POST'];
   if (TRANSACTION_STATE_PATH_RE.test(path)) return ['GET'];
@@ -2047,6 +2054,490 @@ async function handleDepositInteractive(
   } else {
     sendJson(res, 201, legacyResponseBody);
   }
+}
+
+function interactiveTransactionPayload(
+  transaction: InteractiveTransactionRecord,
+): Record<string, unknown> {
+  return {
+    id: transaction.id,
+    kind: transaction.kind,
+    status: transaction.status,
+    started_at: transaction.createdAt,
+    amount: transaction.amount,
+    asset_code: transaction.assetCode,
+    ...(transaction.amountIn == null ? {} : { amount_in: transaction.amountIn }),
+    ...(transaction.amountOut == null ? {} : { amount_out: transaction.amountOut }),
+    ...(transaction.amountFee == null ? {} : { amount_fee: transaction.amountFee }),
+    ...(transaction.stellarTransactionHash == null
+      ? {}
+      : { stellar_transaction_id: transaction.stellarTransactionHash }),
+    ...(transaction.railReference == null
+      ? {}
+      : { external_transaction_id: transaction.railReference }),
+  };
+}
+
+async function authorizeInteractiveSession(
+  context: ExpressRouterContext,
+  req: IncomingMessage,
+  res: ServerResponse,
+  transactionId: string,
+): Promise<{ account: string; transaction: InteractiveTransactionRecord } | null> {
+  const token = readBearerToken(req);
+  if (!token) {
+    sendJson(res, 401, { error: 'unauthorized', message: 'Interactive session is required' });
+    return null;
+  }
+
+  let account: string;
+  try {
+    const claims = await verifyInteractiveSession(
+      token,
+      context.config.get('security').interactiveJwtSecret,
+      transactionId,
+      'deposit',
+    );
+    account = claims.account;
+  } catch {
+    sendJson(res, 401, {
+      error: 'unauthorized',
+      message: 'Interactive session is invalid or expired',
+    });
+    return null;
+  }
+
+  const session = await context.database.getInteractiveSessionById(token);
+  const sessionVerdict = evaluateInteractiveSession({
+    session,
+    account,
+    transactionId,
+    action: 'deposit',
+  });
+  if (!sessionVerdict.ok) {
+    const rejection = interactiveSessionRejection(sessionVerdict.reason);
+    sendJson(res, rejection.status, { error: rejection.error, message: rejection.message });
+    return null;
+  }
+
+  const transaction = await context.database.getInteractiveTransactionById(transactionId);
+  if (!transaction || transaction.account !== account || transaction.kind !== 'deposit') {
+    sendJson(res, 404, { error: 'not_found', message: 'Deposit transaction not found' });
+    return null;
+  }
+  return { account, transaction };
+}
+
+function validateInteractiveCallback(
+  context: ExpressRouterContext,
+  rawCallback: unknown,
+): URL | 'postMessage' | null {
+  if (rawCallback === undefined || rawCallback === null || rawCallback === '') return null;
+  if (rawCallback === 'postMessage') return 'postMessage';
+  if (typeof rawCallback !== 'string' || rawCallback.length > 2048) return null;
+  let callback: URL;
+  try {
+    callback = new URL(rawCallback);
+  } catch {
+    return null;
+  }
+  const allowedOrigins = context.config.get('server').interactiveCallbackOrigins ?? [];
+  if (
+    callback.protocol !== 'https:' ||
+    callback.username ||
+    callback.password ||
+    !allowedOrigins.includes(callback.origin)
+  ) {
+    return null;
+  }
+  return callback;
+}
+
+async function sendInteractiveUrlCallback(
+  context: ExpressRouterContext,
+  callback: URL,
+  transaction: InteractiveTransactionRecord,
+): Promise<boolean> {
+  const timestamp = String(Math.floor(Date.now() / 1000));
+  const body = JSON.stringify({ transaction: interactiveTransactionPayload(transaction) });
+  const signaturePayload = `${timestamp}.${callback.host}.${body}`;
+  const signature = context.sep10ServerKeypair
+    .sign(Buffer.from(signaturePayload))
+    .toString('base64');
+  try {
+    const response = await fetch(callback, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Signature: `t=${timestamp}, s=${signature}`,
+      },
+      body,
+      redirect: 'error',
+      signal: AbortSignal.timeout(3000),
+    });
+    return response.ok;
+  } catch {
+    return false;
+  }
+}
+
+async function handleInteractiveDepositState(
+  context: ExpressRouterContext,
+  req: IncomingMessage,
+  res: ServerResponse,
+  encodedId: string,
+): Promise<void> {
+  res.setHeader('Cache-Control', 'no-store');
+  let transactionId: string;
+  try {
+    transactionId = decodeURIComponent(encodedId);
+  } catch {
+    sendJson(res, 400, { error: 'invalid_request', message: 'Transaction id is malformed' });
+    return;
+  }
+  const authorized = await authorizeInteractiveSession(context, req, res, transactionId);
+  if (!authorized) return;
+
+  const requiredFields = context.config.getKycRequiredFields(authorized.transaction.assetCode);
+  const customer = await context.database.getCustomerByAccountId(authorized.account);
+  const missingFields = requiredFields.filter(
+    (field) => !asNonEmptyString(kycFieldValue(customer?.kyc_data, field)),
+  );
+  sendJson(res, 200, {
+    transaction: interactiveTransactionPayload(authorized.transaction),
+    required_fields: requiredFields,
+    missing_fields: missingFields,
+    kyc_status: customer?.kyc_data?.status ?? 'not_provided',
+    kyc_verified: customer?.kyc_data?.status === 'approved',
+  });
+}
+
+function assignKycField(data: KycData, field: string, value: string): void {
+  if (field === 'birth_date') data.birth_date = value;
+  else if (field === 'email_address') data.email_address = value;
+  else if (field === 'first_name') data.first_name = value;
+  else if (field === 'id_number') data.id_number = value;
+  else if (field === 'id_type') data.id_type = value;
+  else if (field === 'last_name') data.last_name = value;
+  else if (field === 'nationality') data.nationality = value;
+  else if (field === 'phone_number') data.phone_number = value;
+  else (data.additional_fields ??= {})[field] = value;
+}
+
+async function handleInteractiveDepositCompletion(
+  context: ExpressRouterContext,
+  req: IncomingMessage,
+  res: ServerResponse,
+  encodedId: string,
+): Promise<void> {
+  res.setHeader('Cache-Control', 'no-store');
+  let transactionId: string;
+  try {
+    transactionId = decodeURIComponent(encodedId);
+  } catch {
+    sendJson(res, 400, { error: 'invalid_request', message: 'Transaction id is malformed' });
+    return;
+  }
+  const authorized = await authorizeInteractiveSession(context, req, res, transactionId);
+  if (!authorized) return;
+  const { transaction, account } = authorized;
+
+  const parsed = await parsePostJsonBody(req, res, context.maxBodyBytes);
+  if (!parsed) return;
+  if (hasDuplicateDepositJsonKeys(parsed.rawBody)) {
+    sendJson(res, 400, { error: 'invalid_request', message: 'Duplicate completion fields' });
+    return;
+  }
+  const rawFields = parsed.body.fields;
+  if (!rawFields || typeof rawFields !== 'object' || Array.isArray(rawFields)) {
+    sendJson(res, 400, { error: 'invalid_request', message: 'fields must be an object' });
+    return;
+  }
+  const fields: Record<string, string> = {};
+  for (const [field, value] of Object.entries(rawFields)) {
+    if (
+      field.length === 0 ||
+      field.length > 128 ||
+      typeof value !== 'string' ||
+      Buffer.byteLength(value, 'utf8') > 4096
+    ) {
+      sendJson(res, 400, { error: 'invalid_request', message: 'Completion fields are invalid' });
+      return;
+    }
+    fields[field] = value.trim();
+  }
+  const callback = validateInteractiveCallback(context, parsed.body.callback);
+  if (Object.hasOwn(parsed.body, 'callback') && callback === null) {
+    sendJson(res, 400, { error: 'invalid_request', message: 'Callback origin is not allowed' });
+    return;
+  }
+  const completionScope = `interactive-completion:${transactionId}`;
+  const completionKey = 'deposit';
+  const sortedFields = Object.fromEntries(
+    Object.entries(fields).sort(([left], [right]) => left.localeCompare(right)),
+  );
+  const completionHash = sha256(JSON.stringify(sortedFields));
+
+  if (transaction.status === 'pending_user_transfer_start') {
+    const existing = await context.database.getIdempotencyRecord(completionScope, completionKey);
+    if (existing && existing.requestHash !== completionHash) {
+      sendJson(res, 409, {
+        error: 'idempotency_conflict',
+        message: 'Interactive completion was already submitted with different fields',
+      });
+      return;
+    }
+    let responseBody: Record<string, unknown> = {
+      transaction: interactiveTransactionPayload(transaction),
+      kyc_status: 'not_provided',
+      kyc_verified: true,
+    };
+    if (existing?.status === 'completed') {
+      try {
+        const parsedBody = JSON.parse(existing.responseBody) as unknown;
+        if (!parsedBody || typeof parsedBody !== 'object' || Array.isArray(parsedBody)) {
+          throw new Error('Invalid interactive completion result');
+        }
+        responseBody = parsedBody as Record<string, unknown>;
+      } catch {
+        sendJson(res, 503, {
+          error: 'completion_result_unavailable',
+          message: 'The saved completion result is unavailable',
+        });
+        return;
+      }
+    } else if (existing) {
+      await context.database.updateIdempotencyRecord({
+        scope: completionScope,
+        idempotencyKey: completionKey,
+        statusCode: 200,
+        responseBody: JSON.stringify(responseBody),
+      });
+    }
+    sendJson(res, 200, { ...responseBody, idempotency_replay: true });
+    return;
+  }
+  if (transaction.status !== 'incomplete') {
+    sendJson(res, 409, { error: 'invalid_transition', message: 'Deposit cannot be completed' });
+    return;
+  }
+
+  const requiredFields = context.config.getKycRequiredFields(transaction.assetCode);
+  if (Object.keys(fields).some((field) => !requiredFields.includes(field))) {
+    sendJson(res, 400, {
+      error: 'invalid_request',
+      message: 'A field is not required for this deposit',
+    });
+    return;
+  }
+  let customer = await context.database.getCustomerByAccountId(account);
+  if (requiredFields.length > 0 || Object.keys(fields).length > 0) {
+    customer ??= await context.database.insertOrGetCustomer({
+      id: randomUUID(),
+      account_id: account,
+      kyc_data: { status: 'pending' },
+    });
+    if (!customer) {
+      sendJson(res, 500, { error: 'server_error', message: 'Customer record could not be loaded' });
+      return;
+    }
+    const preservesApproval =
+      customer.kyc_data?.status === 'approved' &&
+      Object.entries(fields).every(
+        ([field, value]) => kycFieldValue(customer?.kyc_data, field) === value,
+      );
+    const kycData: KycData = {
+      ...(customer.kyc_data ?? { status: 'pending' as const }),
+      status: preservesApproval ? 'approved' : 'pending',
+    };
+    for (const [field, value] of Object.entries(fields)) assignKycField(kycData, field, value);
+    const saved = await context.database.updateCustomer({
+      id: customer.id,
+      account_id: account,
+      kyc_data: kycData,
+    });
+    if (!saved) {
+      sendJson(res, 404, { error: 'not_found', message: 'Customer not found' });
+      return;
+    }
+    customer = await context.database.getCustomerByAccountId(account);
+  }
+
+  const missingFields = requiredFields.filter(
+    (field) => !asNonEmptyString(kycFieldValue(customer?.kyc_data, field)),
+  );
+  if (missingFields.length > 0) {
+    sendJson(res, 422, {
+      error: 'customer_info_needed',
+      message: 'Complete the required customer fields',
+      missing_fields: missingFields,
+    });
+    return;
+  }
+
+  const verificationCustomer = customer;
+  if (requiredFields.length > 0 && !verificationCustomer) {
+    sendJson(res, 500, { error: 'server_error', message: 'Customer record could not be loaded' });
+    return;
+  }
+  if (requiredFields.length > 0 && verificationCustomer?.kyc_data?.status !== 'approved') {
+    if (!verificationCustomer) {
+      sendJson(res, 500, { error: 'server_error', message: 'Customer record could not be loaded' });
+      return;
+    }
+    if (!context.kycVerificationProvider) {
+      sendJson(res, 202, {
+        transaction: interactiveTransactionPayload(transaction),
+        kyc_status: verificationCustomer.kyc_data?.status ?? 'pending',
+        kyc_verified: false,
+      });
+      return;
+    }
+    const operationKey = sha256(
+      JSON.stringify({
+        account,
+        customerId: verificationCustomer.id,
+        transactionId,
+        fields: Object.fromEntries(
+          Object.entries(fields).sort(([left], [right]) => left.localeCompare(right)),
+        ),
+      }),
+    );
+    let decision;
+    try {
+      decision = await context.kycVerificationProvider.verify({
+        customerId: verificationCustomer.id,
+        operationKey,
+        data: verificationCustomer.kyc_data!,
+      });
+    } catch {
+      sendJson(res, 502, { error: 'verification_unavailable', message: 'KYC verification failed' });
+      return;
+    }
+    if (
+      decision.customerId !== verificationCustomer.id ||
+      decision.operationKey !== operationKey ||
+      !['pending', 'approved', 'rejected'].includes(decision.status)
+    ) {
+      sendJson(res, 502, {
+        error: 'verification_unavailable',
+        message: 'KYC provider returned an invalid decision',
+      });
+      return;
+    }
+    const updatedKycData = { ...verificationCustomer.kyc_data!, status: decision.status };
+    const saved = await context.database.updateCustomer({
+      id: verificationCustomer.id,
+      account_id: account,
+      kyc_data: updatedKycData,
+    });
+    if (!saved) {
+      sendJson(res, 404, { error: 'not_found', message: 'Customer not found' });
+      return;
+    }
+    customer = await context.database.getCustomerByAccountId(account);
+    if (decision.status !== 'approved') {
+      sendJson(res, 202, {
+        transaction: interactiveTransactionPayload(transaction),
+        kyc_status: decision.status,
+        kyc_verified: false,
+      });
+      return;
+    }
+  }
+
+  const reservation = await context.database.reserveIdempotencyRecord({
+    id: randomUUID(),
+    scope: completionScope,
+    idempotencyKey: completionKey,
+    requestHash: completionHash,
+  });
+  if (!reservation.inserted) {
+    if (reservation.record.requestHash !== completionHash) {
+      sendJson(res, 409, {
+        error: 'idempotency_conflict',
+        message: 'Interactive completion was already submitted with different fields',
+      });
+      return;
+    }
+    if (reservation.record.status === 'completed') {
+      try {
+        const parsedBody = JSON.parse(reservation.record.responseBody) as unknown;
+        if (!parsedBody || typeof parsedBody !== 'object' || Array.isArray(parsedBody)) {
+          throw new Error('Invalid interactive completion result');
+        }
+        sendJson(res, reservation.record.statusCode, {
+          ...(parsedBody as Record<string, unknown>),
+          idempotency_replay: true,
+        });
+      } catch {
+        sendJson(res, 503, {
+          error: 'completion_result_unavailable',
+          message: 'The saved completion result is unavailable',
+        });
+      }
+      return;
+    }
+    sendJson(res, 409, {
+      error: 'idempotency_in_progress',
+      message: 'This interactive completion is still being processed',
+    });
+    return;
+  }
+
+  if (!context.database.transitionInteractiveTransaction) {
+    await context.database
+      .deletePendingIdempotencyRecord(completionScope, completionKey, completionHash)
+      .catch(() => undefined);
+    sendJson(res, 503, {
+      error: 'service_unavailable',
+      message: 'Interactive completion is unavailable',
+    });
+    return;
+  }
+  let result: TransactionTransitionResult;
+  try {
+    result = await context.database.transitionInteractiveTransaction({
+      id: transactionId,
+      expectedStatus: 'incomplete',
+      status: 'pending_user_transfer_start',
+    });
+  } catch (error) {
+    await context.database
+      .deletePendingIdempotencyRecord(completionScope, completionKey, completionHash)
+      .catch(() => undefined);
+    throw error;
+  }
+  const completed =
+    result.outcome === 'updated'
+      ? result.transaction
+      : result.transaction?.status === 'pending_user_transfer_start'
+        ? result.transaction
+        : null;
+  if (!completed) {
+    await context.database
+      .deletePendingIdempotencyRecord(completionScope, completionKey, completionHash)
+      .catch(() => undefined);
+    sendJson(res, 409, { error: 'invalid_transition', message: 'Deposit could not be completed' });
+    return;
+  }
+  const callbackDelivered =
+    callback instanceof URL
+      ? await sendInteractiveUrlCallback(context, callback, completed)
+      : undefined;
+  const responseBody: Record<string, unknown> = {
+    transaction: interactiveTransactionPayload(completed),
+    kyc_status: customer?.kyc_data?.status ?? 'not_provided',
+    kyc_verified: requiredFields.length === 0 || customer?.kyc_data?.status === 'approved',
+    ...(callbackDelivered === undefined ? {} : { callback_delivered: callbackDelivered }),
+  };
+  await context.database.updateIdempotencyRecord({
+    scope: completionScope,
+    idempotencyKey: completionKey,
+    statusCode: 200,
+    responseBody: JSON.stringify(responseBody),
+  });
+  sendJson(res, 200, responseBody);
 }
 
 async function handleCompleteInteractive(
@@ -2873,6 +3364,7 @@ async function handleWebhook(
 }
 
 const TRANSACTION_PATH_RE = /^\/transactions\/([^/]*)$/;
+const INTERACTIVE_SESSION_PATH_RE = /^\/interactive\/deposit\/[^/]+(?:\/complete)?$/;
 
 /**
  * Matches the state-changing completion endpoint, `POST /transactions/:id/complete`.
@@ -2900,6 +3392,9 @@ const KNOWN_ROUTES: Record<string, string[]> = {
 function getAllowedMethods(path: string): string[] | null {
   const exactMatch = KNOWN_ROUTES[path];
   if (exactMatch) return exactMatch;
+  if (INTERACTIVE_SESSION_PATH_RE.test(path)) {
+    return path.endsWith('/complete') ? ['POST'] : ['GET'];
+  }
   if (TRANSACTION_COMPLETE_PATH_RE.test(path)) return ['POST'];
   if (TRANSACTION_STATE_PATH_RE.test(path)) return ['GET'];
   if (TRANSACTION_PATH_RE.test(path)) return ['GET'];
@@ -2975,6 +3470,18 @@ export async function handleExpressRouterRequest(
 
       if (method === 'POST' && path === '/transactions/deposit/interactive') {
         await handleDepositInteractive(context, req, res);
+        return;
+      }
+
+      const interactiveCompleteMatch = /^\/interactive\/deposit\/([^/]+)\/complete$/.exec(path);
+      if (method === 'POST' && interactiveCompleteMatch) {
+        await handleInteractiveDepositCompletion(context, req, res, interactiveCompleteMatch[1]);
+        return;
+      }
+
+      const interactiveStateMatch = /^\/interactive\/deposit\/([^/]+)$/.exec(path);
+      if (method === 'GET' && interactiveStateMatch) {
+        await handleInteractiveDepositState(context, req, res, interactiveStateMatch[1]);
         return;
       }
 
