@@ -1,6 +1,11 @@
 import { createAnchor } from '@/index.ts';
 import { makeSqliteDbUrlForTests } from '@/runtime/database/sql-database-adapter.ts';
-import type { Sep10AccountLookup, Sep10AccountSigners } from '@/runtime/interfaces.ts';
+import { authorizeSep10AccountSignatures } from '@/runtime/http/express-router-impl.ts';
+import type {
+  AccountLookupProvider,
+  Sep10AccountLookup,
+  Sep10AccountSigners,
+} from '@/runtime/interfaces.ts';
 import { Keypair, Transaction } from '@stellar/stellar-sdk';
 import { unlinkSync } from 'node:fs';
 import { createServer, type Server } from 'node:http';
@@ -22,16 +27,16 @@ describe('SEP-10 authentication for accounts missing on the network', () => {
   let server: Server;
   let origin: string;
 
-  const lookup: Sep10AccountLookup = {
-    async load(accountId: string) {
+  const lookup: AccountLookupProvider = {
+    async lookupAccount(accountId: string) {
       lookupCalls.push(accountId);
       if (behavior.kind === 'error') {
-        throw new Error('Account lookup upstream is unavailable');
+        return { outcome: 'unavailable', reason: 'Account lookup upstream is unavailable' };
       }
       if (behavior.kind === 'found') {
-        return behavior.account;
+        return { outcome: 'found', account: behavior.account };
       }
-      return null;
+      return { outcome: 'not_found' };
     },
   };
 
@@ -60,7 +65,7 @@ describe('SEP-10 authentication for accounts missing on the network', () => {
           database: { provider: 'sqlite', url: databaseUrl },
         },
       },
-      { sep10AccountLookup: lookup },
+      { accountLookup: lookup },
     );
     await anchor.init();
 
@@ -122,6 +127,20 @@ describe('SEP-10 authentication for accounts missing on the network', () => {
     expect(result.body.account).toBe(client.publicKey());
     expect(result.body.token).toEqual(expect.any(String));
     expect(lookupCalls).toContain(client.publicKey());
+  });
+
+  it('keeps the legacy lookup contract working', async () => {
+    const client = Keypair.random();
+    const challenge = await signChallenge(client.publicKey(), [client]);
+    const legacyLookup: Sep10AccountLookup = { load: async () => null };
+
+    await expect(
+      authorizeSep10AccountSignatures(challenge, {
+        account: client.publicKey(),
+        serverPublicKey: serverKeypair.publicKey(),
+        lookup: legacyLookup,
+      }),
+    ).resolves.toBe('authorized');
   });
 
   it('rejects extra signatures on a missing account', async () => {

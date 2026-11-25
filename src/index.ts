@@ -33,6 +33,9 @@ export type { Memo, PaymentParams, SettlementPaymentParams } from './utils';
 export type {
   AuthChallengeRecord,
   AccountSigner,
+  AccountSignerConfiguration,
+  AccountLookupProvider,
+  AccountLookupResult,
   StellarAccountState,
   StellarNetworkClient,
   StellarNetworkResult,

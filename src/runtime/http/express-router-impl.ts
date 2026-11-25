@@ -3,6 +3,7 @@ import type { AnchorConfig } from '@/core/config.ts';
 import { ConfigError, PayloadTooLargeError, ValidationError } from '@/core/errors.ts';
 import { InMemoryRateLimiter, type RateLimitRule } from '@/runtime/http/rate-limiter.ts';
 import type {
+  AccountLookupProvider,
   AccountSigner,
   DatabaseAdapter,
   InteractiveTransactionIdentifier,
@@ -57,6 +58,7 @@ export interface ExpressRouterContext {
   config: AnchorConfig;
   database: DatabaseAdapter;
   isReady: () => boolean;
+  accountLookup?: AccountLookupProvider;
   webhookProcessor: WebhookProcessor;
   kycVerificationProvider?: KycVerificationProvider;
   sep10ServerKeypair: Keypair;
@@ -879,6 +881,7 @@ export async function authorizeSep10AccountSignatures(
     account: string;
     serverPublicKey: string;
     lookup?: Sep10AccountLookup;
+    accountLookup?: AccountLookupProvider;
     additionalSigners?: readonly string[];
   },
 ): Promise<Sep10AccountAuthorization> {
@@ -886,13 +889,19 @@ export async function authorizeSep10AccountSignatures(
     StrKey.isValidEd25519PublicKey(key),
   );
 
-  if (!input.lookup) {
+  if (!input.lookup && !input.accountLookup) {
     return hasValidSignature(transaction, input.account) ? 'authorized' : 'rejected';
   }
 
   let account: Sep10AccountSigners | null;
   try {
-    account = await input.lookup.load(input.account);
+    if (input.accountLookup) {
+      const result = await input.accountLookup.lookupAccount(input.account);
+      if (result.outcome === 'unavailable') return 'lookup_failed';
+      account = result.outcome === 'not_found' ? null : result.account;
+    } else {
+      account = (await input.lookup?.load(input.account)) ?? null;
+    }
   } catch {
     return 'lookup_failed';
   }
@@ -1566,6 +1575,7 @@ async function handleAuthToken(
     account: identity.signer,
     serverPublicKey: context.sep10ServerKeypair.publicKey(),
     lookup: context.sep10AccountLookup,
+    accountLookup: context.accountLookup,
     additionalSigners:
       securityConfig.enableClientAttribution && securityConfig.clientDomainSigningKey
         ? [securityConfig.clientDomainSigningKey]
