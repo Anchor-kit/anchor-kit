@@ -3,7 +3,15 @@ import { createAnchor, utils, type AnchorInstance } from '@/index.ts';
 import type { DatabaseAdapter } from '@/runtime/interfaces.ts';
 import type { AnchorPlugin } from '@/types/plugin.ts';
 import { ACCESS_TOKEN_AUDIENCE, ACCESS_TOKEN_ISSUER } from '@/runtime/http/express-router-impl.ts';
-import { Account, Keypair, Operation, Transaction, TransactionBuilder } from '@stellar/stellar-sdk';
+import {
+  Account,
+  encodeMuxedAccount,
+  encodeMuxedAccountToAddress,
+  Keypair,
+  Operation,
+  Transaction,
+  TransactionBuilder,
+} from '@stellar/stellar-sdk';
 import { createHash, createHmac } from 'node:crypto';
 import { unlinkSync } from 'node:fs';
 import type { IncomingMessage, ServerResponse } from 'node:http';
@@ -868,6 +876,128 @@ describe('MVP Express-mounted integration', () => {
     expect(tokenResponse.body.expires_in).toBe(3600);
   });
 
+  it('3a) SEP-10 scopes a classic account token to an ID memo', async () => {
+    const account = clientKeypair.publicKey();
+    const challengeResponse = await invoke({
+      path: `/auth?account=${account}&memo=42`,
+      headers: { 'x-forwarded-for': '10.0.0.14' },
+    });
+    expect(challengeResponse.status).toBe(200);
+
+    const challengeTx = new Transaction(
+      String(challengeResponse.body.transaction ?? ''),
+      String(challengeResponse.body.network_passphrase ?? ''),
+    );
+    expect(challengeTx.memo.type).toBe('id');
+    expect(challengeTx.memo.value).toBe('42');
+    challengeTx.sign(clientKeypair);
+
+    const tokenResponse = await invoke({
+      method: 'POST',
+      path: '/auth',
+      headers: { 'content-type': 'application/json', 'x-forwarded-for': '10.0.0.14' },
+      body: { transaction: challengeTx.toXDR() },
+    });
+    expect(tokenResponse.status).toBe(200);
+    expect(tokenResponse.body.account).toBe(`${account}:42`);
+    const jwt = (await import('jsonwebtoken')).default;
+    expect(jwt.decode(String(tokenResponse.body.token ?? ''))).toMatchObject({
+      sub: `${account}:42`,
+      iss: ACCESS_TOKEN_ISSUER,
+      aud: ACCESS_TOKEN_AUDIENCE,
+    });
+
+    const deposit = await invoke({
+      method: 'POST',
+      path: '/transactions/deposit/interactive',
+      headers: {
+        'content-type': 'application/json',
+        authorization: `Bearer ${String(tokenResponse.body.token ?? '')}`,
+        'x-forwarded-for': '10.0.0.14',
+      },
+      body: { asset_code: 'USDC', amount: '10' },
+    });
+    expect(deposit.status).toBe(201);
+
+    const classicChallengeResponse = await invoke({
+      path: `/auth/challenge?account=${account}`,
+      headers: { 'x-forwarded-for': '10.0.0.16' },
+    });
+    const classicChallenge = new Transaction(
+      String(classicChallengeResponse.body.challenge ?? ''),
+      String(classicChallengeResponse.body.network_passphrase ?? ''),
+    );
+    classicChallenge.sign(clientKeypair);
+    const classicTokenResponse = await invoke({
+      method: 'POST',
+      path: '/auth/token',
+      headers: { 'content-type': 'application/json', 'x-forwarded-for': '10.0.0.16' },
+      body: { account, challenge: classicChallenge.toXDR() },
+    });
+    expect(classicTokenResponse.status).toBe(200);
+    const crossIdentityLookup = await invoke({
+      path: `/transactions/${String(deposit.body.id ?? '')}`,
+      headers: {
+        authorization: `Bearer ${String(classicTokenResponse.body.token ?? '')}`,
+        'x-forwarded-for': '10.0.0.16',
+      },
+    });
+    expect(crossIdentityLookup.status).toBe(403);
+  });
+
+  it('3a) SEP-10 preserves muxed account subjects and verifies the base account signature', async () => {
+    const muxedAccount = encodeMuxedAccountToAddress(
+      encodeMuxedAccount(clientKeypair.publicKey(), '42'),
+      true,
+    );
+    const challengeResponse = await invoke({
+      path: `/auth/challenge?account=${muxedAccount}`,
+      headers: { 'x-forwarded-for': '10.0.0.15' },
+    });
+    expect(challengeResponse.status).toBe(200);
+
+    const challengeTx = new Transaction(
+      String(challengeResponse.body.challenge ?? ''),
+      String(challengeResponse.body.network_passphrase ?? ''),
+    );
+    expect(challengeTx.operations[0]?.source).toBe(muxedAccount);
+    challengeTx.sign(clientKeypair);
+
+    const tokenResponse = await invoke({
+      method: 'POST',
+      path: '/auth/token',
+      headers: { 'content-type': 'application/json', 'x-forwarded-for': '10.0.0.15' },
+      body: { account: muxedAccount, challenge: challengeTx.toXDR() },
+    });
+    expect(tokenResponse.status).toBe(200);
+    expect(tokenResponse.body.account).toBe(muxedAccount);
+    const jwt = (await import('jsonwebtoken')).default;
+    expect(jwt.decode(String(tokenResponse.body.token ?? ''))).toMatchObject({ sub: muxedAccount });
+
+    const deposit = await invoke({
+      method: 'POST',
+      path: '/transactions/deposit/interactive',
+      headers: {
+        'content-type': 'application/json',
+        authorization: `Bearer ${String(tokenResponse.body.token ?? '')}`,
+        'x-forwarded-for': '10.0.0.15',
+      },
+      body: { asset_code: 'USDC', amount: '10' },
+    });
+    expect(deposit.status).toBe(201);
+  });
+
+  it('3a) SEP-10 rejects memos that cannot be safely represented as ID memos', async () => {
+    const account = clientKeypair.publicKey();
+    for (const memo of ['-1', '01', '18446744073709551616']) {
+      const response = await invoke({
+        path: `/auth/challenge?account=${account}&memo=${memo}`,
+        headers: { 'x-forwarded-for': `10.0.0.${20 + memo.length}` },
+      });
+      expect(response.status).toBe(400);
+    }
+  });
+
   it('3b) auth token trims padded account identifiers consistently', async () => {
     const account = clientKeypair.publicKey();
     const challengeResponse = await invoke({
@@ -1136,7 +1266,7 @@ describe('MVP Express-mounted integration', () => {
 
     expect(response.status).toBe(400);
     expect(response.body.error).toBe('invalid_request');
-    expect(response.body.message).toBe('account must be a valid Stellar public key');
+    expect(response.body.message).toBe('account must be a valid Stellar public or muxed account');
   });
 
   it('4) unauthorized deposit interactive rejected', async () => {

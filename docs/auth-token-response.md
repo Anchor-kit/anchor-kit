@@ -29,6 +29,11 @@ shared secret is the same:
 | scope | `anchor_api`    | Access scope required by the SDK route handlers. |
 | typ   | `access_token`  | Token type expected by bearer authentication.    |
 
+The `sub` claim keeps the full SEP-10 identity: a classic account (`G...`), a
+classic account with an ID memo (`G...:memo`), or a muxed account (`M...`).
+Authenticated transaction access uses that full value, so a memo-scoped session
+cannot read a transaction created by the unscoped account session.
+
 Bearer authentication requires `iss` to equal `anchor-kit` and `aud` to equal
 `anchor-api`. Tokens with a missing or mismatched `iss` or `aud` are rejected
 with HTTP 401 and the `unauthorized` error code.
