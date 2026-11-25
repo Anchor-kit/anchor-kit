@@ -214,6 +214,12 @@ Run `bun test tests/runtime/horizon-network-client.test.ts` to verify account an
 transaction lookup. The test expects five passing cases, including missing
 accounts, unavailable servers, and a mismatched network passphrase.
 
+## SEP-24 info check
+
+Run `bun test tests/runtime/sep24-info.test.ts` to check the public capability
+response. The test expects one passing case; deposits and withdrawals remain
+disabled until their payment flows are wired.
+
 ## SEP-24 transaction lookup check
 
 Run `DATABASE_URL=<postgres-url> bun test tests/runtime/sep24-transaction-lookup.test.ts`
