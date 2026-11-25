@@ -7,6 +7,7 @@ import type {
   ReconciledRailPaymentResult,
   TransactionTransitionResult,
   SettlementJobRecord,
+  SettlementJobLease,
   WatcherTaskRecord,
   WebhookEventRecord,
 } from '@/runtime/interfaces.ts';
@@ -356,6 +357,22 @@ const CORE_MIGRATIONS: readonly SchemaMigration[] = [
       );
     },
   },
+  {
+    name: 'core:004-settlement-job-leases',
+    async up({ dialect, execute, hasColumn }) {
+      const columns = [
+        ['lease_owner', 'TEXT'],
+        ['lease_token', 'TEXT'],
+        ['lease_expires_at', dialect === 'sqlite' ? 'TEXT' : 'TIMESTAMPTZ'],
+        ['lease_attempt', 'INTEGER NOT NULL DEFAULT 0'],
+      ] as const;
+      for (const [name, type] of columns) {
+        if (!(await hasColumn('settlement_jobs', name))) {
+          await execute(`ALTER TABLE settlement_jobs ADD COLUMN ${name} ${type}`);
+        }
+      }
+    },
+  },
 ];
 
 function nowIso(): string {
@@ -554,8 +571,17 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
           const pgModule = pgModuleUnknown as { Client: PostgresClientConstructor };
           this.postgresClientConstructor = pgModule.Client;
           const client = new pgModule.Client({ connectionString: this.url });
+          try {
+            await client.connect();
+            if (this.schema && this.schema !== 'public') {
+              await client.query(`CREATE SCHEMA IF NOT EXISTS "${this.schema}"`);
+            }
+            await client.query(`SET search_path TO "${this.schema ?? 'public'}"`);
+          } catch (error) {
+            await client.end().catch(() => {});
+            throw error;
+          }
           this.postgres = client;
-          await this.postgres.connect();
           return;
         }
 
@@ -573,6 +599,18 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
     } finally {
       this.connectPromise = null;
     }
+  }
+
+  public async checkReadiness(): Promise<void> {
+    if (this.sqlite) {
+      this.sqlite.prepare('SELECT 1 FROM anchor_kit_migrations LIMIT 1').get();
+      return;
+    }
+    if (this.postgres) {
+      await this.postgres.query('SELECT 1 FROM anchor_kit_migrations LIMIT 1');
+      return;
+    }
+    throw new ConfigError('Database not connected');
   }
 
   public async disconnect(): Promise<void> {
@@ -1637,6 +1675,7 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
       let operationError: unknown;
       try {
         await postgres.connect();
+        await postgres.query(`SET search_path TO "${this.schema ?? 'public'}"`);
         await postgres.query('BEGIN');
         transactionStarted = true;
         await postgres.query(
@@ -2174,22 +2213,148 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
     return response.rows.map((row) => this.mapSettlementJobRow(row));
   }
 
-  public async updateSettlementJobStatus(input: {
+  public async listClaimableSettlementJobs(limit: number): Promise<SettlementJobRecord[]> {
+    if (!Number.isSafeInteger(limit) || limit <= 0) {
+      throw new RangeError('Settlement job limit must be a positive safe integer');
+    }
+    if (this.sqlite) {
+      const rows = this.sqlite
+        .prepare(
+          `SELECT * FROM settlement_jobs WHERE status = 'pending' OR
+        (status = 'processing' AND lease_expires_at <= strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+        ORDER BY created_at ASC, operation_id ASC LIMIT ?`,
+        )
+        .all(limit) as Record<string, unknown>[];
+      return rows.map((row) => this.mapSettlementJobRow(row));
+    }
+    const result = await this.requirePostgres().query<Record<string, unknown>>(
+      `SELECT * FROM settlement_jobs WHERE status = 'pending' OR
+      (status = 'processing' AND lease_expires_at <= clock_timestamp())
+      ORDER BY created_at ASC, operation_id ASC LIMIT $1`,
+      [limit],
+    );
+    return result.rows.map((row) => this.mapSettlementJobRow(row));
+  }
+
+  public async claimSettlementJob(input: {
+    operationId: string;
+    owner: string;
+    durationMs: number;
+  }): Promise<SettlementJobLease | null> {
+    this.validateSettlementLeaseInput(input.operationId, input.owner, input.durationMs);
+    const token = randomUUID();
+    let row: Record<string, unknown> | null;
+    if (this.sqlite) {
+      row = this.sqlite
+        .prepare(
+          `UPDATE settlement_jobs SET status = 'processing', lease_owner = ?, lease_token = ?,
+        lease_expires_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '+' || ? || ' seconds'),
+        lease_attempt = lease_attempt + 1, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+        WHERE operation_id = ? AND (status = 'pending' OR (status = 'processing' AND
+        lease_expires_at <= strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))) RETURNING *`,
+        )
+        .get(input.owner, token, input.durationMs / 1000, input.operationId) as Record<
+        string,
+        unknown
+      > | null;
+    } else {
+      const result = await this.requirePostgres().query<Record<string, unknown>>(
+        `UPDATE settlement_jobs SET status = 'processing', lease_owner = $1, lease_token = $2,
+        lease_expires_at = clock_timestamp() + ($3 * interval '1 millisecond'), lease_attempt = lease_attempt + 1,
+        updated_at = clock_timestamp() WHERE operation_id = $4 AND (status = 'pending' OR
+        (status = 'processing' AND lease_expires_at <= clock_timestamp())) RETURNING *`,
+        [input.owner, token, input.durationMs, input.operationId],
+      );
+      row = result.rows[0] ?? null;
+    }
+    if (!row) return null;
+    const expires = row.lease_expires_at;
+    return {
+      job: this.mapSettlementJobRow(row),
+      owner: input.owner,
+      token,
+      expiresAt: expires instanceof Date ? expires.toISOString() : String(expires),
+      attempt: Number(row.lease_attempt),
+    };
+  }
+
+  public async heartbeatSettlementJob(input: {
+    operationId: string;
+    token: string;
+    durationMs: number;
+  }): Promise<boolean> {
+    this.validateSettlementLeaseInput(input.operationId, input.token, input.durationMs);
+    if (this.sqlite) {
+      const result = this.sqlite
+        .prepare(
+          `UPDATE settlement_jobs SET lease_expires_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '+' || ? || ' seconds'),
+        updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE operation_id = ? AND lease_token = ?
+        AND status = 'processing' AND lease_expires_at > strftime('%Y-%m-%dT%H:%M:%fZ', 'now')`,
+        )
+        .run(input.durationMs / 1000, input.operationId, input.token);
+      return result.changes > 0;
+    }
+    const result = await this.requirePostgres().query<{ operation_id: string }>(
+      `UPDATE settlement_jobs SET lease_expires_at = clock_timestamp() + ($1 * interval '1 millisecond'),
+      updated_at = clock_timestamp() WHERE operation_id = $2 AND lease_token = $3 AND status = 'processing'
+      AND lease_expires_at > clock_timestamp() RETURNING operation_id`,
+      [input.durationMs, input.operationId, input.token],
+    );
+    return result.rows.length > 0;
+  }
+
+  public async finishSettlementJob(input: {
+    operationId: string;
+    token: string;
+    status: 'pending' | 'completed' | 'failed';
+  }): Promise<boolean> {
+    if (
+      !input.operationId.trim() ||
+      !input.token.trim() ||
+      !['pending', 'completed', 'failed'].includes(input.status)
+    ) {
+      throw new RangeError('Invalid settlement lease completion');
+    }
+    if (this.sqlite) {
+      const result = this.sqlite
+        .prepare(
+          `UPDATE settlement_jobs SET status = ?, lease_owner = NULL, lease_token = NULL, lease_expires_at = NULL,
+        updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE operation_id = ? AND lease_token = ? AND status = 'processing'
+        AND lease_expires_at > strftime('%Y-%m-%dT%H:%M:%fZ', 'now')`,
+        )
+        .run(input.status, input.operationId, input.token);
+      return result.changes > 0;
+    }
+    const result = await this.requirePostgres().query<{ operation_id: string }>(
+      `UPDATE settlement_jobs SET status = $1, lease_owner = NULL, lease_token = NULL,
+      lease_expires_at = NULL, updated_at = clock_timestamp() WHERE operation_id = $2 AND lease_token = $3
+      AND status = 'processing' AND lease_expires_at > clock_timestamp() RETURNING operation_id`,
+      [input.status, input.operationId, input.token],
+    );
+    return result.rows.length > 0;
+  }
+
+  private validateSettlementLeaseInput(
+    operationId: string,
+    identity: string,
+    durationMs: number,
+  ): void {
+    if (
+      !operationId.trim() ||
+      !identity.trim() ||
+      !Number.isSafeInteger(durationMs) ||
+      durationMs < 1 ||
+      durationMs > 86400000
+    ) {
+      throw new RangeError('Invalid settlement lease parameters');
+    }
+  }
+
+  public async updateSettlementJobStatus(_input: {
     operationId: string;
     status: SettlementJobRecord['status'];
   }): Promise<boolean> {
-    const updatedAt = nowIso();
-    if (this.sqlite) {
-      const result = this.sqlite
-        .prepare('UPDATE settlement_jobs SET status = ?, updated_at = ? WHERE operation_id = ?')
-        .run(input.status, updatedAt, input.operationId);
-      return result.changes > 0;
-    }
-    const response = await this.requirePostgres().query<{ operation_id: string }>(
-      'UPDATE settlement_jobs SET status = $1, updated_at = $2 WHERE operation_id = $3 RETURNING operation_id',
-      [input.status, updatedAt, input.operationId],
-    );
-    return response.rows.length > 0;
+    throw new ConfigError('Settlement job status changes require a lease token');
   }
 
   public async recordReconciledRailPayment(input: {
@@ -2297,6 +2462,7 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
       let operationError: unknown;
       try {
         await postgres.connect();
+        await postgres.query(`SET search_path TO "${this.schema ?? 'public'}"`);
         await postgres.query('BEGIN');
         transactionStarted = true;
 

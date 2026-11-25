@@ -58,7 +58,7 @@ describe('durable settlement job records', () => {
     await expect(adapter.listPendingSettlementJobs(10)).resolves.toHaveLength(1);
     await expect(
       adapter.updateSettlementJobStatus({ operationId: 'settlement-1', status: 'processing' }),
-    ).resolves.toBe(true);
+    ).rejects.toThrow('require a lease token');
   });
 
   it('rejects reuse of an operation identity with a different payload reference', async () => {
