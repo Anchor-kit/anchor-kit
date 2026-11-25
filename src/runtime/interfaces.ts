@@ -76,6 +76,20 @@ export interface Sep10AccountLookup {
   load(accountId: string): Promise<Sep10AccountSigners | null>;
 }
 
+/** Signer keys, weights and thresholds for a Stellar account as reported by a lookup provider. */
+export type AccountSignerConfiguration = Sep10AccountSigners;
+
+/** Outcome of an account lookup. Not-found and upstream errors are distinct and must not be conflated. */
+export type AccountLookupResult =
+  | { outcome: 'found'; account: AccountSignerConfiguration }
+  | { outcome: 'not_found' }
+  | { outcome: 'unavailable'; reason?: string };
+
+/** Injectable boundary for loading an account's configured signers and thresholds. */
+export interface AccountLookupProvider {
+  lookupAccount(publicKey: string): Promise<AccountLookupResult>;
+}
+
 export interface AuthChallengeRecord {
   id: string;
   account: string;
@@ -101,6 +115,27 @@ export interface InteractiveTransactionRecord {
   createdAt: string;
   updatedAt: string;
 }
+
+export interface InteractiveSessionRecord {
+  id: string;
+  account: string;
+  transactionId: string;
+  actions: string[];
+  consumedActions: string[];
+  expiresAt: string;
+  revokedAt: string | null;
+  createdAt: string;
+}
+
+export type InteractiveSessionRejection =
+  | 'missing_session'
+  | 'session_not_found'
+  | 'wrong_account'
+  | 'wrong_transaction'
+  | 'session_revoked'
+  | 'session_expired'
+  | 'action_not_permitted'
+  | 'action_already_consumed';
 
 export interface TransactionHistoryQuery {
   account: string;
@@ -327,6 +362,30 @@ export interface DatabaseAdapter extends SettlementLeaseAdapter, StellarSequence
   }): Promise<InteractiveTransactionRecord | null>;
   listTransactions(input: TransactionHistoryQuery): Promise<InteractiveTransactionRecord[]>;
   listPendingTransactionsBefore(cutoffIso: string): Promise<InteractiveTransactionRecord[]>;
+
+  insertInteractiveSession(input: {
+    id: string;
+    account: string;
+    transactionId: string;
+    actions: string[];
+    expiresAt: string;
+  }): Promise<InteractiveSessionRecord>;
+  getInteractiveSessionById(id: string): Promise<InteractiveSessionRecord | null>;
+  /**
+   * Revokes a session. Returns `true` only when this call performed the
+   * revocation, so a second call observes the session was already revoked.
+   */
+  revokeInteractiveSession(id: string): Promise<boolean>;
+  /**
+   * Atomically consumes `action` for `id`.
+   *
+   * Returns `true` exactly once per (session, action) pair: the record is only
+   * updated while it is unrevoked, unexpired, the action is still permitted,
+   * and the stored consumption list is unchanged since it was read. Every
+   * other outcome - unknown session, revoked, expired, unpermitted action, or
+   * a replay/concurrent caller - returns `false` and leaves the record alone.
+   */
+  consumeInteractiveSessionAction(id: string, action: string): Promise<boolean>;
   updateTransactionStatus(
     id: string,
     status: TransactionStatus,
@@ -381,6 +440,10 @@ export interface DatabaseAdapter extends SettlementLeaseAdapter, StellarSequence
       statusCode: number;
       responseBody: string;
     };
+    interactiveSession?: Pick<
+      InteractiveSessionRecord,
+      'id' | 'account' | 'transactionId' | 'actions' | 'expiresAt'
+    >;
   }): Promise<InteractiveTransactionRecord>;
   deletePendingIdempotencyRecord(
     scope: string,
