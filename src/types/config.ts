@@ -114,6 +114,9 @@ export interface ServerConfig {
    */
   interactiveDomain?: string;
 
+  /** Exact HTTPS origins allowed to receive SEP-24 callback messages. */
+  interactiveCallbackOrigins?: readonly string[];
+
   /** HTTPS SEP-10 authentication endpoint published in stellar.toml. */
   webAuthEndpoint?: string;
 

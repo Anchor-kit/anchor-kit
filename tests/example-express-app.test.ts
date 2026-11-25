@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import type { Express } from 'express';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -6,21 +6,27 @@ import { Readable } from 'node:stream';
 import { unlinkSync } from 'node:fs';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { Keypair, Transaction } from '@stellar/stellar-sdk';
+import {
+  createInteractiveSession,
+  verifyInteractiveSession,
+} from '../src/utils/interactive-session.ts';
 import request from 'supertest';
 import { createExampleApp, isSqliteDatabaseUrl } from '../example/express-app.ts';
+import type { KycVerificationProvider } from '../src/runtime/interfaces.ts';
 import { version } from '../package.json';
 
 interface ExampleAppRuntime {
   app: Express;
   anchor: {
     config: {
-      get: (key: 'framework') => {
+      get: (key: 'framework' | 'security') => {
         watchers?: {
           enabled?: boolean;
         };
         http?: {
           maxBodyBytes?: number;
         };
+        sep10SigningKey?: string;
       };
     };
   };
@@ -128,6 +134,10 @@ async function createExampleAppHarness(
     watchersEnabled?: string;
     maxBodyBytes?: string;
     authTokenLifetimeSeconds?: string;
+    interactiveCallbackOrigins?: string;
+    interactiveDomain?: string;
+    kycRequired?: Record<string, string[]>;
+    kycVerificationProvider?: KycVerificationProvider;
   } = {},
 ): Promise<ExampleAppHarness> {
   const sep10ServerKeypair = Keypair.random();
@@ -138,6 +148,8 @@ async function createExampleAppHarness(
   const originalWatchersEnabled = process.env.WATCHERS_ENABLED;
   const originalMaxBodyBytes = process.env.MAX_BODY_BYTES;
   const originalAuthTokenLifetimeSeconds = process.env.AUTH_TOKEN_LIFETIME_SECONDS;
+  const originalInteractiveCallbackOrigins = process.env.INTERACTIVE_CALLBACK_ORIGINS;
+  const originalInteractiveDomain = process.env.INTERACTIVE_DOMAIN;
 
   setOptionalEnvVar('DATABASE_URL', `file:${dbPath}`);
   setOptionalEnvVar('SEP10_SIGNING_KEY', sep10ServerKeypair.secret());
@@ -145,8 +157,13 @@ async function createExampleAppHarness(
   setOptionalEnvVar('WATCHERS_ENABLED', options.watchersEnabled);
   setOptionalEnvVar('MAX_BODY_BYTES', options.maxBodyBytes);
   setOptionalEnvVar('AUTH_TOKEN_LIFETIME_SECONDS', options.authTokenLifetimeSeconds);
+  setOptionalEnvVar('INTERACTIVE_CALLBACK_ORIGINS', options.interactiveCallbackOrigins);
+  setOptionalEnvVar('INTERACTIVE_DOMAIN', options.interactiveDomain);
 
-  const runtime = await createExampleApp();
+  const runtime = await createExampleApp({
+    kycRequired: options.kycRequired,
+    kycVerificationProvider: options.kycVerificationProvider,
+  });
 
   return {
     runtime,
@@ -159,6 +176,8 @@ async function createExampleAppHarness(
       setOptionalEnvVar('WATCHERS_ENABLED', originalWatchersEnabled);
       setOptionalEnvVar('MAX_BODY_BYTES', originalMaxBodyBytes);
       setOptionalEnvVar('AUTH_TOKEN_LIFETIME_SECONDS', originalAuthTokenLifetimeSeconds);
+      setOptionalEnvVar('INTERACTIVE_CALLBACK_ORIGINS', originalInteractiveCallbackOrigins);
+      setOptionalEnvVar('INTERACTIVE_DOMAIN', originalInteractiveDomain);
       removeFileIfPresent(dbPath);
     },
   };
@@ -176,13 +195,265 @@ describe('example/express-app', () => {
     await harness.cleanup();
   });
 
-  it('shows a non-cacheable unavailable page without reflecting the transaction ID', async () => {
-    const response = await request(harness.runtime.app).get('/deposit/example-id');
-    expect(response.status).toBe(503);
+  it('serves a non-cacheable deposit page without echoing its session token', async () => {
+    const response = await request(harness.runtime.app).get(
+      '/deposit/example-id?token=private-session-token&callback=postMessage',
+    );
+    expect(response.status).toBe(200);
     expect(response.headers['cache-control']).toBe('no-store');
+    expect(response.headers['referrer-policy']).toBe('strict-origin-when-cross-origin');
     expect(response.headers['content-security-policy']).toContain("default-src 'none'");
-    expect(response.text).toContain('Deposit unavailable');
-    expect(response.text).not.toContain('example-id');
+    expect(response.headers['content-security-policy']).toContain("frame-ancestors 'none'");
+    expect(response.text).toContain('Deposit details');
+    expect(response.text).not.toContain('private-session-token');
+    expect(response.text).toContain('window.opener');
+    expect(response.text).toContain('window.parent');
+    expect(response.text).toContain('allowedOrigins.includes(origin)');
+  });
+
+  it('loads and completes a session-scoped no-KYC deposit', async () => {
+    const token = await fetchAuthToken(harness.runtime.app);
+    const initiated = await invokeExpress(harness.runtime.app, {
+      method: 'POST',
+      path: '/anchor/transactions/deposit/interactive',
+      headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+      body: { asset_code: 'USDC', amount: '5' },
+    });
+    expect(initiated.status).toBe(201);
+    const id = String(initiated.body.id);
+    const account = String(initiated.body.account);
+    const session = await createInteractiveSession(
+      { account, transactionId: id, actions: ['deposit'] },
+      'example-jwt-secret',
+    );
+
+    const state = await invokeExpress(harness.runtime.app, {
+      path: `/anchor/interactive/deposit/${id}`,
+      headers: { authorization: `Bearer ${session}` },
+    });
+    expect(state.status).toBe(200);
+    expect(state.body.transaction).toMatchObject({ id, status: 'incomplete', amount: '5' });
+    expect(state.body.required_fields).toEqual([]);
+    expect(state.body.missing_fields).toEqual([]);
+
+    const completed = await invokeExpress(harness.runtime.app, {
+      method: 'POST',
+      path: `/anchor/interactive/deposit/${id}/complete`,
+      headers: {
+        authorization: `Bearer ${session}`,
+        'content-type': 'application/json',
+      },
+      body: { fields: {} },
+    });
+    expect(completed.status).toBe(200);
+    expect(completed.body.transaction).toMatchObject({
+      id,
+      status: 'pending_user_transfer_start',
+    });
+    expect(completed.body.kyc_verified).toBe(true);
+
+    const replay = await invokeExpress(harness.runtime.app, {
+      method: 'POST',
+      path: `/anchor/interactive/deposit/${id}/complete`,
+      headers: {
+        authorization: `Bearer ${session}`,
+        'content-type': 'application/json',
+      },
+      body: { fields: {} },
+    });
+    expect(replay.status).toBe(200);
+    expect(replay.body.idempotency_replay).toBe(true);
+  });
+
+  it('keeps a KYC-required deposit incomplete until an approval arrives', async () => {
+    const kycHarness = await createExampleAppHarness({
+      kycRequired: { USDC: ['first_name'] },
+    });
+    try {
+      const accessToken = await fetchAuthToken(kycHarness.runtime.app);
+      const initiated = await invokeExpress(kycHarness.runtime.app, {
+        method: 'POST',
+        path: '/anchor/transactions/deposit/interactive',
+        headers: { authorization: `Bearer ${accessToken}`, 'content-type': 'application/json' },
+        body: { asset_code: 'USDC', amount: '3' },
+      });
+      const transactionId = String(initiated.body.id);
+      const session = await createInteractiveSession(
+        {
+          account: String(initiated.body.account),
+          transactionId,
+          actions: ['deposit'],
+        },
+        'example-jwt-secret',
+      );
+      const completion = async (fields: Record<string, string>) =>
+        invokeExpress(kycHarness.runtime.app, {
+          method: 'POST',
+          path: `/anchor/interactive/deposit/${transactionId}/complete`,
+          headers: {
+            authorization: `Bearer ${session}`,
+            'content-type': 'application/json',
+          },
+          body: { fields },
+        });
+
+      const missing = await completion({});
+      expect(missing.status).toBe(422);
+      expect(missing.body.missing_fields).toEqual(['first_name']);
+      const pending = await completion({ first_name: 'Ada' });
+      expect(pending.status).toBe(202);
+      expect(pending.body).toMatchObject({
+        kyc_status: 'pending',
+        transaction: { status: 'incomplete' },
+      });
+    } finally {
+      await kycHarness.cleanup();
+    }
+  });
+
+  it('replays matching completion and rejects a conflicting submission', async () => {
+    let verificationCalls = 0;
+    const kycHarness = await createExampleAppHarness({
+      kycRequired: { USDC: ['first_name'] },
+      kycVerificationProvider: {
+        async verify(input) {
+          verificationCalls += 1;
+          return {
+            decisionId: 'decision-1',
+            operationKey: input.operationKey,
+            customerId: input.customerId,
+            status: 'approved',
+            decidedAt: new Date().toISOString(),
+          };
+        },
+      },
+    });
+    try {
+      const accessToken = await fetchAuthToken(kycHarness.runtime.app);
+      const initiated = await invokeExpress(kycHarness.runtime.app, {
+        method: 'POST',
+        path: '/anchor/transactions/deposit/interactive',
+        headers: { authorization: `Bearer ${accessToken}`, 'content-type': 'application/json' },
+        body: { asset_code: 'USDC', amount: '4' },
+      });
+      const transactionId = String(initiated.body.id);
+      const session = await createInteractiveSession(
+        {
+          account: String(initiated.body.account),
+          transactionId,
+          actions: ['deposit'],
+        },
+        'example-jwt-secret',
+      );
+      const submit = (firstName: string) =>
+        invokeExpress(kycHarness.runtime.app, {
+          method: 'POST',
+          path: `/anchor/interactive/deposit/${transactionId}/complete`,
+          headers: {
+            authorization: `Bearer ${session}`,
+            'content-type': 'application/json',
+          },
+          body: { fields: { first_name: firstName } },
+        });
+
+      const completed = await submit('Ada');
+      expect(completed.status).toBe(200);
+      expect(completed.body).toMatchObject({
+        transaction: { status: 'pending_user_transfer_start' },
+      });
+      const replay = await submit('Ada');
+      expect(replay.status).toBe(200);
+      expect(replay.body.idempotency_replay).toBe(true);
+      const conflict = await submit('Grace');
+      expect(conflict.status).toBe(409);
+      expect(conflict.body.error).toBe('idempotency_conflict');
+      expect(verificationCalls).toBe(1);
+    } finally {
+      await kycHarness.cleanup();
+    }
+  });
+
+  it('limits wallet messaging and signs allowed URL callbacks', async () => {
+    const callbackHarness = await createExampleAppHarness({
+      interactiveCallbackOrigins: 'https://wallet.example',
+      interactiveDomain: 'https://anchor.example',
+    });
+    const callbackFetch = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValue(new Response(null, { status: 204 }));
+    try {
+      const page = await request(callbackHarness.runtime.app).get(
+        '/deposit/example-id?token=private-session-token&callback=postMessage',
+      );
+      expect(page.status).toBe(200);
+      expect(page.headers['content-security-policy']).toContain(
+        'frame-ancestors https://wallet.example',
+      );
+      expect(page.text).toContain('allowedOrigins.includes(origin)');
+      expect(page.text).not.toContain('private-session-token');
+
+      const accessToken = await fetchAuthToken(callbackHarness.runtime.app);
+      const initiated = await request(callbackHarness.runtime.app)
+        .post('/anchor/transactions/deposit/interactive')
+        .set('authorization', `Bearer ${accessToken}`)
+        .type('form')
+        .send({ asset_code: 'USDC', amount: '2' });
+      expect(initiated.status).toBe(200);
+      const transactionId = String(initiated.body.id);
+      const session = new URL(String(initiated.body.url)).searchParams.get('token') ?? '';
+      const claims = await verifyInteractiveSession(
+        session,
+        'example-jwt-secret',
+        transactionId,
+        'deposit',
+      );
+      expect(claims.account).toMatch(/^G/);
+      const completion = await invokeExpress(callbackHarness.runtime.app, {
+        method: 'POST',
+        path: `/anchor/interactive/deposit/${transactionId}/complete`,
+        headers: {
+          authorization: `Bearer ${session}`,
+          'content-type': 'application/json',
+        },
+        body: { fields: {}, callback: 'https://wallet.example/sep24/callback' },
+      });
+      expect(completion.status).toBe(200);
+      expect(completion.body.callback_delivered).toBe(true);
+      const [callbackUrl, callbackOptions] = callbackFetch.mock.calls[0] ?? [];
+      expect(String(callbackUrl)).toBe('https://wallet.example/sep24/callback');
+      const signatureHeader = new Headers(callbackOptions?.headers).get('signature') ?? '';
+      expect(signatureHeader).toMatch(/^t=\d+, s=.+/);
+      const signatureParts = /^t=(\d+), s=(.+)$/.exec(signatureHeader);
+      const callbackBody = String(callbackOptions?.body);
+      const signingKey = Keypair.fromSecret(
+        String(callbackHarness.runtime.anchor.config.get('security').sep10SigningKey),
+      );
+      expect(
+        signingKey.verify(
+          Buffer.from(`${signatureParts?.[1]}.wallet.example.${callbackBody}`),
+          Buffer.from(signatureParts?.[2] ?? '', 'base64'),
+        ),
+      ).toBe(true);
+      expect(JSON.parse(String(callbackOptions?.body)).transaction).toMatchObject({
+        id: transactionId,
+        status: 'pending_user_transfer_start',
+      });
+
+      const rejected = await invokeExpress(callbackHarness.runtime.app, {
+        method: 'POST',
+        path: `/anchor/interactive/deposit/${transactionId}/complete`,
+        headers: {
+          authorization: `Bearer ${session}`,
+          'content-type': 'application/json',
+        },
+        body: { fields: {}, callback: 'https://attacker.example/callback' },
+      });
+      expect(rejected.status).toBe(400);
+      expect(callbackFetch).toHaveBeenCalledTimes(1);
+    } finally {
+      callbackFetch.mockRestore();
+      await callbackHarness.cleanup();
+    }
   });
 
   it.each([

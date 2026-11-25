@@ -288,6 +288,12 @@ export interface DatabaseAdapter extends SettlementLeaseAdapter {
     status: TransactionStatus,
     expectedStatus?: TransactionStatus,
   ): Promise<boolean>;
+  transitionInteractiveTransaction?(input: {
+    id: string;
+    expectedStatus: TransactionStatus;
+    status: TransactionStatus;
+    amount?: string;
+  }): Promise<TransactionTransitionResult>;
 
   insertOrGetCustomer(input: Omit<Customer, 'created_at'>): Promise<Customer>;
   getCustomerByAccountId(accountId: string): Promise<Customer | null>;
