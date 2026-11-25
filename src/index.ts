@@ -91,6 +91,7 @@ export type {
   AuthToken,
   DepositRequest,
   InteractiveResponse,
+  Sep10WalletSigner,
   TransactionResponse,
 } from './client/anchor-client.ts';
 

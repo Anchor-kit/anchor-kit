@@ -38,6 +38,12 @@ export interface AnchorClientOptions {
   fetch?: typeof fetch;
 }
 
+/** Wallet-provided SEP-10 transaction signer. Rejections are returned to the caller. */
+export type Sep10WalletSigner = (input: {
+  transaction: string;
+  networkPassphrase?: string;
+}) => Promise<string>;
+
 function checkedEndpoint(value: string): URL {
   const url = new URL(value);
   if (url.protocol !== 'https:' || url.username || url.password || url.search || url.hash)
@@ -115,6 +121,18 @@ export class AnchorClient {
     );
     if (!result || !nonempty(result.token)) throw new AnchorClientError('invalid_response');
     return { token: result.token };
+  }
+  /** Complete SEP-10 using an injected wallet signer; wallet errors remain visible to callers. */
+  async authenticate(account: string, signChallenge: Sep10WalletSigner): Promise<AuthToken> {
+    const challenge = await this.getChallenge(account);
+    const signedTransaction = await signChallenge({
+      transaction: challenge.transaction,
+      ...(challenge.network_passphrase === undefined
+        ? {}
+        : { networkPassphrase: challenge.network_passphrase }),
+    });
+    if (!nonempty(signedTransaction)) throw new AnchorClientError('invalid_response');
+    return this.exchangeChallenge(signedTransaction);
   }
   async initiateDeposit(token: string, input: DepositRequest): Promise<InteractiveResponse> {
     const result = object(

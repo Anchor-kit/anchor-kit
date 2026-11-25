@@ -7,6 +7,43 @@ const endpoints = {
 };
 
 describe('public standard anchor client', () => {
+  it('runs challenge, injected signing, and exchange without hiding wallet rejection', async () => {
+    const fetcher = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({ transaction: 'unsigned-xdr', network_passphrase: 'Test Network' }),
+          { status: 200 },
+        ),
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ token: 'access-token' }), { status: 200 }),
+      );
+    const client = new AnchorClient({ ...endpoints, fetch: fetcher });
+    const signChallenge = vi.fn(
+      async (input: { transaction: string; networkPassphrase?: string }) => {
+        expect(input).toEqual({ transaction: 'unsigned-xdr', networkPassphrase: 'Test Network' });
+        return 'signed-xdr';
+      },
+    );
+
+    await expect(client.authenticate('GACCOUNT', signChallenge)).resolves.toEqual({
+      token: 'access-token',
+    });
+    expect(fetcher).toHaveBeenCalledTimes(2);
+    expect(fetcher.mock.calls[1]?.[1]?.body).toEqual(
+      new URLSearchParams({ transaction: 'signed-xdr' }),
+    );
+
+    const rejection = new Error('wallet rejected request');
+    fetcher.mockResolvedValueOnce(
+      new Response(JSON.stringify({ transaction: 'unsigned-xdr' }), { status: 200 }),
+    );
+    await expect(
+      client.authenticate('GACCOUNT', async () => Promise.reject(rejection)),
+    ).rejects.toBe(rejection);
+  });
+
   it('rejects malformed responses and mismatched transaction IDs', async () => {
     const fetcher = vi
       .fn<typeof fetch>()
