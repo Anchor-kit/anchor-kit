@@ -111,6 +111,7 @@ describe('versioned database migrations', () => {
         { name: 'core:002-idempotency-status' },
         { name: 'core:003-current-runtime-tables' },
         { name: 'core:004-settlement-job-leases' },
+        { name: 'core:005-webhook-recovery-result' },
       ]);
     } finally {
       await adapter.disconnect();

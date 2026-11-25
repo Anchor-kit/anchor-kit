@@ -139,6 +139,18 @@ A task is considered "Done" when:
 - [ ] Documentation is updated.
 - [ ] PR is approved by a maintainer.
 
+## Webhook operation recovery
+
+Run `bun test tests/runtime/webhooks/operation-recovery.integration.test.ts` to check
+that a provider success is recovered without a second transfer and that an unknown
+outcome stays unresolved. All assertions should pass. Set `DATABASE_URL` to a test
+PostgreSQL database to run the same checks against PostgreSQL as well as SQLite.
+
+Configure `webhooks.recoverOperation` as a read-only provider lookup by operation key.
+Return the original `PaymentRailOperation` when found, or `null` when its outcome is
+unknown. Unresolved events require operator action; a retry does not execute the
+webhook callback again.
+
 ## Issued-asset recipient checks
 
 Run `bun test tests/recipient-readiness.test.ts`; all assertions should pass.

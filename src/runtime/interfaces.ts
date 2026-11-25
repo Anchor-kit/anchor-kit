@@ -134,6 +134,8 @@ export interface WebhookEventRecord {
   errorMessage: string | null;
   processedAt: string | null;
   createdAt: string;
+  /** Original provider operation returned by reconciliation, when available. */
+  recoveryResult?: PaymentRailOperation | null;
   /** Stable identity for the external operation this event represents. Reused across all attempts and retries. */
   operationKey: string;
   /** Monotonically incrementing attempt counter for this event. */
@@ -352,6 +354,20 @@ export interface DatabaseAdapter extends SettlementLeaseAdapter {
     leaseOwner: string;
     leaseDurationMs: number;
   }): Promise<WebhookEventRecord | null>;
+  /** Claims an ambiguous prior attempt for read-only provider reconciliation. */
+  claimWebhookRecovery(input: {
+    id: string;
+    leaseOwner: string;
+    leaseDurationMs: number;
+  }): Promise<WebhookEventRecord | null>;
+  /** Stores the recovered outcome only for the current, unexpired reconciliation lease. */
+  completeWebhookRecovery(input: {
+    id: string;
+    attemptId: string;
+    leaseOwner: string;
+    status: 'processed' | 'failed' | 'unresolved';
+    result: PaymentRailOperation | null;
+  }): Promise<boolean>;
   /**
    * Records the final outcome of an attempt. Only the current lease owner may complete the
    * attempt; stale owners receive false and must not retry the financial side effect.
@@ -481,6 +497,7 @@ export interface WebhookProcessor {
     eventId: string;
     provider: string;
     status?: WebhookEventRecord['status'];
+    recoveryResult?: PaymentRailOperation | null;
     /** Stable operation key for this event (reused by all attempts). */
     operationKey?: string;
     /** Identity of the attempt that was claimed for this call, if any. */
