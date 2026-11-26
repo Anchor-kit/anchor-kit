@@ -50,6 +50,9 @@ jobs:
       - name: PostgreSQL adapter assertions
         run: bun test tests/runtime/postgres-adapter.integration.test.ts
 
+      - name: PostgreSQL migration lock assertions
+        run: bun test tests/runtime/postgres-migration-lock.integration.test.ts
+
       - name: Lint
         run: bun run lint
 

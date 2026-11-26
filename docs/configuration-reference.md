@@ -324,7 +324,7 @@ framework: {
 
 | Field                  | Type       | Default     | Status         | Notes                                                                                                                                                                                                                                          |
 | ---------------------- | ---------- | ----------- | -------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `queue.backend`        | `'memory'` | `'memory'`  | ✅ Implemented | In-process task queue; retains at most 10,000 active task buckets                                                                                                                                                                              |
+| `queue.backend`        | `'memory'` | `'memory'`  | ✅ Implemented | In-process task queue; queue entries and terminal-failure records are not persisted and are lost when the process exits                                                                                                                        |
 | `queue.concurrency`    | `number`   | `1`         | ✅ Implemented | Number of concurrent background workers; scales up to handle webhook and watcher loads                                                                                                                                                         |
 | `queue.maxPendingJobs` | `number`   | unlimited   | ✅ Implemented | Maximum waiting jobs; running jobs do not count toward the limit. Must be a positive safe integer.                                                                                                                                             |
 | `queue.retry`          | object     | see below   | ✅ Implemented | Bounded retry policy for retryable failures: `maxAttempts` (default `3`), `baseDelayMs` (default `250`) and `maxDelayMs` (default `30000`). Backoff is exponential and capped.                                                                 |
@@ -975,6 +975,7 @@ USDC_ISSUER=GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5
 - [Auth Token Response Contract](auth-token-response.md) – SEP-10 token response format and expiry semantics
 - [Webhook Event Contract](../README.md#webhook-event-contract) – Webhook request/response format
 - [Trusted Proxy Rate-Limit Guidance](trusted-proxy-rate-limits.md) – Security best practices for `trustForwardedFor`
+- [Production Configuration Review Checklist](production-checklist.md) – Deployment review checklist, operational hardening, and roadmap gates
 - [MVP Express Integration](mvp-express.md) – Quick-start guide and example app
 
 ---

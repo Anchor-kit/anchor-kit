@@ -44,7 +44,7 @@ Blank, non-function, or duplicate migration names are rejected before any transa
 
 This guarantee applies to the named `SchemaMigration` sequence only. After that sequence, `migrate()` also runs legacy/idempotent upgrades for interactive-transaction columns, webhook deduplication, and webhook attempt fields, plus index creation. Those changes are not recorded in `anchor_kit_migrations` and do not have the same generic per-migration rollback wrapper. Include them in backups, inspection, and rehearsals.
 
-Coordinate deployments so only one process runs migrations against a database at a time.
+PostgreSQL migrations use a session-scoped advisory lock keyed by database and current schema. It covers the metadata bootstrap, plugin migrations, and post-migration DDL passes. Independent connections and processes that migrate the same database therefore run in sequence. The lock is released in a `finally` block after success or failure, so a later caller can retry a failed migration.
 
 ## Inspecting applied records
 
@@ -134,7 +134,15 @@ For a fast SQLite check of the transactional guarantee and plugin-name encoding,
 bun test tests/runtime/database/versioned-migrations.test.ts
 ```
 
-That test covers a failed fixture migration with rollback and retry, plus plugin registration through the public factory. It does not replace the disposable-database rehearsal with the production plugin set.
+That test covers a failed fixture migration with rollback and retry, plus two ordered plugin migrations applied to an existing core database and skipped on a second migrate call. It exercises SQLite. PostgreSQL migration integration requires a disposable PostgreSQL database configured through `DATABASE_URL`; the PostgreSQL integration tests are skipped when that variable is unset. It does not replace the disposable-database rehearsal with the production plugin set.
+
+For PostgreSQL migration-lock tests, run:
+
+```sh
+bun test tests/runtime/postgres-migration-lock.integration.test.ts
+```
+
+Set `TEST_POSTGRES_URL` or `DATABASE_URL` to a disposable database. The integration test starts two independent connections against the same database and checks that migration records and schema changes are applied once. It also checks that a failed migration rolls back and can be retried. The test skips when neither variable is set.
 
 ## Deployment procedure for a failed migration
 
@@ -150,6 +158,6 @@ That test covers a failed fixture migration with rollback and retry, plus plugin
 
 - **Compatible application rollback:** deploy the prior application build and leave the migrated schema in place. Verify the prior plugin set works with the plugin tables created by the new version. Keep the migration rows; a later roll-forward will skip them.
 - **Incompatible application rollback:** restore the pre-upgrade database backup or restore to a PostgreSQL point in time before `migrate()`, then deploy the prior application build. The restore must include all plugin tables and migration metadata. Plan for writes that happened after the backup, either by reconciling them or by accepting data loss.
-- **Explicit compensating migration:** add a new, reviewed forward migration (including plugin migrations where applicable) that reverses only the changes that must be removed. This is an operator/authored change with its own new record; it is not an automatic `down` migration. Rehearse it with the prior application build before production use.
+- **Explicit compensating migration:** add a new, reviewed forward migration (including plugin migrations where applicable) that reverses only the changes that must be removed. This is an operator-authored change with its own new record; it is not an automatic `down` migration. Rehearse it with the prior application build before production use.
 
 Do not delete `anchor_kit_migrations` rows as a rollback mechanism. A database restore returns the records and schema to the backup state together; manual row deletion leaves the adapter believing that DDL was never applied and can cause partial re-application on the next `migrate()`.

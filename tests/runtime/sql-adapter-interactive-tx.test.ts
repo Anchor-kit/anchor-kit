@@ -89,6 +89,88 @@ describe('SqlDatabaseAdapter – interactive transaction status updates', () => 
     expect(fetched).toBeNull();
   });
 
+  it('persists rail payment intent idempotently before provider initiation', async () => {
+    const txId = randomUUID();
+    await db.insertInteractiveTransaction({
+      id: txId,
+      account: 'GTEST1234',
+      kind: 'deposit',
+      assetCode: 'USDC',
+      amount: '50.00',
+      status: 'incomplete',
+    });
+
+    await expect(
+      db.setInteractiveTransactionRailPayment!({
+        transactionId: txId,
+        railReference: `mock:anchor-${txId}`,
+        amountIn: '2500.00',
+        currency: 'NGN',
+      }),
+    ).resolves.toBe(true);
+    await expect(
+      db.setInteractiveTransactionRailPayment!({
+        transactionId: txId,
+        railReference: `mock:anchor-${txId}`,
+        amountIn: '2500.00',
+        currency: 'NGN',
+      }),
+    ).resolves.toBe(true);
+    await expect(
+      db.setInteractiveTransactionRailPayment!({
+        transactionId: txId,
+        railReference: `mock:anchor-${txId}`,
+        amountIn: '2501.00',
+        currency: 'NGN',
+      }),
+    ).resolves.toBe(false);
+    await expect(db.getInteractiveTransactionById(txId)).resolves.toMatchObject({
+      amountIn: '2500.00',
+      currency: 'NGN',
+      railReference: `mock:anchor-${txId}`,
+    });
+  });
+
+  it('persists one signed Stellar envelope and its hash for retry-safe submission', async () => {
+    const txId = randomUUID();
+    await db.insertInteractiveTransaction({
+      id: txId,
+      account: 'GTEST1234',
+      kind: 'deposit',
+      assetCode: 'USDC',
+      amount: '50.00',
+      status: 'pending_stellar',
+    });
+    const signedXdr = 'AAAA-signed-envelope';
+    const hash = 'a'.repeat(64);
+
+    await expect(
+      db.persistSignedStellarTransaction!({
+        transactionId: txId,
+        signedXdr,
+        transactionHash: hash,
+      }),
+    ).resolves.toBe(true);
+    await expect(
+      db.persistSignedStellarTransaction!({
+        transactionId: txId,
+        signedXdr,
+        transactionHash: hash,
+      }),
+    ).resolves.toBe(true);
+    await expect(
+      db.persistSignedStellarTransaction!({
+        transactionId: txId,
+        signedXdr: 'different-envelope',
+        transactionHash: 'b'.repeat(64),
+      }),
+    ).resolves.toBe(false);
+    await expect(db.getInteractiveTransactionById(txId)).resolves.toMatchObject({
+      stellarSignedXdr: signedXdr,
+      stellarTransactionHash: hash,
+    });
+  });
+
   it('updates a transaction only when its current status matches the expected status', async () => {
     const txId = randomUUID();
     await db.insertInteractiveTransaction({

@@ -166,6 +166,7 @@ const CORE_MIGRATIONS: readonly SchemaMigration[] = [
               currency TEXT,
               rail_reference TEXT,
               stellar_transaction_hash TEXT,
+              stellar_signed_xdr TEXT,
               status TEXT NOT NULL,
               created_at TEXT NOT NULL,
               updated_at TEXT NOT NULL
@@ -257,6 +258,7 @@ const CORE_MIGRATIONS: readonly SchemaMigration[] = [
               currency TEXT,
               rail_reference TEXT,
               stellar_transaction_hash TEXT,
+              stellar_signed_xdr TEXT,
               status TEXT NOT NULL,
               created_at TIMESTAMPTZ NOT NULL,
               updated_at TIMESTAMPTZ NOT NULL
@@ -597,6 +599,43 @@ async function withSqliteMigrationLock<T>(key: string, migrate: () => Promise<T>
     release();
     if (sqliteMigrationLocks.get(key) === current) {
       sqliteMigrationLocks.delete(key);
+    }
+  }
+}
+
+/**
+ * Advisory lock identifiers for PostgreSQL migrations.
+ *
+ * The key is derived from the database and current schema so independent
+ * adapter connections targeting the same database serialize their migrations,
+ * while unrelated databases in the same cluster do not block each other.
+ */
+const POSTGRES_MIGRATION_LOCK_SQL =
+  "SELECT pg_advisory_lock(hashtext(current_database() || ':' || COALESCE(current_schema(), ''))::bigint)";
+const POSTGRES_MIGRATION_UNLOCK_SQL =
+  "SELECT pg_advisory_unlock(hashtext(current_database() || ':' || COALESCE(current_schema(), ''))::bigint)";
+
+/**
+ * Serializes PostgreSQL migrations across connections and processes.
+ *
+ * The lock is session scoped so it survives the per-migration BEGIN/COMMIT
+ * pairs and also covers the metadata bootstrap and post-migration DDL passes.
+ * It is always released in `finally`, including after a failed migration, so a
+ * later caller can re-read the migration records and retry the work.
+ */
+async function withPostgresMigrationLock<T>(
+  client: PostgresClient,
+  migrate: () => Promise<T>,
+): Promise<T> {
+  await client.query(POSTGRES_MIGRATION_LOCK_SQL);
+  try {
+    return await migrate();
+  } finally {
+    try {
+      await client.query(POSTGRES_MIGRATION_UNLOCK_SQL);
+    } catch {
+      // A broken connection releases session locks on its own. Never let
+      // unlock cleanup hide the original migration error.
     }
   }
 }
@@ -968,79 +1007,82 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
 
     if (this.postgres) {
       const postgres = this.postgres;
-      await postgres.query(`
-        CREATE TABLE IF NOT EXISTS anchor_kit_migrations (
-          name TEXT PRIMARY KEY,
-          applied_at TIMESTAMPTZ NOT NULL
-        )
-      `);
-      const result = await postgres.query<{ name: string }>(
-        'SELECT name FROM anchor_kit_migrations',
-      );
-      const applied = new Set(result.rows.map((row) => row.name));
-      const context: SchemaMigrationContext = {
-        dialect: 'postgres',
-        execute: async (sql) => {
-          await postgres.query(sql);
-        },
-        hasColumn: async (table, column) => {
-          const columns = await postgres.query<{ exists: boolean }>(
-            `SELECT EXISTS (
-              SELECT 1 FROM information_schema.columns
-              WHERE table_schema = current_schema() AND table_name = $1 AND column_name = $2
-            ) AS exists`,
-            [table, column],
+      await withPostgresMigrationLock(postgres, async () => {
+        await postgres.query(`
+          CREATE TABLE IF NOT EXISTS anchor_kit_migrations (
+            name TEXT PRIMARY KEY,
+            applied_at TIMESTAMPTZ NOT NULL
+          )
+        `);
+        const result = await postgres.query<{ name: string }>(
+          'SELECT name FROM anchor_kit_migrations',
+        );
+        const applied = new Set(result.rows.map((row) => row.name));
+        const context: SchemaMigrationContext = {
+          dialect: 'postgres',
+          execute: async (sql) => {
+            await postgres.query(sql);
+          },
+          hasColumn: async (table, column) => {
+            const columns = await postgres.query<{ exists: boolean }>(
+              `SELECT EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_schema = current_schema() AND table_name = $1 AND column_name = $2
+              ) AS exists`,
+              [table, column],
+            );
+            return columns.rows[0]?.exists === true;
+          },
+        };
+        await this.applyMigrations(migrations, applied, context, {
+          begin: async () => {
+            await postgres.query('BEGIN');
+          },
+          commit: async () => {
+            await postgres.query('COMMIT');
+          },
+          rollback: async () => {
+            await postgres.query('ROLLBACK');
+          },
+          isApplied: async (name) => {
+            const existing = await postgres.query(
+              'SELECT 1 FROM anchor_kit_migrations WHERE name = $1',
+              [name],
+            );
+            return existing.rows.length > 0;
+          },
+          record: async (name) => {
+            await postgres.query(
+              'INSERT INTO anchor_kit_migrations (name, applied_at) VALUES ($1, $2)',
+              [name, nowIso()],
+            );
+          },
+        });
+        await postgres.query(`
+          CREATE TABLE IF NOT EXISTS schema_migrations (
+            version TEXT PRIMARY KEY,
+            applied_at TIMESTAMPTZ NOT NULL
           );
-          return columns.rows[0]?.exists === true;
-        },
-      };
-      await this.applyMigrations(migrations, applied, context, {
-        begin: async () => {
-          await postgres.query('BEGIN');
-        },
-        commit: async () => {
-          await postgres.query('COMMIT');
-        },
-        rollback: async () => {
-          await postgres.query('ROLLBACK');
-        },
-        isApplied: async (name) => {
-          const existing = await postgres.query(
-            'SELECT 1 FROM anchor_kit_migrations WHERE name = $1',
-            [name],
-          );
-          return existing.rows.length > 0;
-        },
-        record: async (name) => {
+        `);
+        for (const column of [
+          'amount_in TEXT',
+          'amount_out TEXT',
+          'amount_fee TEXT',
+          'currency TEXT',
+          'rail_reference TEXT',
+          'stellar_transaction_hash TEXT',
+          'stellar_signed_xdr TEXT',
+        ]) {
           await postgres.query(
-            'INSERT INTO anchor_kit_migrations (name, applied_at) VALUES ($1, $2)',
-            [name, nowIso()],
+            `ALTER TABLE interactive_transactions ADD COLUMN IF NOT EXISTS ${column}`,
           );
-        },
+        }
+        await this.upgradeLegacyWebhookDedupePostgres();
+        await this.applyWebhookAttemptMigrationPostgres();
+        for (const statement of POSTGRES_INDEX_STATEMENTS) {
+          await postgres.query(statement);
+        }
       });
-      await this.postgres.query(`
-        CREATE TABLE IF NOT EXISTS schema_migrations (
-          version TEXT PRIMARY KEY,
-          applied_at TIMESTAMPTZ NOT NULL
-        );
-      `);
-      for (const column of [
-        'amount_in TEXT',
-        'amount_out TEXT',
-        'amount_fee TEXT',
-        'currency TEXT',
-        'rail_reference TEXT',
-        'stellar_transaction_hash TEXT',
-      ]) {
-        await this.postgres.query(
-          `ALTER TABLE interactive_transactions ADD COLUMN IF NOT EXISTS ${column}`,
-        );
-      }
-      await this.upgradeLegacyWebhookDedupePostgres();
-      await this.applyWebhookAttemptMigrationPostgres();
-      for (const statement of POSTGRES_INDEX_STATEMENTS) {
-        await this.postgres.query(statement);
-      }
       return;
     }
 
@@ -1220,6 +1262,7 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
       ['currency', 'TEXT'],
       ['rail_reference', 'TEXT'],
       ['stellar_transaction_hash', 'TEXT'],
+      ['stellar_signed_xdr', 'TEXT'],
     ] as const;
 
     for (const [column, type] of columnDefinitions) {
@@ -1541,6 +1584,7 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
     currency?: string | null;
     railReference?: string | null;
     stellarTransactionHash?: string | null;
+    stellarSignedXdr?: string | null;
     status: TransactionStatus;
   }): Promise<InteractiveTransactionRecord> {
     const createdAt = nowIso();
@@ -1549,7 +1593,7 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
     if (this.sqlite) {
       this.sqlite
         .prepare(
-          'INSERT INTO interactive_transactions (id, account, kind, asset_code, amount, amount_in, amount_out, amount_fee, currency, rail_reference, stellar_transaction_hash, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+          'INSERT INTO interactive_transactions (id, account, kind, asset_code, amount, amount_in, amount_out, amount_fee, currency, rail_reference, stellar_transaction_hash, stellar_signed_xdr, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
         )
         .run(
           input.id,
@@ -1563,13 +1607,14 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
           input.currency ?? null,
           input.railReference ?? null,
           input.stellarTransactionHash ?? null,
+          input.stellarSignedXdr ?? null,
           input.status,
           createdAt,
           updatedAt,
         );
     } else {
       await this.requirePostgres().query(
-        'INSERT INTO interactive_transactions (id, account, kind, asset_code, amount, amount_in, amount_out, amount_fee, currency, rail_reference, stellar_transaction_hash, status, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)',
+        'INSERT INTO interactive_transactions (id, account, kind, asset_code, amount, amount_in, amount_out, amount_fee, currency, rail_reference, stellar_transaction_hash, stellar_signed_xdr, status, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)',
         [
           input.id,
           input.account,
@@ -1582,6 +1627,7 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
           input.currency ?? null,
           input.railReference ?? null,
           input.stellarTransactionHash ?? null,
+          input.stellarSignedXdr ?? null,
           input.status,
           createdAt,
           updatedAt,
@@ -1601,6 +1647,7 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
       currency: input.currency ?? null,
       railReference: input.railReference ?? null,
       stellarTransactionHash: input.stellarTransactionHash ?? null,
+      stellarSignedXdr: input.stellarSignedXdr ?? null,
       status: input.status,
       createdAt,
       updatedAt,
@@ -1627,6 +1674,78 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
     const row = response.rows[0];
     if (!row) return null;
     return this.mapTransactionRow(row);
+  }
+
+  public async setInteractiveTransactionRailPayment(input: {
+    transactionId: string;
+    railReference: string;
+    amountIn: string;
+    currency: string;
+  }): Promise<boolean> {
+    const updatedAt = nowIso();
+    if (this.sqlite) {
+      const result = this.sqlite
+        .prepare(
+          `UPDATE interactive_transactions
+           SET rail_reference = ?, amount_in = ?, currency = ?, updated_at = ?
+           WHERE id = ? AND kind = 'deposit' AND status = 'incomplete'
+             AND (rail_reference IS NULL OR (rail_reference = ? AND amount_in = ? AND currency = ?))`,
+        )
+        .run(
+          input.railReference,
+          input.amountIn,
+          input.currency,
+          updatedAt,
+          input.transactionId,
+          input.railReference,
+          input.amountIn,
+          input.currency,
+        );
+      return result.changes === 1;
+    }
+    const result = await this.requirePostgres().query<{ id: string }>(
+      `UPDATE interactive_transactions
+       SET rail_reference = $1, amount_in = $2, currency = $3, updated_at = $4
+       WHERE id = $5 AND kind = 'deposit' AND status = 'incomplete'
+         AND (rail_reference IS NULL OR (rail_reference = $1 AND amount_in = $2 AND currency = $3))
+       RETURNING id`,
+      [input.railReference, input.amountIn, input.currency, updatedAt, input.transactionId],
+    );
+    return result.rows.length === 1;
+  }
+
+  public async persistSignedStellarTransaction(input: {
+    transactionId: string;
+    signedXdr: string;
+    transactionHash: string;
+  }): Promise<boolean> {
+    if (!input.signedXdr.trim() || !/^[a-fA-F0-9]{64}$/.test(input.transactionHash)) {
+      throw new ConfigError('A signed XDR and 64-character Stellar transaction hash are required');
+    }
+    const hash = input.transactionHash.toLowerCase();
+    const updatedAt = nowIso();
+    if (this.sqlite) {
+      const result = this.sqlite
+        .prepare(
+          `UPDATE interactive_transactions
+           SET stellar_signed_xdr = ?, stellar_transaction_hash = ?, updated_at = ?
+           WHERE id = ? AND status = 'pending_stellar'
+             AND (stellar_signed_xdr IS NULL OR (stellar_signed_xdr = ? AND LOWER(stellar_transaction_hash) = ?))
+             AND (stellar_transaction_hash IS NULL OR LOWER(stellar_transaction_hash) = ?)`,
+        )
+        .run(input.signedXdr, hash, updatedAt, input.transactionId, input.signedXdr, hash, hash);
+      return result.changes === 1;
+    }
+    const result = await this.requirePostgres().query<{ id: string }>(
+      `UPDATE interactive_transactions
+       SET stellar_signed_xdr = $1, stellar_transaction_hash = $2, updated_at = $3
+       WHERE id = $4 AND status = 'pending_stellar'
+         AND (stellar_signed_xdr IS NULL OR (stellar_signed_xdr = $1 AND LOWER(stellar_transaction_hash) = $2))
+         AND (stellar_transaction_hash IS NULL OR LOWER(stellar_transaction_hash) = $2)
+       RETURNING id`,
+      [input.signedXdr, hash, updatedAt, input.transactionId],
+    );
+    return result.rows.length === 1;
   }
 
   public async findInteractiveTransaction(input: {
@@ -3858,6 +3977,10 @@ export class SqlDatabaseAdapter implements DatabaseAdapter {
         row.stellar_transaction_hash === null || row.stellar_transaction_hash === undefined
           ? null
           : String(row.stellar_transaction_hash),
+      stellarSignedXdr:
+        row.stellar_signed_xdr === null || row.stellar_signed_xdr === undefined
+          ? null
+          : String(row.stellar_signed_xdr),
       status,
       createdAt:
         row.created_at instanceof Date ? row.created_at.toISOString() : String(row.created_at),

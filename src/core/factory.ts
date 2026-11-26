@@ -22,6 +22,7 @@ import type {
 import { InMemoryQueueAdapter, PermanentJobError } from '@/runtime/queue/in-memory-queue.ts';
 import { TransactionWatcher } from '@/runtime/watchers/transaction-watcher.ts';
 import { DefaultWebhookProcessor } from '@/runtime/webhooks/default-webhook-processor.ts';
+import { initiateRailPayment } from '@/services/rail-payment-initiation.ts';
 import type { SchemaMigration } from '@/types/foundation.ts';
 import type { AnchorKitConfig } from '@/types/config.ts';
 import type { AnchorPlugin, AnchorPluginHooks } from '@/types/plugin.ts';
@@ -397,6 +398,31 @@ export class AnchorInstance {
       throw new ConfigError('Express router has not been initialized');
     }
     return this.expressRouter;
+  }
+
+  /** Initiate a durable, idempotent rail operation for an existing deposit. */
+  public async initiateRailPayment(input: {
+    provider: string;
+    transactionId: string;
+    amount: string;
+    currency: string;
+  }) {
+    this.ensureInitialized();
+    const adapter = this.paymentRailAdapters?.find(
+      (candidate) => candidate.provider === input.provider,
+    );
+    if (!adapter) {
+      throw new ConfigError(
+        `No payment rail adapter is registered for provider "${input.provider}"`,
+      );
+    }
+    return initiateRailPayment({
+      database: this.requireDatabase(),
+      adapter,
+      transactionId: input.transactionId,
+      amount: input.amount,
+      currency: input.currency,
+    });
   }
 
   /**

@@ -35,6 +35,8 @@ The SDK does not own `listen()` and does not bind network ports.
 
 See [the trusted proxy rate-limit guidance](docs/trusted-proxy-rate-limits.md)
 before enabling trustForwardedFor.
+See [request body limit guidance](docs/request-body-limits.md) to align proxy,
+Express, and Anchor-Kit limits while preserving webhook bytes.
 
 ## Install
 
@@ -159,6 +161,8 @@ Example duplicate response:
 }
 ```
 
+See [the webhook duplicate delivery operational guide](docs/webhook-duplicate-delivery.md) for provider scoping, lease recovery, and duplicate response troubleshooting.
+
 Example failure response when verification or processing fails:
 
 ```json
@@ -199,6 +203,8 @@ const databaseUrl = makeSqliteDbUrlForTests();
 ```
 
 Run `bun test tests/runtime/atomic-idempotency-concurrency.test.ts` to check PostgreSQL concurrency. It skips five PostgreSQL cases when both `TEST_POSTGRES_URL` and `DATABASE_URL` are unset. CI and `REQUIRE_POSTGRES_TESTS` require a working PostgreSQL connection.
+
+Run `bun test tests/runtime/postgres-migration-lock.integration.test.ts` to check that two independent connections can migrate the same disposable PostgreSQL database without duplicate migration records or partial schema changes, and that a failed migration can be retried. Like the other PostgreSQL integration suites, it skips when neither `TEST_POSTGRES_URL` nor `DATABASE_URL` is set.
 
 Run `bun test tests/core/plugin-lifecycle.test.ts` to check reverse-order cleanup during shutdown and initialization rollback. The tests also check that cleanup failures do not prevent database disconnect.
 
@@ -338,8 +344,12 @@ curl -s \
 ## Docs
 
 - [Configuration Reference](./docs/configuration-reference.md) – Complete guide to all configuration options, their status, and usage
+- [Production Configuration Review Checklist](./docs/production-checklist.md) – Host deployment review checklist, operational hardening, and roadmap gates
+- [Staging-to-production Network Isolation Check](./docs/network-isolation-check.md) – Pre-deploy gate for network, passphrase, signer, issuer, and Horizon values
+- [Webhook Duplicate Delivery Guide](./docs/webhook-duplicate-delivery.md) – Operational guide for provider-scoped deduplication, replay responses, and troubleshooting
 - [Database Migrations and Recovery](./docs/database-migrations.md)
 - [Customer Data Deletion and Retention Boundaries](./docs/customer-data-deletion-boundaries.md)
+- [PostgreSQL Connectivity Incident Response](./docs/postgresql-connectivity-incident-response.md)
 - [Architecture Overview](./ARCHITECTURE.md)
 - [Contributing Guide](./CONTRIBUTING.md)
 - [Roadmap](./ROADMAP.md)
