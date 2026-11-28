@@ -348,6 +348,7 @@ curl -s \
 - [Staging-to-production Network Isolation Check](./docs/network-isolation-check.md) – Pre-deploy gate for network, passphrase, signer, issuer, and Horizon values
 - [Webhook Duplicate Delivery Guide](./docs/webhook-duplicate-delivery.md) – Operational guide for provider-scoped deduplication, replay responses, and troubleshooting
 - [Database Migrations and Recovery](./docs/database-migrations.md)
+- [Customer Data Deletion and Retention Boundaries](./docs/customer-data-deletion-boundaries.md)
 - [PostgreSQL Connectivity Incident Response](./docs/postgresql-connectivity-incident-response.md)
 - [Architecture Overview](./ARCHITECTURE.md)
 - [Contributing Guide](./CONTRIBUTING.md)
